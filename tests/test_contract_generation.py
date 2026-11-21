@@ -87,6 +87,36 @@ def test_write_promotes_staged_outputs_and_leaves_no_staging_directory(tmp_path:
     assert not list(output_dir.glob(".cortex-contract-*"))
 
 
+def test_staged_contracts_use_lf_on_all_platforms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Simulate Windows so both staging paths must opt into LF."""
+    original_write_text = Path.write_text
+
+    def simulate_windows_write_text(
+        path: Path,
+        data: str,
+        *,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if newline is None:
+            data = data.replace("\n", "\r\n")
+        return original_write_text(
+            path, data, encoding=encoding, errors=errors, newline="\n"
+        )
+
+    monkeypatch.setattr(Path, "write_text", simulate_windows_write_text)
+    specification = _specification({"Colour": {"type": "string", "enum": ["red"]}})
+    output_dir = tmp_path / "contracts"
+    generate_contracts.write_contracts(specification, output_dir)
+
+    for name in ("openapi.json", "cortex-api.ts"):
+        assert b"\r\n" not in (output_dir / name).read_bytes(), f"{name} contains CRLF"
+    assert generate_contracts.check_contracts(specification, output_dir) == []
+
+
 def test_cli_requires_an_explicit_mode():
     with pytest.raises(SystemExit):
         generate_contracts._parser().parse_args([])

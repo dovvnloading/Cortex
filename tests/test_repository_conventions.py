@@ -49,6 +49,39 @@ def _job_block(workflow: str, job: str) -> str:
     return match.group(1)
 
 
+# -- Line endings ------------------------------------------------------------
+
+
+def test_tracked_text_files_are_lf() -> None:
+    """Tracked text must be LF-normalized in the Git index on every platform."""
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not available")
+
+    result = subprocess.run(
+        [git, "ls-files", "--eol", "-z"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    violations = []
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        metadata, separator, path = entry.partition("\t")
+        assert separator, f"unexpected git ls-files --eol entry: {entry!r}"
+        index_eol = metadata.split()[0]
+        if index_eol == "i/mixed" or (
+            index_eol == "i/crlf" and Path(path).suffix.lower() not in {".ps1", ".cmd", ".bat"}
+        ):
+            violations.append(f"{path}: {index_eol}")
+
+    assert not violations, "tracked text files must have LF in the Git index:\n" + "\n".join(violations)
+
+
 # -- Git hooks ---------------------------------------------------------------
 
 
