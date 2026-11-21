@@ -161,6 +161,18 @@ def _final() -> str:
     return json.dumps({"text": "Resource failure was reported by the sandbox.", "finish": "stop", "tool_calls": []})
 
 
+def _python_output(output: str, staged_python: Path) -> str:
+    """Ignore only CPython's exact staged-interpreter startup warning.
+
+    Python 3.13+ may emit this first line inside an AppContainer. Retain all
+    other output so payload errors still fail the resource assertions.
+    """
+    text = output.strip()
+    warning = f"Failed to find real location of {staged_python / 'python.exe'}"
+    first, delimiter, rest = text.partition("\n")
+    return rest.strip() if delimiter and first.strip() == warning else text
+
+
 class _Model:
     tool_protocol_capabilities = RuntimeCapabilities(json_schema=True)
 
@@ -265,6 +277,7 @@ def test_fork_bomb_hits_real_job_process_limit_and_all_children_die(
 ) -> None:
     monkeypatch.setattr(base, "_DEFAULT_LIMITS", _limits(active_processes=5))
     executable = staged_python / "python.exe"
+    # A low-box child cannot open NUL: inherit the launcher-provided handles.
     script = (
         "import json,pathlib,subprocess,sys\n"
         f"exe={str(executable)!r}\n"
@@ -272,7 +285,7 @@ def test_fork_bomb_hits_real_job_process_limit_and_all_children_die(
         "for _ in range(20):\n"
         " try:\n"
         "  child=subprocess.Popen([exe,'-c','import time;time.sleep(30)'],"
-        " stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        " stdin=None,stdout=None,stderr=None)\n"
         " except OSError as exc: blocked.append(getattr(exc,'winerror',None))\n"
         " else: pids.append(child.pid)\n"
         "pathlib.Path('spawn-report.json').write_text(json.dumps({'pids':pids,'blocked':blocked}))\n"
@@ -283,6 +296,7 @@ def test_fork_bomb_hits_real_job_process_limit_and_all_children_die(
     with _case(tmp_path, kind, script, isolated_launchers) as (copy, ledger, run_id, loop, model, _shell):
         result = _approve_and_run(ledger, run_id, loop, model, kind, copy)
         assert result.get("timed_out") is False and result["exit_code"] == 27, result
+        assert "PROCESS_LIMIT_ENFORCED" in _python_output(result["output"], staged_python), result
         report = json.loads((copy.path / "spawn-report.json").read_text())
         pids = report["pids"]
         assert 1 <= len(pids) <= 4, report
@@ -297,7 +311,7 @@ def test_fork_bomb_hits_real_job_process_limit_and_all_children_die(
 @pytest.mark.parametrize("limit_kind", ["process", "job"])
 def test_memory_bomb_is_rejected_by_real_job_commit_limits(
     tmp_path: Path, isolated_launchers: list[AppContainerLauncher | JobOnlyLauncher],
-    monkeypatch: pytest.MonkeyPatch, kind: str, limit_kind: str,
+    staged_python: Path, monkeypatch: pytest.MonkeyPatch, kind: str, limit_kind: str,
 ) -> None:
     caps = (
         _limits(process_memory_bytes=96 * _MIB, job_memory_bytes=256 * _MIB)
@@ -322,8 +336,9 @@ def test_memory_bomb_is_rejected_by_real_job_commit_limits(
         result = _approve_and_run(ledger, run_id, loop, model, kind, copy)
         assert result.get("timed_out") is False, result
         assert result["exit_code"] != 0, result
-        assert "ALLOCATION_STARTED" in str(result.get("output", "")), result
-        assert "MEMORY_LIMIT_BYPASSED" not in str(result.get("output", ""))
+        output = _python_output(result["output"], staged_python)
+        assert "ALLOCATION_STARTED" in output, result
+        assert "MEMORY_LIMIT_BYPASSED" not in output
     _check_profiles(isolated_launchers, previous)
 
 
@@ -339,7 +354,7 @@ def test_cpu_spin_timeout_kills_its_real_job_descendant_and_cannot_report_zero(
         "import pathlib,subprocess\n"
         f"exe={str(executable)!r}\n"
         "child=subprocess.Popen([exe,'-c','while True: pass'],"
-        " stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        " stdin=None,stdout=None,stderr=None)\n"
         "pathlib.Path('cpu-child.txt').write_text(str(child.pid))\n"
         "print('CPU_SPINNING',flush=True)\n"
         "while True: pass\n"
@@ -351,6 +366,7 @@ def test_cpu_spin_timeout_kills_its_real_job_descendant_and_cannot_report_zero(
         result = _approve_and_run(ledger, run_id, loop, model, kind, copy)
         assert result["timed_out"] is True, result
         assert result["exit_code"] is None or result["exit_code"] != 0, result
+        assert "CPU_SPINNING" in _python_output(result["output"], staged_python), result
         assert (copy.path / "cpu-child.txt").exists(), "CPU payload never spawned its child"
         child_pid = int((copy.path / "cpu-child.txt").read_text())
         _assert_reaped([child_pid])
@@ -361,7 +377,7 @@ def test_cpu_spin_timeout_kills_its_real_job_descendant_and_cannot_report_zero(
 @pytest.mark.parametrize("kind", ["appcontainer", "jobonly"])
 def test_oversized_workcopy_file_is_not_accepted_into_real_project(
     tmp_path: Path, isolated_launchers: list[AppContainerLauncher | JobOnlyLauncher],
-    monkeypatch: pytest.MonkeyPatch, kind: str,
+    staged_python: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
     monkeypatch.setattr(base, "_DEFAULT_LIMITS", _limits())
     size = MAX_WORKSPACE_FILE_BYTES + 4096
@@ -375,6 +391,7 @@ def test_oversized_workcopy_file_is_not_accepted_into_real_project(
     with _case(tmp_path, kind, script, isolated_launchers) as (copy, ledger, run_id, loop, model, _shell):
         result = _approve_and_run(ledger, run_id, loop, model, kind, copy)
         assert result["exit_code"] == 29, result
+        assert "OVERSIZED_FILE_STAGED_ONLY" in _python_output(result["output"], staged_python), result
         assert (copy.path / "oversized.py").stat().st_size == size
         assert "oversized.py" not in copy.changeset()
         with pytest.raises(WorkCopyError) as denied:
@@ -431,11 +448,12 @@ def test_background_tree_is_killed_automatically_at_live_run_end(
     monkeypatch.setattr(base, "_DEFAULT_LIMITS", _limits())
     monkeypatch.setattr(agent_runs, "DEFAULT_PROBE_CONTEXT_SIZE", 8192)
     executable = staged_python / "python.exe"
+    # The background child inherits the preopened stdio handles, not NUL.
     script = (
         "import json,os,pathlib,subprocess,time\n"
         f"exe={str(executable)!r}\n"
         "child=subprocess.Popen([exe,'-c','import time;time.sleep(30)'],"
-        " stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        " stdin=None,stdout=None,stderr=None)\n"
         "pathlib.Path('background.json').write_text(json.dumps({'parent':os.getpid(),'child':child.pid}))\n"
         "print('BACKGROUND_READY',flush=True)\n"
         "while True: time.sleep(0.05)\n"
