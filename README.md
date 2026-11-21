@@ -322,7 +322,7 @@ files from that folder. A cloud model asks separately before sending the
 goal and project context to the named provider.
 
 Every live Agent run exposes work-copy `list_dir`, `glob`, `grep`
-and `read_file` for bounded file research, `update_plan` for a visible
+and `read_file` for bounded file research, `update_plan` for a bounded
 task plan, and `web_fetch` for public HTTP(S) text references. The
 selected mode determines which other tools are registered:
 
