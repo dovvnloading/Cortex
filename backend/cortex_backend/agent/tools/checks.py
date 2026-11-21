@@ -13,8 +13,10 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
-from typing import Final
+import re
+from typing import Final, Literal
 
+from ..policy import classify
 from ..protocol import ToolCall, ToolSpec
 from ..sandbox.base import canonical_workcopy
 from ..tool_registry import NeedsApproval, ToolContext, ToolRegistry, ToolResult
@@ -30,6 +32,8 @@ _JS_SCRIPTS: Final = ("test", "lint", "build", "typecheck")
 class DetectedCheck:
     key: str
     command: str
+    # Opaque project hooks can run code that the fixed command conceals.
+    risk: Literal["safe", "ask", "network", "dangerous"] = "safe"
 
 
 def _quoted(value: str) -> str:
@@ -66,7 +70,14 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     files = _files(root)
     checks: list[DetectedCheck] = []
     if any(PurePosixPath(p).name in {"pyproject.toml", "pytest.ini", "setup.cfg"} for p in files):
-        checks.append(DetectedCheck("pytest", "python -m pytest"))
+        # Pytest addopts can load arbitrary plugins; conftest is itself executable.
+        hooks = any(PurePosixPath(p).name == "conftest.py" for p in files)
+        options = any(
+            PurePosixPath(p).name in {"pyproject.toml", "pytest.ini", "setup.cfg"}
+            and re.search(rb"(?m)^\s*addopts\s*=", body) is not None
+            for p, body in files.items()
+        )
+        checks.append(DetectedCheck("pytest", "python -m pytest", "ask" if hooks or options else "safe"))
 
     for path in sorted(files):
         item = PurePosixPath(path)
@@ -84,10 +95,18 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
                 if not isinstance(script, str) or not script.strip():
                     continue
                 command = f"npm run {name}" if directory == "." else f"npm --prefix {_quoted(directory)} run {name}"
-                checks.append(DetectedCheck(f"npm:{name}:{path}", command))
+                # The launcher sees "npm run test", not the script body.
+                # Classify explicit dangerous/network shell intent before that
+                # wrapper can gain automatic build/test permission.
+                script_class = classify(script, "cmd", "appcontainer").cls
+                risk = script_class if script_class in {"dangerous", "network"} else "safe"
+                checks.append(DetectedCheck(f"npm:{name}:{path}", command, risk))
         elif item.name == "Cargo.toml":
             command = "cargo test" if directory == "." else f"cargo test --manifest-path {_quoted(path)}"
-            checks.append(DetectedCheck(f"cargo:{path}", command))
+            build_hook = str(item.parent / "build.rs") in files or re.search(
+                rb"(?m)^\s*build\s*=", files[path],
+            ) is not None
+            checks.append(DetectedCheck(f"cargo:{path}", command, "ask" if build_hook else "safe"))
         elif item.name == "go.mod":
             command = "go test ./..." if directory == "." else f"go -C {_quoted(directory)} test ./..."
             checks.append(DetectedCheck(f"go:{path}", command))
@@ -95,8 +114,17 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     # A solution already contains its projects; do not run every csproj again.
     solutions = sorted(path for path in files if path.casefold().endswith(".sln"))
     projects = sorted(path for path in files if path.casefold().endswith(".csproj"))
+    # MSBuild targets can execute commands before tests, including when a
+    # solution rather than an individual project is selected.
+    build_hooks = any(
+        b"<exec" in files[path].lower()
+        for path in files
+        if path.casefold().endswith((".csproj", "directory.build.targets", "directory.build.props"))
+    )
     for path in solutions or projects:
-        checks.append(DetectedCheck(f"dotnet:{path}", f"dotnet test {_quoted(path)}"))
+        checks.append(DetectedCheck(
+            f"dotnet:{path}", f"dotnet test {_quoted(path)}", "ask" if build_hooks else "safe",
+        ))
     return tuple(checks)
 
 
@@ -140,7 +168,7 @@ class CheckTools:
         outcome = self.shell.handle(ToolCall(call.id, "run_command", {
             "command": check.command, "timeout_s": _CHECK_TIMEOUT_S,
             "network": False, "shell": "powershell",
-        }), context)
+        }), context, check_risk=check.risk)
         if isinstance(outcome, NeedsApproval):
             return NeedsApproval({**outcome.request, "tool": "run_checks"})
         try:
