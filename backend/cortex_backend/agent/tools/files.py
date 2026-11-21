@@ -30,7 +30,7 @@ from cortex_backend.services.workspace_context import (
 )
 
 from ..protocol import ToolCall, ToolSpec
-from ..tool_registry import ToolContext, ToolInterrupted, ToolRegistry, ToolResult
+from ..tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult
 from ..workcopy import WorkCopyError, _check_root, _local_root, _valid_path
 
 MAX_FILE_BYTES: Final = 1024 * 1024
@@ -574,8 +574,36 @@ class _Files:
         return ToolResult(json.dumps({"error": code}), summary="Work-copy file tool refused", success=False)
 
 
-def register_file_tools(registry: ToolRegistry, workcopy_root: str | os.PathLike[str]) -> None:
-    """Register tools only on the explicitly selected agent work-copy registry."""
+_READ_ONLY_TOOLS: Final = frozenset({"list_dir", "glob", "grep", "read_file"})
+
+
+def register_file_tools(
+    registry: ToolRegistry, workcopy_root: str | os.PathLike[str], *,
+    read_only: bool = False, require_approval: bool = False,
+) -> None:
+    """Offer work-copy tools, optionally withholding writes and gating each mutation.
+
+    Live runs set require_approval even in auto_sandboxed mode: a disposable
+    work copy is not proof of a verified process sandbox. The only way through
+    the gate is ToolContext.approved, supplied after a one-shot ledger decision.
+    """
     files = _Files(workcopy_root)
+
+    def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+        if require_approval and call.name not in _READ_ONLY_TOOLS and not context.approved:
+            request: dict[str, object] = {
+                "tool": call.name,
+                "summary": "Stage this change in the disposable work copy.",
+            }
+            if call.name == "move_file":
+                request["source"] = str(call.arguments.get("source", ""))
+                request["destination"] = str(call.arguments.get("destination", ""))
+            else:
+                request["path"] = str(call.arguments.get("path", ""))
+            return NeedsApproval(request)
+        return files.handle(call, context)
+
     for spec in FILE_TOOLS:
-        registry.register(spec, files.handle)
+        if read_only and spec.name not in _READ_ONLY_TOOLS:
+            continue
+        registry.register(spec, handle)

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from cortex_backend.services.llm import _fence_untrusted, _load_asset
 
-from .protocol import ModelTurn, ProtocolError, ToolCall, _instructions, call_model
+from .protocol import ModelTurn, ProtocolError, ProtocolPath, ToolCall, _instructions, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
 from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
 
@@ -156,6 +156,8 @@ class AgentLoop:
         context_providers: Sequence[ContextProvider] = (),
         after_tool: AfterTool | None = None,
         before_final: BeforeFinal | None = None,
+        protocol_path: ProtocolPath | None = None,
+        model_options: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self.run_store = run_store
@@ -169,6 +171,8 @@ class AgentLoop:
         self.context_providers = tuple(context_providers)
         self.after_tool = after_tool
         self.before_final = before_final
+        self.protocol_path = protocol_path
+        self.model_options = dict(model_options or {})
         self.clock = clock
         self.budgets = budgets if isinstance(budgets, LoopBudgets) else LoopBudgets().narrowed(budgets, clamp=False)
         self._states: dict[str, _State] = {}
@@ -598,7 +602,8 @@ class AgentLoop:
             try:
                 turn: ModelTurn = call_model(
                     self.client, model=self.model, messages=messages, tools=self.registry.specs(),
-                    options={}, cancellation_event=state.cancellation,
+                    options=dict(self.model_options), cancellation_event=state.cancellation,
+                    protocol_path=self.protocol_path,
                 )
             except ProtocolError:
                 state.invalid_replies += 1
