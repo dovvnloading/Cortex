@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -33,10 +34,12 @@ def test_profile_name_rejects_injection(tmp_path: Path):
 def test_environment_is_an_allowlist_and_tool_dirs_are_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tools = tmp_path / "tools"
     tools.mkdir()
-    program = tools / "python"
+    program = tools / ("python.exe" if sys.platform == "win32" else "python")
     program.write_text("#!/bin/sh\nexit 0\n")
     program.chmod(0o755)
     monkeypatch.setenv("PATH", str(tools))
+    if sys.platform == "win32":
+        monkeypatch.setenv("PATHEXT", ".EXE;.CMD;.BAT")
     monkeypatch.setenv("SECRET_ACCESS_TOKEN", "should-not-be-in-a-child")
     monkeypatch.setattr(base, "system_directory", lambda: None)
 
@@ -94,8 +97,54 @@ def test_non_profile_failure_never_falls_back(tmp_path: Path, monkeypatch: pytes
     assert launcher.level == "appcontainer"
 
 
+@pytest.fixture(scope="module")
+def _staged_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A self-contained Python runtime in pytest's TEMP, never an installed toolchain ACL."""
+    if sys.platform != "win32":
+        pytest.skip("Windows-only toolchain fixture")
+    directory = tmp_path_factory.mktemp("appcontainer-toolchain")
+    root = Path(sys.base_prefix)
+    executable = root / "python.exe"
+    if not executable.is_file():
+        executable = Path(getattr(sys, "_base_executable", sys.executable))
+    shutil.copy2(executable, directory / "python.exe")
+    for parent in (root, executable.parent):
+        for dll in parent.glob("*.dll"):
+            target = directory / dll.name
+            if not target.exists():
+                shutil.copy2(dll, target)
+    for name in ("Lib", "DLLs"):
+        source = root / name
+        assert source.is_dir(), f"Python standard library is missing: {source}"
+        shutil.copytree(source, directory / name, ignore=shutil.ignore_patterns(
+            "site-packages", "__pycache__", "test", "tests",
+        ))
+    for archive in root.glob("python*.zip"):
+        shutil.copy2(archive, directory / archive.name)
+    # Isolated Python search path: no installed library or user site directories.
+    (directory / f"python{sys.version_info.major}{sys.version_info.minor}._pth").write_text(
+        "Lib\nDLLs\n", encoding="utf-8",
+    )
+    return directory
+
+
+@pytest.fixture
+def isolated_windows_toolchain(_staged_python: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the pytest-owned runtime directory receives toolchain ACL changes."""
+    system = base.system_directory()
+    assert system is not None
+    cmd = system / "cmd.exe"
+    assert cmd.is_file()
+    monkeypatch.setattr(appcontainer, "toolchain", lambda: (
+        {"python": _staged_python / "python.exe", "cmd": cmd},
+        (_staged_python, system),
+    ))
+
+
 @windows_only
-def test_windows_python_and_cmd_and_profile_are_cleaned(tmp_path: Path):
+def test_windows_python_and_cmd_and_profile_are_cleaned(
+    tmp_path: Path, isolated_windows_toolchain: None,
+):
     run_id = uuid4().hex
     launcher = AppContainerLauncher(tmp_path, run_id)
     output, status = _run(launcher, ["python", "-c", "print('python-ok')"], tmp_path)
@@ -115,7 +164,9 @@ def test_windows_python_and_cmd_and_profile_are_cleaned(tmp_path: Path):
 
 
 @windows_only
-def test_windows_appcontainer_cannot_read_or_write_outside_workcopy(tmp_path: Path):
+def test_windows_appcontainer_cannot_read_or_write_outside_workcopy(
+    tmp_path: Path, isolated_windows_toolchain: None,
+):
     workcopy = tmp_path / "work"
     workcopy.mkdir()
     private_file = tmp_path / "secret.txt"
@@ -140,7 +191,9 @@ def test_windows_appcontainer_cannot_read_or_write_outside_workcopy(tmp_path: Pa
 
 
 @windows_only
-def test_windows_network_off_denies_loopback_and_public_ip(tmp_path: Path):
+def test_windows_network_off_denies_loopback_and_public_ip(
+    tmp_path: Path, isolated_windows_toolchain: None,
+):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -162,7 +215,9 @@ def test_windows_network_off_denies_loopback_and_public_ip(tmp_path: Path):
 
 
 @windows_only
-def test_windows_timeout_kills_descendants_and_cleans_profile(tmp_path: Path):
+def test_windows_timeout_kills_descendants_and_cleans_profile(
+    tmp_path: Path, isolated_windows_toolchain: None,
+):
     marker = tmp_path / "escaped.txt"
     child_code = f"import time,pathlib;time.sleep(3);pathlib.Path({str(marker)!r}).write_text('bad')"
     parent_code = (
@@ -181,21 +236,36 @@ def test_windows_timeout_kills_descendants_and_cleans_profile(tmp_path: Path):
     assert not marker.exists()
 
 
-def _fake_windows_launch(monkeypatch: pytest.MonkeyPatch, workcopy: Path, *, fail_at: str = "") -> list[str]:
+def _fake_windows_launch(
+    monkeypatch: pytest.MonkeyPatch, workcopy: Path, *, fail_at: str = "",
+    policy: str = "grantable",
+) -> list[str]:
     """Record the containment order without starting Win32 on a Linux dev host."""
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     events: list[str] = []
     sid = "S-1-15-2-1-2-3-4-5-6-7"
-    tool_dir = workcopy.parent / "toolchain"
+    tool_dir = workcopy.parent / f"{workcopy.name}-toolchain"
     tool_dir.mkdir(exist_ok=True)
     tool = tool_dir / "python.exe"
     tool.touch()
+    optional_dir = workcopy.parent / f"{workcopy.name}-optional"
+    if fail_at == "optional-grant":
+        optional_dir.mkdir(exist_ok=True)
+        (optional_dir / "dotnet.exe").touch()
+    tools = {"python": tool}
+    folders = [tool_dir]
+    if fail_at == "optional-grant":
+        tools["dotnet"] = optional_dir / "dotnet.exe"
+        folders.append(optional_dir)
     monkeypatch.setattr(appcontainer, "_on_windows", lambda: True)
     monkeypatch.setattr(appcontainer, "_sweep_once", lambda: None)
     monkeypatch.setattr(appcontainer, "_creation_gate", nullcontext)
-    monkeypatch.setattr(appcontainer, "toolchain", lambda: ({"python": tool}, (tool_dir,)))
+    monkeypatch.setattr(appcontainer, "toolchain", lambda: (tools, tuple(folders)))
+    monkeypatch.setattr(appcontainer.win_acl, "tool_folder_policy", lambda path: (
+        policy if path == tool_dir else "grantable"
+    ))
     monkeypatch.setattr(appcontainer, "child_environment", lambda *_a: {"PATH": str(tool_dir)})
     monkeypatch.setattr(appcontainer, "system_directory", lambda: None)
     monkeypatch.setattr(win_appcontainer, "derive_profile_sid", lambda *_a: sid)
@@ -212,7 +282,12 @@ def _fake_windows_launch(monkeypatch: pytest.MonkeyPatch, workcopy: Path, *, fai
     class Journal:
         def __init__(self, _name, _sid, paths):
             events.append("journal")
-            assert paths == [workcopy, tool_dir]
+            expected = [workcopy]
+            if policy == "grantable":
+                expected.append(tool_dir)
+            if fail_at == "optional-grant":
+                expected.append(optional_dir)
+            assert paths == expected
 
         def finish(self, *, delete_profile: bool, revoke: bool = True):
             events.append(f"cleanup:{delete_profile}:{revoke}")
@@ -254,8 +329,10 @@ def _fake_windows_launch(monkeypatch: pytest.MonkeyPatch, workcopy: Path, *, fai
 
     def grant(path, _sid, *, access):
         events.append(f"grant-{access}")
-        if fail_at == "grant":
-            raise OSError("grant denied")
+        if (fail_at == "grant" and path == tool_dir) or (
+            fail_at == "optional-grant" and path == optional_dir
+        ):
+            raise subprocess.CalledProcessError(5, ["icacls", str(path), "/grant"])
 
     monkeypatch.setattr(appcontainer, "_Journal", Journal)
     monkeypatch.setattr(appcontainer, "_acl", grant)
@@ -281,8 +358,12 @@ def test_mocked_failed_start_cannot_leave_a_job_or_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
 ):
     events = _fake_windows_launch(monkeypatch, tmp_path, fail_at=stage)
-    with pytest.raises(OSError, match=f"{stage} denied"):
-        AppContainerLauncher(tmp_path, stage).start(["python"], tmp_path)
+    if stage == "grant":
+        with pytest.raises(PermissionError, match="toolchain unavailable"):
+            AppContainerLauncher(tmp_path, stage).start(["python"], tmp_path)
+    else:
+        with pytest.raises(OSError, match=f"{stage} denied"):
+            AppContainerLauncher(tmp_path, stage).start(["python"], tmp_path)
     assert "resume" not in events
     assert "cleanup:True:True" in events
     assert ("close-job" in events) == (stage == "assign")
@@ -296,3 +377,99 @@ def test_profile_creation_failure_is_not_relabelled_as_generic_launch_failure(
     with pytest.raises(win_appcontainer.ProfileCreationError):
         AppContainerLauncher(tmp_path, "missing-profile").start(["python"], tmp_path)
     assert events == ["journal", "create-profile", "cleanup:False:False"]
+
+
+def test_shared_all_app_packages_rx_skips_tool_acl_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    events = _fake_windows_launch(monkeypatch, tmp_path, policy="shared")
+    AppContainerLauncher(tmp_path, "shared-rx").start(["python"], tmp_path)
+    assert events == [
+        "journal", "create-profile", "grant-M", "spawn-suspended",
+        "job", "assign", "resume",
+    ]
+
+
+def test_unmodifiable_toolchain_is_not_granted_or_executed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    events = _fake_windows_launch(monkeypatch, tmp_path, policy="unavailable")
+    with pytest.raises(PermissionError, match="toolchain unavailable"):
+        AppContainerLauncher(tmp_path, "unavailable").start(["python"], tmp_path)
+    assert events == ["journal", "create-profile", "grant-M", "cleanup:True:True"]
+
+
+def test_failed_optional_toolchain_grant_does_not_abort_another_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    events = _fake_windows_launch(monkeypatch, tmp_path, fail_at="optional-grant")
+    AppContainerLauncher(tmp_path, "other-tool-works").start(["python"], tmp_path)
+    assert events.count("grant-RX") == 2
+    assert "spawn-suspended" in events and "resume" in events
+
+
+def test_teardown_attempts_every_revocation_and_deletes_profile_on_icacls_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    paths = tuple(tmp_path / name for name in ("work", "python", "dotnet"))
+    journal = object.__new__(appcontainer._Journal)
+    journal.name = "Cortex.Agent.cleanup-test"
+    journal.sid = "S-1-15-2-1-2-3-4-5-6-7"
+    journal.paths = paths
+    journal.path = tmp_path / f"{journal.name}.json"
+    journal.path.write_text("test journal")
+    journal._file = journal.path.open("r+b")
+    revoked: list[Path] = []
+    deleted: list[str] = []
+
+    def revoke(path: Path, _sid: str, *, access: str | None):
+        assert access is None
+        revoked.append(path)
+        if path != paths[0]:
+            raise subprocess.CalledProcessError(5, ["icacls", str(path), "/remove:g"])
+
+    monkeypatch.setattr(appcontainer, "_acl", revoke)
+    monkeypatch.setattr(win_appcontainer, "delete_profile", deleted.append)
+    with pytest.raises(OSError, match="could not remove 2 of 3"):
+        journal.finish(delete_profile=True)
+    assert revoked == list(reversed(paths))
+    assert deleted == [journal.name]
+    assert journal._file.closed
+    assert journal.path.exists()  # startup sweep retains the repair journal
+
+
+def test_profile_delete_failure_is_reported_after_revoking_aces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    revoked: list[Path] = []
+    paths = (tmp_path / "tool", tmp_path / "work")
+    monkeypatch.setattr(appcontainer, "_acl", lambda path, *_a, **_kw: revoked.append(path))
+
+    def fail_delete(_name: str):
+        raise OSError("profile deletion denied")
+
+    monkeypatch.setattr(win_appcontainer, "delete_profile", fail_delete)
+    with pytest.raises(OSError, match="profile deletion denied"):
+        appcontainer._cleanup_profile("Cortex.Agent.retry", "S-1-15-2-test", paths,
+                                      revoke=True, delete_profile=True)
+    assert revoked == list(reversed(paths))
+
+
+def test_all_application_packages_split_rx_aces_are_recognized(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Windows commonly uses folder (RX) and child (OI)(CI)(IO)(GR,GE) ACEs."""
+    from contextlib import nullcontext
+    import ctypes
+    from types import SimpleNamespace
+
+    from cortex_backend.agent.sandbox import win_acl
+
+    folder_ace = SimpleNamespace(kind=0, flags=0, mask=0x001200A9)
+    child_ace = SimpleNamespace(kind=0, flags=0x0B, mask=0xA0000000)
+    monkeypatch.setattr(win_acl, "_sid", lambda *_args: nullcontext("app-packages"))
+    monkeypatch.setattr(win_acl, "_function", lambda *_args: lambda *_a: True)
+    monkeypatch.setattr(win_acl, "_aces", lambda *_args: iter([
+        (folder_ace, object()), (child_ace, object()),
+    ]))
+    assert win_acl._app_packages_have_rx(object(), ctypes.c_void_p(1))

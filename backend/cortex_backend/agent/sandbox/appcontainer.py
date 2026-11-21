@@ -1,9 +1,9 @@
 """Per-run Windows low-box launcher and crash-recoverable AppContainer ACL ledger.
 
-No token is ever granted modify access outside the work copy. Individual
-profile SIDs (not ALL APPLICATION PACKAGES) receive inheritable RX on the
-resolved toolchain directories; the OS already grants System32 RX. Stale
-journals are replayed on the next launcher startup after an unclean exit.
+No token is ever granted modify access outside the work copy. Individual profile SIDs receive inheritable RX only on toolchain directories
+whose ACLs this user can change. Directories already readable/executable by
+ALL APPLICATION PACKAGES are left untouched. Stale journals are replayed on
+the next launcher startup after an unclean exit.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import sys
 import threading
 from typing import Any
 
+from cortex_backend.agent.sandbox import win_acl
 from cortex_backend.agent.sandbox.base import (
     ProcessHandle,
     RunningProcess,
@@ -77,6 +78,12 @@ def _acl(path: Path, sid: str, *, access: str | None) -> None:
             return  # the deleted directory no longer has its ACE
         raise FileNotFoundError(path)
     if access is None:
+        try:
+            if not win_acl.has_explicit_sid_grant(path, sid):
+                return  # /grant failed or this directory was already shared
+        except OSError:
+            # When the ACL cannot be inspected, still attempt revocation.
+            _LOG.warning("Could not inspect AppContainer ACE on %s; attempting removal", path)
         args = [system32("icacls.exe"), str(path), "/remove:g", f"*{sid}"]
     else:
         args = [system32("icacls.exe"), str(path), "/grant", f"*{sid}:(OI)(CI){access}"]
@@ -120,28 +127,50 @@ class _Journal:
             raise
 
     def finish(self, *, delete_profile: bool, revoke: bool = True) -> None:
-        """Revoke every planned grant, delete the profile, then clear the log."""
+        """Try every revocation and profile deletion, retaining a failed journal."""
         try:
-            if revoke:
-                _revoke(self.sid, self.paths)
-            if delete_profile:
-                win_appcontainer.delete_profile(self.name)
+            _cleanup_profile(self.name, self.sid, self.paths, revoke=revoke, delete_profile=delete_profile)
+        except Exception:
+            raise  # preserve the journal for the next startup sweep
+        else:
             self._file.close()
             self.path.unlink(missing_ok=True)
         finally:
             if not self._file.closed:
-                self._file.close()  # unlock; retain the journal for next startup
+                self._file.close()
 
 
 def _revoke(sid: str, paths: Sequence[Path]) -> None:
-    errors: list[OSError] = []
+    errors: list[Exception] = []
     for path in reversed(paths):
         try:
             _acl(path, sid, access=None)
-        except OSError as exc:
+        except Exception as exc:
+            # CalledProcessError is NOT an OSError; never stop at the first ACE.
+            _LOG.error("Could not remove AppContainer ACE for %s on %s: %s", sid, path, exc)
             errors.append(exc)
     if errors:
-        raise OSError("could not remove all agent AppContainer ACEs") from errors[0]
+        raise OSError(f"could not remove {len(errors)} of {len(paths)} agent AppContainer ACEs") from errors[0]
+
+
+def _cleanup_profile(
+    name: str, sid: str, paths: Sequence[Path], *, revoke: bool, delete_profile: bool,
+) -> None:
+    errors: list[tuple[str, Exception]] = []
+    if revoke:
+        try:
+            _revoke(sid, paths)
+        except Exception as exc:
+            errors.append(("ACE removal", exc))
+    if delete_profile:
+        try:
+            win_appcontainer.delete_profile(name)
+        except Exception as exc:
+            errors.append(("profile deletion", exc))
+    if errors:
+        details = "; ".join(f"{action}: {exc}" for action, exc in errors)
+        _LOG.error("AppContainer cleanup failed for %s: %s", name, details)
+        raise OSError(f"AppContainer cleanup failed for {name}: {details}") from errors[0][1]
 
 
 def _read_stale(path: Path, raw: bytes | None = None) -> tuple[str, str, tuple[Path, ...]]:
@@ -196,8 +225,7 @@ def _sweep_locked() -> None:
                 try:
                     file.seek(1)
                     name, sid, paths = _read_stale(path, file.read())
-                    _revoke(sid, paths)
-                    win_appcontainer.delete_profile(name)
+                    _cleanup_profile(name, sid, paths, revoke=True, delete_profile=True)
                 finally:
                     file.seek(0)
                     msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
@@ -243,15 +271,27 @@ class AppContainerLauncher:
         _sweep_once()
         directory = working_directory(cwd, self.workcopy)
         tools, folders = toolchain()
-        args = command_argv(argv, self.workcopy, tools)
+        args = command_argv(argv, self.workcopy, tools)  # reject escapes before creating a profile
         # env is deliberately ignored: the child receives *only* this allowlist.
         _ = env
-        environment = child_environment(self.workcopy, folders)
         system = system_directory()
         grant_paths = [self.workcopy]
+        unavailable: set[Path] = set()
         for folder in folders:
-            if folder != system and not within(folder, self.workcopy) and folder not in grant_paths:
+            if folder == system or within(folder, self.workcopy) or folder in grant_paths:
+                continue
+            try:
+                policy = win_acl.tool_folder_policy(folder)
+            except OSError as exc:
+                _LOG.warning("Toolchain %s unavailable (cannot read ACL): %s", folder, exc)
+                unavailable.add(folder)
+                continue
+            if policy == "grantable":
                 grant_paths.append(folder)
+            elif policy == "unavailable":
+                _LOG.warning("Toolchain %s unavailable (cannot change its ACL)", folder)
+                unavailable.add(folder)
+            # "shared": ALL APPLICATION PACKAGES already has inheritable RX.
         sid = win_appcontainer.derive_profile_sid(self.name)
         with _creation_gate():
             journal = _Journal(self.name, sid, grant_paths)
@@ -267,7 +307,27 @@ class AppContainerLauncher:
                 raise OSError("created profile SID differs from the recorded SID")
             for i, path in enumerate(grant_paths):
                 grants_attempted = True
-                _acl(path, sid, access="M" if i == 0 else "RX")
+                if i == 0:
+                    _acl(path, sid, access="M")  # never run without a writable work copy
+                else:
+                    try:
+                        _acl(path, sid, access="RX")
+                    except (OSError, subprocess.CalledProcessError) as exc:
+                        # An optional host tool must not require elevation to launch other tools.
+                        _LOG.warning("Toolchain %s unavailable (RX grant refused): %s", path, exc)
+                        unavailable.add(path)
+            available_tools = {name: tool for name, tool in tools.items() if tool.parent not in unavailable}
+            available_folders = tuple(folder for folder in folders if folder not in unavailable)
+            try:
+                args = command_argv(argv, self.workcopy, available_tools)
+            except PermissionError as exc:
+                requested = tools.get(argv[0].casefold().removesuffix(".exe").removesuffix(".cmd"))
+                if requested is None and Path(argv[0]).is_absolute():
+                    requested = Path(argv[0]).resolve(strict=True)
+                if requested is not None and requested.parent in unavailable:
+                    raise PermissionError(f"toolchain unavailable to AppContainer: {requested.parent}") from exc
+                raise
+            environment = child_environment(self.workcopy, available_folders)
             child = win_appcontainer.spawn_suspended(args, directory, environment, sid, network=network)
             job = KillOnCloseJob(job_limits(limits))
             job.assign(child.pid)
