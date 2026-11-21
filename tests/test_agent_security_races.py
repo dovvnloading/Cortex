@@ -412,7 +412,7 @@ def test_cancel_during_accept_keeps_batch_and_recovery_journal_consistent(
             return manager.cancel(run.id, owner=_OWNER)
 
         cancel_thread, cancelled = _thread(cancel, "race-cancel-accept")
-        assert cancel_started.wait(10), f"cancel submitted={cancel_started.is_set()}, run={manager.get(run.id, owner=_OWNER).status}"
+        assert cancel_started.wait(10), f"cancel submitted={cancel_started.is_set()}, accept_gate={entered.is_set()}"
         release.set()
         assert _joined(accept_thread, accepted, context="accept") == tuple(sorted(_NEW))
         cancelled_run = _joined(cancel_thread, cancelled, context="cancel during accept")
