@@ -21,6 +21,8 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
   const [accepted, setAccepted] = useState(false);
   const [discarded, setDiscarded] = useState(false);
   const [retry, setRetry] = useState(0);
+  const [recoveryConfirm, setRecoveryConfirm] = useState(false);
+  const [recoveredWithoutCopy, setRecoveredWithoutCopy] = useState(false);
   const inFlight = useRef(false);
 
   useEffect(() => {
@@ -36,10 +38,12 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
   }, [api, runId, retry]);
 
   const act = async (action: ReviewAction, paths: string[] = []): Promise<void> => {
-    if (inFlight.current || discarded || changes === null
+    const recoveringWithoutCopy = action === "undo" && changes === null && loadError !== null;
+    if (inFlight.current || discarded || (changes === null && !recoveringWithoutCopy)
       || (action === "accept" && (accepted || paths.length === 0))
       || (action === "discard" && accepted)
-      || (action === "undo" && !accepted)) return;
+      || (action === "undo" && !accepted && !recoveringWithoutCopy)
+      || recoveredWithoutCopy) return;
 
     inFlight.current = true;
     setBusy(action);
@@ -58,6 +62,7 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
       } else {
         const result = await api.undo(runId, true);
         setAccepted(false);
+        if (recoveringWithoutCopy) setRecoveredWithoutCopy(true);
         setNotice("Restored original project files: " + result.paths.join(", "));
       }
     } catch (cause) {
@@ -77,18 +82,35 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
     <section className="coding-panel" aria-label="Changes review">
       <h3>Review staged changes</h3>
       {changes === null && !loadError && <p role="status">Loading staged changes…</p>}
-      {loadError && (
+      {loadError && !recoveredWithoutCopy && (
         <>
           <p role="alert" className="coding-error">{loadError}</p>
-          <button type="button" className="coding-quiet" onClick={() => {
+          <button type="button" className="coding-quiet" disabled={busy !== null} onClick={() => {
             setChanges(null);
             setLoadError(null);
             setError(null);
             setNotice(null);
+            setRecoveryConfirm(false);
             setRetry((value) => value + 1);
           }}>Retry changeset</button>
+          <p className="coding-muted">If this work copy was discarded, previously accepted edits can still have a recovery checkpoint. No restoration happens without a separate confirmation.</p>
+          {error && <p role="alert" className="coding-error">{error}</p>}
+          {busy && <p role="status">Waiting for the server to confirm the action…</p>}
+          {recoveryConfirm ? (
+            <div role="group" aria-label="Undo confirmation">
+              <p>Restore previously accepted project files from this run? Unexpected file changes will be refused.</p>
+              <button type="button" className="coding-quiet" disabled={busy !== null}
+                onClick={() => setRecoveryConfirm(false)}>Cancel</button>
+              <button type="button" className="coding-primary" disabled={busy !== null}
+                onClick={() => { setRecoveryConfirm(false); void act("undo"); }}>Confirm undo</button>
+            </div>
+          ) : (
+            <button type="button" className="coding-quiet" disabled={busy !== null}
+              onClick={() => setRecoveryConfirm(true)}>Undo previously accepted changes</button>
+          )}
         </>
       )}
+      {recoveredWithoutCopy && <p role="status">{notice}</p>}
       {discarded ? <p role="status">{notice}</p> : changes !== null && (
         <ChangesReview
           summary="Review each proposed file change. Only your selected paths can be accepted, after a separate confirmation."
