@@ -248,6 +248,26 @@ def _sweep_once() -> None:
             _SWEEPED = True
 
 
+
+def _git_environment(workcopy: Path) -> dict[str, str]:
+    """Git gets an isolated home and no system/global configuration."""
+    home = workcopy / ".cortex-agent-git-home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    if not within(home.resolve(strict=True), workcopy):
+        raise ValueError("Git home escapes the work copy")
+    return {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_LFS_SKIP_SMUDGE": "1",
+    }
+
 class AppContainerLauncher:
     """One-shot launcher; a unique profile and journal belong to one command."""
 
@@ -328,6 +348,8 @@ class AppContainerLauncher:
                     raise PermissionError(f"toolchain unavailable to AppContainer: {requested.parent}") from exc
                 raise
             environment = child_environment(self.workcopy, available_folders, appcontainer=True)
+            if argv[0].casefold().removesuffix(".exe") == "git":
+                environment.update(_git_environment(self.workcopy))
             child = win_appcontainer.spawn_suspended(args, directory, environment, sid, network=network)
             job = KillOnCloseJob(job_limits(limits))
             job.assign(child.pid)
