@@ -208,6 +208,37 @@ class AgentRuns:
             raise AgentWorkflowError("not_found")
         return run
 
+    def _expire_active(self) -> None:
+        """Release a parked run when its one-shot approval has expired.
+
+        No worker is running while approval is parked. Expiry is a durable
+        store transition, not permission to replay an unapproved tool call.
+        """
+        with self._lock:
+            run_id = self._active_id
+            if run_id is None:
+                return
+            managed = self._live.get(run_id)
+            if managed is None or managed.driving:
+                return
+            run = self._owned(run_id, managed.owner)
+            if run.status != "waiting_approval":
+                return
+            try:
+                expired = self._ledger().expire_approvals(owner=managed.owner)
+            except Exception as exc:
+                raise AgentWorkflowError("agent_unavailable") from exc
+            for expired_id, seq in expired:
+                if expired_id != run_id:
+                    continue
+                current = self._owned(run_id, managed.owner)
+                self._emit(managed, "approval", {"seq": seq, "decision": "expired"})
+                self._emit(managed, "status", {
+                    "status": current.status, "stop_reason": current.stop_reason,
+                })
+                if current.status in _TERMINAL:
+                    self._active_id = None
+
     def _copy_for(self, run_id: str, owner: str) -> _LiveRun:
         self._owned(run_id, owner)
         managed = self._live.get(run_id)
@@ -263,6 +294,7 @@ class AgentRuns:
                 raise AgentWorkflowError("cloud_consent_required")
             if self._closed:
                 raise AgentWorkflowError("agent_unavailable")
+            self._expire_active()
             if self._active_id is not None:
                 raise AgentWorkflowError("busy")
             if self._client is None:
@@ -376,15 +408,18 @@ class AgentRuns:
                 managed.driving = False
 
     def list_runs(self, *, owner: str) -> list[AgentRun]:
+        self._expire_active()
         return self._ledger().list_runs(owner=owner)
 
     def get(self, run_id: str, *, owner: str) -> AgentRun:
+        self._expire_active()
         return self._owned(run_id, owner)
 
     def events(
         self, run_id: str, *, owner: str, after_id: int,
     ) -> tuple[list[AgentEvent], bool]:
         with self._lock:
+            self._expire_active()
             run = self._owned(run_id, owner)
             managed = self._live.get(run_id)
             if managed is None:
@@ -422,6 +457,11 @@ class AgentRuns:
                     decision="approved" if decision == "allow_once" else "rejected",
                 )
             except ApprovalExpiredError as exc:
+                self._emit(managed, "approval", {"seq": seq, "decision": "expired"})
+                self._emit(managed, "status", {
+                    "status": "failed", "stop_reason": "approval_expired",
+                })
+                self._active_id = None
                 raise AgentWorkflowError("approval_expired") from exc
             except (ApprovalUnavailableError, InvalidRunTransitionError) as exc:
                 raise AgentWorkflowError("approval_unavailable") from exc
