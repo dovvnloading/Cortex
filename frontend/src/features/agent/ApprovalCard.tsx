@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
 
 /** The command categories and sandbox levels reported by agent/policy.py. */
@@ -35,6 +35,9 @@ const commandStyle = {
  */
 export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: ApprovalCardProps) {
   const commandId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const commandToggleRef = useRef<HTMLButtonElement>(null);
+  const dangerousAcknowledgmentRef = useRef<HTMLInputElement>(null);
   const [visibleCommandFor, setVisibleCommandFor] = useState<ApprovalRequest | null>(null);
   const [reviewingDangerousFor, setReviewingDangerousFor] = useState<ApprovalRequest | null>(null);
   const [acknowledgedDangerousFor, setAcknowledgedDangerousFor] = useState<ApprovalRequest | null>(null);
@@ -51,14 +54,44 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
     && !request.network
     && (request.cls === "inspect" || request.cls === "build_test");
 
-  // Escape or dismissal closes locally without calling any approval callback.
-  // Base UI preserves the confirmation dialogs' focus and Escape behavior.
+  // Move focus to the second confirmation after its checkbox is mounted.
+  useLayoutEffect(() => {
+    if (reviewingDangerous) dangerousAcknowledgmentRef.current?.focus();
+  }, [reviewingDangerous]);
+
+  // Preserve a keyboard user's explicit focus even when the dialog's
+  // initial-focus effect runs after they have focused one of its buttons.
+  const initialFocus = useCallback(() => {
+    const active = document.activeElement;
+    return active instanceof HTMLElement && dialogRef.current?.contains(active)
+      ? active
+      : commandToggleRef.current;
+  }, []);
+
+  // Explicitly wrap Tab at the boundaries so focus cannot escape the card.
+  const trapTab = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab" || event.defaultPrevented) return;
+    const tabbable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? []).filter((element) => element.tabIndex >= 0 && !element.closest("[hidden], [inert]"));
+    if (tabbable.length === 0) return;
+    const activeIndex = tabbable.indexOf(document.activeElement as HTMLElement);
+    if (event.shiftKey && activeIndex <= 0) {
+      event.preventDefault();
+      tabbable[tabbable.length - 1].focus();
+    } else if (!event.shiftKey && (activeIndex === -1 || activeIndex === tabbable.length - 1)) {
+      event.preventDefault();
+      tabbable[0].focus();
+    }
+  };
+
+  // Escape or dismissal closes locally without consent; Base UI restores focus.
   return (
     <AlertDialog.Root
       open={dismissedFor !== requestKey}
       onOpenChange={(open) => { if (!open) setDismissedFor(requestKey); }}
     >
-      <DialogContent>
+      <DialogContent ref={dialogRef} initialFocus={initialFocus} finalFocus={true} onKeyDownCapture={trapTab}>
         <AlertDialog.Title>Allow this command?</AlertDialog.Title>
         <AlertDialog.Description className="delete-dialog-description">
           {request.plain_text}
@@ -84,6 +117,7 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
 
         <div style={{ marginTop: 16 }}>
           <button
+            ref={commandToggleRef}
             type="button"
             className="button button-secondary"
             aria-expanded={commandVisible}
@@ -103,8 +137,8 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
                 <pre style={commandStyle}><code>{request.command}</code></pre>
                 <label className="coding-consent" style={{ marginTop: 12 }}>
                   <input
+                    ref={dangerousAcknowledgmentRef}
                     type="checkbox"
-                    autoFocus
                     checked={dangerousConfirmed}
                     onChange={(event) => setAcknowledgedDangerousFor(event.target.checked ? requestKey : null)}
                   />
