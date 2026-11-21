@@ -205,6 +205,7 @@ def register(
         run = _call(
             workflow.start, owner=principal.session_id, project_root=payload.project_root,
             goal=payload.goal, mode=payload.mode, model=payload.model, budgets=payload.budgets,
+            confirmed_project=payload.confirmed_project, confirmed_cloud=payload.confirmed_cloud,
         )
         return _response(run)
 
