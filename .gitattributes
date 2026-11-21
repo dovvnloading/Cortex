@@ -1,0 +1,24 @@
+# Normalize text in the index and on every platform.
+* text=auto eol=lf
+
+# Windows scripts keep CRLF in the working tree.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary files must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.db binary
+*.sqlite binary
+*.exe binary
+*.dll binary
