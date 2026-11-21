@@ -937,9 +937,10 @@ export function ChatPage({
   // These two go to every transcript card, so each must keep one identity
   // across renders or the cards' memo is defeated. `startGeneration` and `fork`
   // close over live state and change every render, so they are read through a
-  // ref that is refreshed after each one.
+  // ref. Update it before the loaded transcript becomes interactive: a passive
+  // effect could leave the first Retry click using the previous messages.
   const latestHandlers = useRef({ messages, startGeneration, fork });
-  useEffect(() => {
+  useLayoutEffect(() => {
     latestHandlers.current = { messages, startGeneration, fork };
   });
   const regenerateFrom = useCallback((message: ChatMessage, index: number) => {
