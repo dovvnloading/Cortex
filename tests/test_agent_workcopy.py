@@ -14,6 +14,10 @@ from cortex_backend.agent.workcopy import WorkCopyError, create
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 
 
+_DELETED_FILE_BYTES = b"old file\n"
+_NEW_FILE_BYTES = b"new = 1\n"
+_EMPTY_FILE_BYTES = b""
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
@@ -23,16 +27,16 @@ def _project(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "src").mkdir()
     (root / "src" / "app.py").write_bytes(b"print('original')\r\n")
-    (root / "delete.py").write_text("old file\n", encoding="utf-8")
-    (root / "empty.py").write_bytes(b"")
-    (root / ".gitignore").write_text("ignored.py\nlogs/\n*.tmp\n", encoding="utf-8")
-    (root / "ignored.py").write_text("ignore me", encoding="utf-8")
+    (root / "delete.py").write_bytes(_DELETED_FILE_BYTES)
+    (root / "empty.py").write_bytes(_EMPTY_FILE_BYTES)
+    (root / ".gitignore").write_bytes(b"ignored.py\nlogs/\n*.tmp\n")
+    (root / "ignored.py").write_bytes(b"ignore me")
     (root / "logs").mkdir()
-    (root / "logs" / "private.py").write_text("ignore me", encoding="utf-8")
+    (root / "logs" / "private.py").write_bytes(b"ignore me")
     (root / "node_modules").mkdir()
-    (root / "node_modules" / "dependency.py").write_text("ignored", encoding="utf-8")
-    (root / ".env").write_text("TOKEN=secret", encoding="utf-8")
-    (root / "credentials.json").write_text("secret", encoding="utf-8")
+    (root / "node_modules" / "dependency.py").write_bytes(b"ignored")
+    (root / ".env").write_bytes(b"TOKEN=secret")
+    (root / "credentials.json").write_bytes(b"secret")
     return root
 
 
@@ -62,18 +66,18 @@ def test_git_worktree_includes_dirty_and_untracked_files_without_hooks_or_filter
     _git(root, "init", "-q")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.invalid")
-    (root / ".gitattributes").write_text("*.py filter=sentinel\n", encoding="utf-8")
+    (root / ".gitattributes").write_bytes(b"*.py filter=sentinel\n")
     _git(root, "add", "src/app.py", "delete.py", ".gitignore", ".gitattributes")
     _git(root, "commit", "-qm", "baseline")
     head = _git(root, "rev-parse", "HEAD")
     marker = tmp_path / "executed-hook.txt"
     hook = root / ".git" / "hooks" / "post-checkout"
-    hook.write_text(f"#!/bin/sh\nprintf triggered > '{marker}'\n", encoding="utf-8")
+    hook.write_bytes(b"#!/bin/sh\nprintf triggered > '" + str(marker).encode("utf-8") + b"'\n")
     hook.chmod(0o755)
     _git(root, "config", "filter.sentinel.smudge", f"sh -c 'echo filter > {marker}; cat'")
     (root / "src" / "app.py").write_bytes(b"print('dirty')\r\n")
     (root / "delete.py").unlink()
-    (root / "new.py").write_text("untracked = True\n", encoding="utf-8")
+    (root / "new.py").write_bytes(b"untracked = True\n")
     work = _copy(tmp_path, root)
     assert _git(work.path, "rev-parse", "HEAD") == head
     assert (work.path / ".git").is_file()
@@ -92,17 +96,17 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
     work = _copy(tmp_path, root)
     (work.path / "src" / "app.py").write_bytes(b"print('changed')\r\n")
     (work.path / "delete.py").unlink()
-    (work.path / "new.py").write_text("new = 1\n", encoding="utf-8")
-    (work.path / "empty.py").write_text("not empty", encoding="utf-8")
+    (work.path / "new.py").write_bytes(_NEW_FILE_BYTES)
+    (work.path / "empty.py").write_bytes(b"not empty")
     changes = work.changeset()
     assert {path: change.kind for path, change in changes.items()} == {
         "delete.py": "delete", "empty.py": "modify",
         "new.py": "add", "src/app.py": "modify",
     }
     assert changes["new.py"].baseline_sha256 is None
-    assert changes["new.py"].new_sha256 == sha256(b"new = 1\n").hexdigest()
+    assert changes["new.py"].new_sha256 == sha256(_NEW_FILE_BYTES).hexdigest()
     assert changes["delete.py"].new_sha256 is None
-    assert changes["delete.py"].baseline_sha256 == sha256(b"old file\n").hexdigest()
+    assert changes["delete.py"].baseline_sha256 == sha256(_DELETED_FILE_BYTES).hexdigest()
     assert "-print('original')" in changes["src/app.py"].diff
     assert "+print('changed')" in changes["src/app.py"].diff
     assert not (root / "new.py").exists()
@@ -111,20 +115,20 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
     assert denied.value.code == "consent_required"
     assert work.accept(changes.keys(), confirmed=True) == tuple(sorted(changes))
     assert not (root / "delete.py").exists()
-    assert (root / "new.py").read_bytes() == b"new = 1\n"
+    assert (root / "new.py").read_bytes() == _NEW_FILE_BYTES
     assert (root / "src" / "app.py").read_bytes() == b"print('changed')\r\n"
     assert work.changeset() == {}
     journal = WorkspaceCheckpointStore(work.data_dir / "workspace_checkpoints.sqlite")
     saved = journal.get(owner="agent-workcopy", checkpoint_id=work.checkpoint_id)
     assert {entry.path for entry in saved.files} == set(changes)
-    assert next(entry for entry in saved.files if entry.path == "new.py").original == b""
+    assert next(entry for entry in saved.files if entry.path == "new.py").original == _EMPTY_FILE_BYTES
     with pytest.raises(WorkCopyError) as denied_undo:
         work.undo(confirmed=False)
     assert denied_undo.value.code == "consent_required"
     assert work.undo(confirmed=True) == tuple(sorted(changes))
     assert not (root / "new.py").exists()
-    assert (root / "delete.py").read_bytes() == b"old file\n"
-    assert (root / "empty.py").read_bytes() == b""
+    assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
+    assert (root / "empty.py").read_bytes() == _EMPTY_FILE_BYTES
     assert (root / "src" / "app.py").read_bytes() == b"print('original')\r\n"
     work.discard()
 
@@ -132,9 +136,9 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
 def test_external_edit_refuses_whole_accept_before_any_write(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
-    (work.path / "new.py").write_text("addition", encoding="utf-8")
-    (work.path / "src" / "app.py").write_text("agent edit", encoding="utf-8")
-    (root / "src" / "app.py").write_text("external edit", encoding="utf-8")
+    (work.path / "new.py").write_bytes(b"addition")
+    (work.path / "src" / "app.py").write_bytes(b"agent edit")
+    (root / "src" / "app.py").write_bytes(b"external edit")
     with pytest.raises(WorkCopyError) as failure:
         work.accept(["new.py", "src/app.py"], confirmed=True)
     assert failure.value.code == "stale_source"
@@ -146,9 +150,9 @@ def test_external_edit_refuses_whole_accept_before_any_write(tmp_path: Path) -> 
 def test_external_edit_after_accept_refuses_undo(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
-    (work.path / "src" / "app.py").write_text("agent edit", encoding="utf-8")
+    (work.path / "src" / "app.py").write_bytes(b"agent edit")
     work.accept(["src/app.py"], confirmed=True)
-    (root / "src" / "app.py").write_text("external edit", encoding="utf-8")
+    (root / "src" / "app.py").write_bytes(b"external edit")
     with pytest.raises(WorkCopyError) as failure:
         work.undo(confirmed=True)
     assert failure.value.code == "stale_source"
@@ -160,7 +164,7 @@ def test_sequential_edit_then_delete_can_undo_original(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
     path = work.path / "src" / "app.py"
-    path.write_text("first\n", encoding="utf-8")
+    path.write_bytes(b"first\n")
     work.accept(["src/app.py"], confirmed=True)
     path.unlink()
     work.accept(["src/app.py"], confirmed=True)
@@ -174,7 +178,7 @@ def test_junction_or_directory_link_is_never_followed(tmp_path: Path) -> None:
     root = _project(tmp_path)
     external = tmp_path / "external"
     external.mkdir()
-    (external / "secret.py").write_text("private", encoding="utf-8")
+    (external / "secret.py").write_bytes(b"private")
     link = root / "linked"
     if sys.platform == "win32":
         subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(external)], check=True, capture_output=True)
@@ -185,7 +189,7 @@ def test_junction_or_directory_link_is_never_followed(tmp_path: Path) -> None:
             pytest.skip("directory links are unavailable")
     work = _copy(tmp_path, root)
     assert not (work.path / "linked").exists()
-    (work.path / "new.py").write_text("ok", encoding="utf-8")
+    (work.path / "new.py").write_bytes(b"ok")
     with pytest.raises(WorkCopyError):
         work.accept(["linked/secret.py", "new.py"], confirmed=True)
     assert not (root / "new.py").exists()
@@ -197,7 +201,7 @@ def test_discard_unlinks_links_in_copy_without_touching_destination(tmp_path: Pa
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
     outside = tmp_path / "valuable.py"
-    outside.write_text("leave me", encoding="utf-8")
+    outside.write_bytes(b"leave me")
     try:
         (work.path / "shortcut.py").symlink_to(outside)
     except (OSError, NotImplementedError):
@@ -214,7 +218,7 @@ def test_consent_and_path_traversal_are_rejected(tmp_path: Path) -> None:
     assert denied.value.code == "consent_required"
     assert not (tmp_path / "cortex-data").exists()
     work = _copy(tmp_path, root)
-    (work.path / "new.py").write_text("content", encoding="utf-8")
+    (work.path / "new.py").write_bytes(b"content")
     for path in ("../escape.py", "/tmp/escape.py", "src/../escape.py", "C:/Windows/win.ini", ".env"):
         with pytest.raises(WorkCopyError):
             work.accept([path], confirmed=True)
@@ -256,9 +260,9 @@ def test_originally_added_file_still_disappears_after_multiple_accepts(tmp_path:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
     added = work.path / "new.py"
-    added.write_text("first", encoding="utf-8")
+    added.write_bytes(b"first")
     work.accept(["new.py"], confirmed=True)
-    added.write_text("second", encoding="utf-8")
+    added.write_bytes(b"second")
     work.accept(["new.py"], confirmed=True)
     assert (root / "new.py").read_text(encoding="utf-8") == "second"
     work.undo(confirmed=True)
@@ -269,8 +273,8 @@ def test_originally_added_file_still_disappears_after_multiple_accepts(tmp_path:
 def test_external_creation_refuses_added_file(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
-    (work.path / "new.py").write_text("agent edit", encoding="utf-8")
-    (root / "new.py").write_text("external edit", encoding="utf-8")
+    (work.path / "new.py").write_bytes(b"agent edit")
+    (root / "new.py").write_bytes(b"external edit")
     with pytest.raises(WorkCopyError) as failure:
         work.accept(["new.py"], confirmed=True)
     assert failure.value.code == "stale_source"
@@ -281,10 +285,10 @@ def test_external_creation_refuses_added_file(tmp_path: Path) -> None:
 def test_accept_rejects_replaced_directory_link(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
-    (work.path / "src" / "app.py").write_text("agent edit", encoding="utf-8")
+    (work.path / "src" / "app.py").write_bytes(b"agent edit")
     external = tmp_path / "outside"
     external.mkdir()
-    (external / "app.py").write_text("private", encoding="utf-8")
+    (external / "app.py").write_bytes(b"private")
     (root / "src" / "app.py").unlink()
     (root / "src").rmdir()
     try:
@@ -300,17 +304,17 @@ def test_accept_rejects_replaced_directory_link(tmp_path: Path) -> None:
 
 def test_nested_gitignore_and_anchored_negation(tmp_path: Path) -> None:
     root = _project(tmp_path)
-    (root / ".gitignore").write_text("/top.py\nnested/*.py\n!nested/keep.py\n", encoding="utf-8")
-    (root / "top.py").write_text("root ignored", encoding="utf-8")
+    (root / ".gitignore").write_bytes(b"/top.py\nnested/*.py\n!nested/keep.py\n")
+    (root / "top.py").write_bytes(b"root ignored")
     (root / "sub").mkdir()
-    (root / "sub" / "top.py").write_text("still included", encoding="utf-8")
+    (root / "sub" / "top.py").write_bytes(b"still included")
     (root / "nested").mkdir()
-    (root / "nested" / "skip.py").write_text("ignored", encoding="utf-8")
-    (root / "nested" / "keep.py").write_text("included", encoding="utf-8")
+    (root / "nested" / "skip.py").write_bytes(b"ignored")
+    (root / "nested" / "keep.py").write_bytes(b"included")
     (root / "nested" / "deep").mkdir()
-    (root / "nested" / "deep" / "not_ignored.py").write_text("included", encoding="utf-8")
-    (root / "nested" / ".gitignore").write_text("nested_only.txt\n", encoding="utf-8")
-    (root / "nested" / "nested_only.txt").write_text("ignore", encoding="utf-8")
+    (root / "nested" / "deep" / "not_ignored.py").write_bytes(b"included")
+    (root / "nested" / ".gitignore").write_bytes(b"nested_only.txt\n")
+    (root / "nested" / "nested_only.txt").write_bytes(b"ignore")
     work = _copy(tmp_path, root)
     assert not (work.path / "top.py").exists()
     assert (work.path / "sub" / "top.py").is_file()
@@ -326,12 +330,12 @@ def test_empty_added_and_deleted_files_are_distinguished(tmp_path: Path) -> None
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
     (work.path / "empty.py").unlink()
-    (work.path / "new.py").write_bytes(b"")
+    (work.path / "new.py").write_bytes(_EMPTY_FILE_BYTES)
     changes = work.changeset()
     assert changes["empty.py"].kind == "delete"
     assert changes["new.py"].kind == "add"
-    assert changes["empty.py"].baseline_sha256 == sha256(b"").hexdigest()
-    assert changes["new.py"].new_sha256 == sha256(b"").hexdigest()
+    assert changes["empty.py"].baseline_sha256 == sha256(_EMPTY_FILE_BYTES).hexdigest()
+    assert changes["new.py"].new_sha256 == sha256(_EMPTY_FILE_BYTES).hexdigest()
     work.accept(["empty.py", "new.py"], confirmed=True)
     assert not (root / "empty.py").exists()
     assert (root / "new.py").is_file()
@@ -346,7 +350,7 @@ def test_durable_restore_after_copy_discard_and_simulated_restart(tmp_path: Path
 
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
-    (work.path / "new.py").write_text("new content", encoding="utf-8")
+    (work.path / "new.py").write_bytes(b"new content")
     (work.path / "delete.py").unlink()
     work.accept(["new.py", "delete.py"], confirmed=True)
     work.discard()
@@ -356,4 +360,4 @@ def test_durable_restore_after_copy_discard_and_simulated_restart(tmp_path: Path
     recovered = restore(root, work.run_id, confirmed=True, data_dir=work.data_dir)
     assert recovered == ("delete.py", "new.py")
     assert not (root / "new.py").exists()
-    assert (root / "delete.py").read_bytes() == b"old file\n"
+    assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
