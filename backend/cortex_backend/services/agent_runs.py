@@ -281,25 +281,26 @@ class AgentRuns:
             self._active_id = run_id
             copy: WorkCopy | None = None
             try:
-                copy = WorkCopy.create(
+                prepared = WorkCopy.create(
                     project_root, run_id, confirmed=True, data_dir=directory,
                     checkpoint_store=self._checkpoint_store, owner=owner,
                 )
+                copy = prepared
                 created = store.create_run(
-                    owner=owner, project_root=copy.project_root, workcopy=copy.path,
+                    owner=owner, project_root=prepared.project_root, workcopy=prepared.path,
                     mode=mode, model=model, budgets=normalized_budgets, run_id=run_id,
                 )
-                registry = _file_registry(copy, mode)
+                registry = _file_registry(prepared, mode)
                 providers: Sequence[Callable[[AgentRun], str]] = (
-                    lambda _run: build_repo_map(copy.path, 700),
-                    lambda _run: load_project_instructions(copy.path),
+                    lambda _run: build_repo_map(prepared.path, 700),
+                    lambda _run: load_project_instructions(prepared.path),
                 )
                 loop = self._loop_factory(
                     store, self._client, model, registry, normalized_budgets,
                     owner=owner, goal=goal, after_tool=self._after_tool(run_id),
                     context_providers=providers,
                 )
-                managed = _LiveRun(run_id, owner, copy, loop)
+                managed = _LiveRun(run_id, owner, prepared, loop)
                 self._live[run_id] = managed
                 self._emit(managed, "status", {"status": "pending"})
                 self._submit(managed, resume=False)
