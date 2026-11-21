@@ -216,6 +216,11 @@
             ],
             "title": "Stop Reason"
           },
+          "undo_available": {
+            "default": false,
+            "title": "Undo Available",
+            "type": "boolean"
+          },
           "updated": {
             "title": "Updated",
             "type": "string"

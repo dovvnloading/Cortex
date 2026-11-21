@@ -39,13 +39,15 @@ test("Agent mode remains off until saved in Settings and never starts without pr
     await route.fulfill({ json: { memos: [] } });
   });
   await page.route("**/api/v1/agent/runs", async (route) => {
-    // Listing past runs (GET) is allowed; only a POST would start a run.
-    if (route.request().method() === "GET") {
+    const method = route.request().method();
+    if (method === "GET") {
       await route.fulfill({ json: { runs: [] } });
-      return;
+    } else if (method === "POST") {
+      started.push(route.request().postDataJSON());
+      await route.fulfill({ status: 500, json: { detail: "Run should not have started without consent" } });
+    } else {
+      throw new Error(`Unexpected /agent/runs request method: ${method}`);
     }
-    started.push(route.request().postDataJSON());
-    await route.fulfill({ status: 500, json: { detail: "Run should not have started without consent" } });
   });
 
   await page.goto("/#bootstrap=launcher-token");

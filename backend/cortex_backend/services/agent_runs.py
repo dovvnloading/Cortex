@@ -455,6 +455,28 @@ class AgentRuns:
         self._expire_active()
         return self._owned(run_id, owner)
 
+    def undo_available(self, run_id: str, *, owner: str) -> bool:
+        """Report an owner-bound checkpoint, never local acceptance UI state.
+
+        Existence is an availability hint; confirmed undo still preflights
+        the source hashes and refuses unexpected changes.
+        """
+        with self._lock:
+            run = self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            if run.status not in _TERMINAL or (managed is not None and managed.driving):
+                return False
+            try:
+                database = self._directory() / "workspace_checkpoints.sqlite"
+                if self._checkpoint_store is None and not database.is_file():
+                    return False
+                store = self._checkpoint_store or WorkspaceCheckpointStore(database)
+                checkpoint = store.get(owner=owner, checkpoint_id=run_id)
+                return checkpoint.state in {"active", "pending"} and bool(checkpoint.files)
+            except Exception:
+                # Missing, unreadable or corrupt checkpoints must fail closed.
+                return False
+
     def events(
         self, run_id: str, *, owner: str, after_id: int,
     ) -> tuple[list[AgentEvent], bool]:

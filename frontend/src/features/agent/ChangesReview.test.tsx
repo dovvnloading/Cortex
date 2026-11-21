@@ -394,6 +394,22 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
     expect(onUndo).not.toHaveBeenCalled();
   });
+  it("offers Undo alongside staged changes when the backend says a checkpoint exists", async () => {
+    const user = userEvent.setup();
+    const { onUndo, onAccept, onDiscard } = renderReview({ allowRecovery: true });
+    expect(screen.getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard all" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
+    expect(onUndo).toHaveBeenCalledOnce();
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(onDiscard).not.toHaveBeenCalled();
+  });
+
   it("requires confirmation for journal recovery when an old run has no staged diff", async () => {
     const user = userEvent.setup();
     const { onUndo, onAccept } = renderReview({ changes: [], allowRecovery: true });

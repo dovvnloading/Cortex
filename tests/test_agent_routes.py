@@ -420,12 +420,37 @@ def test_accept_requires_explicit_confirmation_and_discard_keeps_checkout(tmp_pa
         assert accepted.status_code == 200, accepted.text
         assert accepted.json() == {"paths": ["app.py"]}
         assert (project / "app.py").read_bytes() == STAGED
+        assert client.get(target, headers=headers).json()["undo_available"] is True
+        assert client.get(ROOT, headers=headers).json()["runs"][0]["undo_available"] is True
         assert client.get(target + "/changeset", headers=headers).json()["changes"] == []
         discarded = client.post(target + "/discard", headers=headers)
         assert discarded.status_code == 200
         assert discarded.json() == {"discarded": True}
+        assert client.get(target, headers=headers).json()["undo_available"] is True
         _assert_code(client.get(target + "/changeset", headers=headers), 409, "copy_unavailable")
         _assert_code(client.post(target + "/discard", headers=headers), 409, "copy_unavailable")
+        assert (project / "app.py").read_bytes() == STAGED
+
+
+def test_partial_accept_keeps_staged_changes_and_exposes_journal_to_history(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        run_id = client.post(ROOT, headers=headers, json=_start(project)).json()["id"]
+        _run_done(client, headers, run_id)
+        wait_until(lambda: not app.state.agent_workflow._live[run_id].driving)
+        target = f"{ROOT}/{run_id}"
+        copy = app.state.agent_workflow._live[run_id].copy
+        (copy.path / "pending.py").write_text("pending = True\n", encoding="utf-8")
+        assert client.get(target, headers=headers).json()["undo_available"] is False
+        assert client.post(target + "/accept", headers=headers, json={
+            "paths": ["app.py"], "confirmed": True,
+        }).status_code == 200
+        staged = client.get(target + "/changeset", headers=headers).json()["changes"]
+        assert [change["path"] for change in staged] == ["pending.py"]
+        assert client.get(target, headers=headers).json()["undo_available"] is True
+        assert (project / "pending.py").exists() is False
         assert (project / "app.py").read_bytes() == STAGED
 
 
@@ -467,12 +492,14 @@ def test_undo_requires_confirmation_and_restores_accepted_paths(tmp_path: Path) 
             "confirmed": True,
         }), 409, "checkpoint_missing")
         assert (project / "app.py").read_bytes() == SOURCE
+        assert client.get(target, headers=headers).json()["undo_available"] is False
 
         accepted = client.post(target + "/accept", headers=headers, json={
             "paths": ["app.py"], "confirmed": True,
         })
         assert accepted.status_code == 200
         assert (project / "app.py").read_bytes() == STAGED
+        assert client.get(target, headers=headers).json()["undo_available"] is True
         _assert_code(client.post(target + "/undo", headers=headers, json={
             "confirmed": False,
         }), 403, "consent_required")
@@ -481,6 +508,7 @@ def test_undo_requires_confirmation_and_restores_accepted_paths(tmp_path: Path) 
         assert restored.status_code == 200, restored.text
         assert restored.json() == {"paths": ["app.py"]}
         assert (project / "app.py").read_bytes() == SOURCE
+        assert client.get(target, headers=headers).json()["undo_available"] is False
         _assert_code(client.post(target + "/undo", headers=headers, json={
             "confirmed": True,
         }), 409, "checkpoint_missing")
@@ -520,7 +548,9 @@ def test_undo_is_owner_scoped_even_after_discard(tmp_path: Path) -> None:
         }).status_code == 200
         assert client.post(target + "/discard", headers=alice).status_code == 200
 
+        assert client.get(target, headers=alice).json()["undo_available"] is True
         bob = _second_session(client, app)
+        _assert_code(client.get(target, headers=bob), 404, "not_found")
         _assert_code(client.post(target + "/undo", headers=bob, json={
             "confirmed": True,
         }), 404, "not_found")

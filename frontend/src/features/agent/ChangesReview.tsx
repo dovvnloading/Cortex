@@ -15,7 +15,7 @@ export type ChangesReviewProps = {
   onDiscard: () => void;
   onUndo: () => void;
   accepted: boolean;
-  /** Offer explicit journal recovery when an old run has no remaining staged diff. */
+  /** True only when the backend reports an owner-scoped undo checkpoint. */
   allowRecovery?: boolean;
   busy?: boolean;
   error?: string | null;
@@ -188,7 +188,7 @@ export function ChangesReview({
     } else if (confirmation.action === "discard" && !accepted) {
       setConfirmation(null);
       onDiscard();
-    } else if (confirmation.action === "undo" && (accepted || (allowRecovery && changes.length === 0))) {
+    } else if (confirmation.action === "undo" && (accepted || allowRecovery)) {
       setConfirmation(null);
       onUndo();
     }
@@ -337,6 +337,12 @@ export function ChangesReview({
           </div>
         ) : (
           <div className="dialog-actions" style={{ marginTop: 20, flexWrap: "wrap" }}>
+            {allowRecovery && (
+              <button ref={undoButtonRef} type="button" className="button button-secondary"
+                disabled={busy} onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
+                Undo
+              </button>
+            )}
             <button
               ref={discardButtonRef}
               type="button"
