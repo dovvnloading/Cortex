@@ -367,6 +367,8 @@ A foreground command can run for at most 120 seconds. Its result keeps
 at most the first and last 4 KiB of output. Live shell output is capped
 at 1 MiB per run. More than 64 MiB of process output kills the process
 tree. A timed-out, cancelled or killed command never reports success.
+In the run timeline, command output is shown as plain text under
+**Command output**, separate from the agent's **Agent response**.
 
 `start_background` runs up to two background processes at once.
 `read_background` returns buffered output and status; `stop_background`

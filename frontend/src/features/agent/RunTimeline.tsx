@@ -6,9 +6,14 @@ function textField(data: Record<string, unknown>, field: string): string | null 
   return typeof data[field] === "string" ? data[field] as string : null;
 }
 
+function isAgentResponse(event: AgentSSEEvent): boolean {
+  // Missing or unknown provenance is untrusted output, never an agent answer.
+  return event.event === "output" && event.data.source === "agent";
+}
+
 function stepTitle(event: AgentSSEEvent): string {
   const { data } = event;
-  if (event.event === "output") return "Agent response";
+  if (event.event === "output") return isAgentResponse(event) ? "Agent response" : "Command output";
   const summary = textField(data, "summary")?.trim();
   // The run store intentionally records generic operation labels. Translate
   // them without pretending to know file counts or test outcomes.
@@ -41,7 +46,10 @@ export function RunTimeline({ events }: RunTimelineProps) {
               <details>
                 <summary>{stepTitle(event)}</summary>
                 {event.event === "output" ? (
-                  <pre className="coding-source" aria-label="Agent response text">{textField(event.data, "text") ?? "(No response text)"}</pre>
+                  <pre
+                    className={isAgentResponse(event) ? "coding-source" : "coding-source agent-command-output"}
+                    aria-label={isAgentResponse(event) ? "Agent response text" : "Command output text"}
+                  >{textField(event.data, "text") ?? (isAgentResponse(event) ? "(No response text)" : "(No command output)")}</pre>
                 ) : (
                   <div className="coding-muted">
                     <p>Step {typeof event.data.seq === "number" ? event.data.seq : "—"}
