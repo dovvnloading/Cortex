@@ -743,9 +743,23 @@ def test_generation_sse_is_ordered_replayable_and_redacts_failures(caplog):
         assert "!fail" not in caplog.text
 
 
-def test_generation_conflict_and_cancellation_are_explicit():
-    state = FakeOllamaState(generation_delay_seconds=0.2)
-    app, client = _client(state)
+def test_generation_conflict_and_cancellation_are_explicit(monkeypatch):
+    # Hold the worker inside generation, before it can start committing a result.
+    # This replaces a time-based fake delay that could finish before cancellation.
+    worker_entered = Event()
+    release_worker = Event()
+    deps = build_demo_dependencies()
+    generate = deps.generation.generate
+
+    def blocked_generate(*args, **kwargs):
+        worker_entered.set()
+        if not release_worker.wait(timeout=30):
+            raise AssertionError("generation worker was not released")
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(deps.generation, "generate", blocked_generate)
+    app = create_app(deps, allowed_hosts=ALLOWED_HOSTS)
+    client = TestClient(app)
     with client:
         headers = _session(client, app)
         first = client.post(
@@ -753,36 +767,47 @@ def test_generation_conflict_and_cancellation_are_explicit():
             json={"thread_id": "thread-1", "user_input": "slow"},
             headers=headers,
         )
-        second = client.post(
-            "/api/v1/generations",
-            json={"thread_id": "thread-1", "user_input": "blocked"},
-            headers=headers,
-        )
-        assert first.status_code == 202
-        assert second.status_code == 409
-        cancelled = client.post(
-            f"/api/v1/jobs/{first.json()['job_id']}/cancel",
-            headers=headers,
-        )
-        assert cancelled.status_code == 200
-        assert cancelled.json()["status"] == "cancelling"
-        assert (
-            client.post(
+        try:
+            assert first.status_code == 202
+            assert worker_entered.wait(timeout=10), "generation worker did not start"
+            second = client.post(
                 "/api/v1/generations",
-                json={"thread_id": "thread-1", "user_input": "still blocked"},
+                json={"thread_id": "thread-1", "user_input": "blocked"},
                 headers=headers,
-            ).status_code
-            == 409
-        )
+            )
+            assert second.status_code == 409
+            job_id = first.json()["job_id"]
+            cancelled = client.post(
+                f"/api/v1/jobs/{job_id}/cancel",
+                headers=headers,
+            )
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "cancelling"
+            wait_until(
+                lambda: client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["status"]
+                == "cancelling",
+                timeout=5,
+                describe="the generation job to enter cancelling",
+            )
+            assert (
+                client.post(
+                    "/api/v1/generations",
+                    json={"thread_id": "thread-1", "user_input": "still blocked"},
+                    headers=headers,
+                ).status_code
+                == 409
+            )
+        finally:
+            release_worker.set()
+
         with client.stream(
-            "GET", f"/api/v1/jobs/{first.json()['job_id']}/events", headers=headers
+            "GET", f"/api/v1/jobs/{job_id}/events", headers=headers
         ) as response:
             events = _events("".join(response.iter_text()))
         assert [event["status"] for event in events][-2:] == [
             "cancelling",
             "cancelled",
         ]
-
 
 def _preflight(client: TestClient, *, origin: str, headers: str, path: str = "/api/v1/session/handoff"):
     return client.options(
