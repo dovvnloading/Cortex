@@ -11,6 +11,7 @@ import tomllib
 import pytest
 
 from cortex_backend.agent.loop import AgentLoop
+from cortex_backend.agent.tools.checks import detect_checks
 from tools import agent_eval
 from tools import agent_eval_replay
 
@@ -150,6 +151,14 @@ def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> 
     assert not list(repo.glob("test_*.py"))
     assert "assert add(2, 3) == 5" in (repo / "calculator_cases.py").read_text(encoding="utf-8")
     assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
+
+
+def test_fix_failing_test_fixture_has_only_inert_pytest_addopts() -> None:
+    repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
+    assert [(item.key, item.command, item.risk) for item in detect_checks(repo)] == [
+        ("pytest", "python -m pytest", "safe"),
+    ]
+    assert not (repo / "conftest.py").exists()
 
 
 def test_generated_fixture_cache_is_never_copied_into_expected_end_state(

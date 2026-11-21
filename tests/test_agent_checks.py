@@ -42,6 +42,51 @@ def test_detects_only_fixed_commands_from_workcopy(
     assert [check.command for check in detect_checks(tmp_path)] == expected
 
 
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q -p no:cacheprovider\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\n'),
+    ],
+)
+def test_benign_pytest_addopts_stay_auto_approvable(
+    tmp_path: Path, filename: str, contents: str,
+) -> None:
+    (tmp_path / filename).write_text(contents, encoding="utf-8")
+    assert [(check.command, check.risk) for check in detect_checks(tmp_path)] == [
+        ("python -m pytest", "safe"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p hostile_plugin"\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider --override-ini x=y"\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = ["-q", "-p", "no:cacheprovider"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\naddopts = "-p hostile_plugin"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n    -p hostile_plugin\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q -p no:cacheprovider -p hostile_plugin\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\naddopts = -p hostile_plugin\n"),
+    ],
+)
+def test_untrusted_pytest_options_cannot_hide_behind_safe_flags(
+    tmp_path: Path, filename: str, contents: str,
+) -> None:
+    (tmp_path / filename).write_text(contents, encoding="utf-8")
+    assert [check.risk for check in detect_checks(tmp_path)] == ["ask"]
+
+
+def test_conftest_still_requires_approval_even_with_safe_addopts(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\n', encoding="utf-8",
+    )
+    (tmp_path / "conftest.py").write_text("def pytest_sessionstart(session): pass\n", encoding="utf-8")
+    assert [check.risk for check in detect_checks(tmp_path)] == ["ask"]
+
+
 def test_nested_manifests_and_solution_preference(tmp_path: Path) -> None:
     frontend = tmp_path / "frontend"
     frontend.mkdir()

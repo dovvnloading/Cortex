@@ -8,6 +8,7 @@ share a one-shot grant.
 
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -15,6 +16,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tomllib
 from typing import Final, Literal
 from xml.etree import ElementTree
 
@@ -205,6 +207,41 @@ def _msbuild_generated_import(root: Path, project_path: str) -> bool:
         return True
 
 
+# Only these options alter pytest presentation/caching, not plugin discovery
+# or test execution. In particular, -p no:cacheprovider *disables* pytest's
+# built-in cache plugin; no other -p option is safe to auto-approve.
+_SAFE_PYTEST_ADDOPTS: Final = frozenset({"", "-q", "-q -p no:cacheprovider"})
+
+
+def _pytest_options_need_approval(path: str, content: bytes) -> bool:
+    """Fail closed on malformed configs and any unrecognized pytest addopts.
+
+    Pytest accepts the same option from TOML and INI, including multiline
+    values. Parse the configured value rather than trusting a single regex
+    line: a continuation, duplicate option or plugin-loading flag must not
+    hide behind a harmless first line.
+    """
+    name = PurePosixPath(path).name
+    try:
+        text = content.decode("utf-8-sig")
+        if name == "pyproject.toml":
+            parsed = tomllib.loads(text)
+            tool = parsed.get("tool", {})
+            pytest_config = tool.get("pytest", {}) if isinstance(tool, dict) else None
+            options = pytest_config.get("ini_options", {}) if isinstance(pytest_config, dict) else None
+            if not isinstance(options, dict):
+                return True
+            addopts = options.get("addopts", "")
+        else:
+            parsed_ini = configparser.ConfigParser(interpolation=None, strict=True)
+            parsed_ini.read_string(text)
+            section = "pytest" if name == "pytest.ini" else "tool:pytest"
+            addopts = parsed_ini.get(section, "addopts", fallback="")
+    except (configparser.Error, UnicodeError, ValueError):
+        return True
+    return not (isinstance(addopts, str) and addopts.strip() in _SAFE_PYTEST_ADDOPTS)
+
+
 def workcopy_fingerprint(root: str | os.PathLike[str]) -> str:
     """Content (not mtime) identity, so a tool edit invalidates prior checks."""
     digest = sha256()
@@ -228,7 +265,7 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
         hooks = any(PurePosixPath(p).name == "conftest.py" for p in files)
         options = any(
             PurePosixPath(p).name in {"pyproject.toml", "pytest.ini", "setup.cfg"}
-            and re.search(rb"(?m)^\s*addopts\s*=", body) is not None
+            and _pytest_options_need_approval(p, body)
             for p, body in files.items()
         )
         checks.append(DetectedCheck("pytest", "python -m pytest", "ask" if hooks or options else "safe"))
