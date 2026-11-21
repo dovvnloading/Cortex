@@ -219,7 +219,7 @@ def probe_model(client: Any, model: str, options: dict[str, Any]) -> ModelProfil
 def _validate_profile(profile: ModelProfile) -> None:
     if not isinstance(profile.model, str) or not profile.model.strip():
         raise ProfileSchemaError("Invalid model profile identifier.")
-    if profile.protocol_path not in _PATHS:
+    if not isinstance(profile.protocol_path, str) or profile.protocol_path not in _PATHS:
         raise ProfileSchemaError("Unknown tool protocol path.")
     if (
         not isinstance(profile.passed, dict)
