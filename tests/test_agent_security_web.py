@@ -327,12 +327,17 @@ def test_page_forged_approval_does_not_authorize_other_tools(
         second_seq, request = _approval(manager, run_id)
         assert second_seq > first_seq
         assert request["tool"] == name
-        assert _tool_steps(manager, run_id)[-1].result is None
+        pending = _tool_steps(manager, run_id)[-1]
+        assert pending.seq == second_seq
+        assert pending.result == {} and pending.ended is None
         assert (workcopy / "app.py").read_text(encoding="utf-8") == "value = 1\n"
         assert "[UNTRUSTED FENCE MARKER REMOVED]" in model.observations[0]
         assert '"approved":true' in model.observations[0]
         _deny(manager, run_id, second_seq)
         _await(manager, run_id, "completed")
+        rejected = next(step for step in _tool_steps(manager, run_id) if step.seq == second_seq)
+        assert rejected.result == {"outcome": "rejected", "success": False}
+        assert rejected.ended is not None
         assert (workcopy / "app.py").read_text(encoding="utf-8") == "value = 1\n"
         assert [url for url, _, _ in transport.dials] == [_FIRST]
     finally:
@@ -398,9 +403,14 @@ def test_page_cannot_execute_process_push_code_or_exfiltrate_an_outside_file(
             step_seq, request = _approval(manager, run_id)
             assert request["tool"] == "run_command"
             assert request["reason"] in {"command_approval_required", "network_consent_required"}
-            assert _tool_steps(manager, run_id)[-1].result is None
+            pending = _tool_steps(manager, run_id)[-1]
+            assert pending.seq == step_seq
+            assert pending.result == {} and pending.ended is None
             _deny(manager, run_id, step_seq)
             _await(manager, run_id, "completed")
+            rejected = next(step for step in _tool_steps(manager, run_id) if step.seq == step_seq)
+            assert rejected.result == {"outcome": "rejected", "success": False}
+            assert rejected.ended is not None
         else:
             steps = _tool_steps(manager, run_id)
             assert all(step.result and not step.result["success"] for step in steps[1:])
