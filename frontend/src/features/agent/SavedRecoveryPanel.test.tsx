@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +39,38 @@ describe("saved recovery checkpoints in Agent mode", () => {
     expect(api.startAgentRun).not.toHaveBeenCalled();
     expect(api.restoreWorkspaceCheckpoint).not.toHaveBeenCalled();
     expect(api.discardWorkspaceCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("reloads on a new Agent recovery revision and ignores older responses", async () => {
+    const api = fakeApi();
+    let finishStale!: (value: { checkpoints: (typeof checkpoint)[] }) => void;
+    api.workspaceCheckpoints.mockResolvedValueOnce({ checkpoints: [] })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishStale = resolve; }))
+      .mockResolvedValueOnce({ checkpoints: [checkpoint] });
+
+    const { rerender } = mount(api);
+    expect(await screen.findByText("No saved recovery checkpoints.")).toBeInTheDocument();
+    rerender(<SavedRecoveryPanel api={api as unknown as CortexApi} refreshKey={1} />);
+    await waitFor(() => expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Checking for saved recovery checkpoints…")).toBeInTheDocument();
+    // A second confirmed mutation supersedes a still-unanswered journal read.
+    rerender(<SavedRecoveryPanel api={api as unknown as CortexApi} refreshKey={2} />);
+    expect(await screen.findByText(checkpoint.root)).toBeInTheDocument();
+    await act(async () => finishStale({ checkpoints: [] }));
+    expect(screen.getByText(checkpoint.root)).toBeInTheDocument();
+    expect(screen.queryByText("No saved recovery checkpoints.")).not.toBeInTheDocument();
+    expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not launch a stale initial fetch after StrictMode effect cleanup", async () => {
+    const api = fakeApi();
+    render(
+      <StrictMode>
+        <SavedRecoveryPanel api={api as unknown as CortexApi} />
+      </StrictMode>,
+    );
+    expect(await screen.findByText(checkpoint.root)).toBeInTheDocument();
+    expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(1);
   });
 
   it("restores only after separate confirmation, then refreshes the list", async () => {

@@ -7,7 +7,7 @@ import type { WorkspaceCheckpointSummary } from "../../api/checkpointTypes";
 type RecoveryState = "loading" | "loaded" | "unavailable";
 type Action = "refresh" | "restore" | "discard";
 
-export function SavedRecoveryPanel({ api }: { api: CortexApi }) {
+export function SavedRecoveryPanel({ api, refreshKey = 0 }: { api: CortexApi; refreshKey?: number }) {
   const [checkpoints, setCheckpoints] = useState<WorkspaceCheckpointSummary[]>([]);
   const [recoveryState, setRecoveryState] = useState<RecoveryState>("loading");
   const [busy, setBusy] = useState<Action | null>(null);
@@ -19,6 +19,7 @@ export function SavedRecoveryPanel({ api }: { api: CortexApi }) {
 
   const reload = useCallback(async () => {
     const request = ++requestNumber.current;
+    if (mounted.current) setRecoveryState("loading");
     try {
       const result = await api.workspaceCheckpoints();
       if (!Array.isArray(result.checkpoints)) throw new Error("Invalid recovery list");
@@ -36,13 +37,16 @@ export function SavedRecoveryPanel({ api }: { api: CortexApi }) {
 
   useEffect(() => {
     mounted.current = true;
-    // Schedule the initial fetch after effect setup; only its async result updates state.
-    void Promise.resolve().then(reload);
+    // A queued reload from a disposed effect must not fetch after an unmount,
+    // including React StrictMode cleanup/replay or a newer refreshKey.
+    let current = true;
+    void Promise.resolve().then(() => { if (current) return reload(); });
     return () => {
+      current = false;
       mounted.current = false;
       requestNumber.current += 1;
     };
-  }, [reload]);
+  }, [reload, refreshKey]);
 
   const refresh = async () => {
     if (inFlight.current) return;
