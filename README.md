@@ -387,15 +387,18 @@ was declined or the run budget was exhausted.
 Agent edits stay in a disposable work copy, not the original project. After
 a run, the backend can show a diff, discard the copy, or accept selected
 files with separate confirmation. It checks the original file hashes before
-writing. **The Agent page currently has a changes-review placeholder, not
-working accept, discard or undo controls.** A completed run does not mean
-its changes were applied.
+writing. The Agent page now shows server-backed changes review after completed,
+failed, stopped and interrupted runs. Accepting selected files requires separate
+confirmation; discard and journal-backed undo require confirmation too.
+A completed run does not mean its changes were applied.
 
 Before an accepted write, Cortex saves the original bytes in a durable
 checkpoint. Explicit undo or restore checks the project and current file
 hashes before putting those bytes back. It refuses unexpected changes and
-never runs on its own. This recovery logic exists in the work-copy layer,
-but the Agent page does not expose it yet.
+never runs on its own. The Agent page exposes confirmed recovery through
+the owner-scoped journal, even after a disposable copy has been discarded.
+Past runs can be opened to replay their stored event history; resume and
+delete actions retain explicit confirmation and server feedback.
 
 Run metadata and step summaries are stored in `agent/runs.sqlite` under
 Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AgentRunResponse } from "../../../../contracts/cortex-api";
 import { normalizeApiBaseUrl } from "../../api/baseUrl";
+import type { AgentApi } from "./agentApi";
 
 // The current run-list contract does not include goals. Display one when a
 // future API supplies it, but never substitute a path, command, or file text.
@@ -18,6 +19,10 @@ export type RunHistoryProps = {
   onOpen: (runId: string) => void;
   /** Optional transport for embedding or testing; defaults to browser fetch. */
   fetcher?: typeof fetch;
+  /** The mounted Agent page supplies its authenticated API facade. */
+  api?: AgentApi;
+  onDiscarded?: (runId: string) => void;
+  refreshKey?: string | number;
 };
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL, import.meta.env.PROD);
@@ -78,7 +83,7 @@ function requestHeaders(): Headers {
 }
 
 /** Metadata-only agent history; it does not fetch source, changesets, or output. */
-export function RunHistory({ onOpen, fetcher }: RunHistoryProps) {
+export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: RunHistoryProps) {
   const [state, setState] = useState<RunListState>({ phase: "loading", runs: [] });
   const [refresh, setRefresh] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -89,21 +94,27 @@ export function RunHistory({ onOpen, fetcher }: RunHistoryProps) {
     const controller = new AbortController();
     void (async () => {
       try {
-        const request = fetcher ?? window.fetch.bind(window);
-        const response = await request(`${API_BASE_URL}/agent/runs`, {
-          method: "GET",
-          headers: requestHeaders(),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("Run list unavailable");
-        const runs = parseRuns(await response.json() as unknown);
+        let payload: unknown;
+        if (api) {
+          payload = await api.list();
+        } else {
+          const request = fetcher ?? window.fetch.bind(window);
+          const response = await request(`${API_BASE_URL}/agent/runs`, {
+            method: "GET",
+            headers: requestHeaders(),
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error("Run list unavailable");
+          payload = await response.json() as unknown;
+        }
+        const runs = parseRuns(payload);
         if (!controller.signal.aborted) setState({ phase: "ready", runs });
       } catch {
         if (!controller.signal.aborted) setState({ phase: "error", runs: [] });
       }
     })();
     return () => controller.abort();
-  }, [fetcher, refresh]);
+  }, [fetcher, refresh, api, refreshKey]);
 
   const act = async (run: RunSummary, action: RunAction) => {
     if (busyId !== null) return;
@@ -112,20 +123,25 @@ export function RunHistory({ onOpen, fetcher }: RunHistoryProps) {
 
     const prompt = action === "resume"
       ? "Resume this interrupted agent run? It may continue changing its work copy."
-      : "Delete this agent run? The work copy will be removed. This cannot be undone.";
+      : "Delete this agent run? The work copy will be removed. Any previously accepted project edits remain until explicitly undone.";
     if (!window.confirm(prompt)) return;
 
     setBusyId(run.id);
     setActionError(null);
     setNotice(null);
     try {
-      const request = fetcher ?? window.fetch.bind(window);
-      const response = await request(`${API_BASE_URL}/agent/runs/${encodeURIComponent(run.id)}/${action}`, {
-        method: "POST",
-        headers: requestHeaders(),
-      });
-      if (!response.ok) throw new Error("Run action unavailable");
-      const payload: unknown = await response.json();
+      let payload: unknown;
+      if (api) {
+        payload = action === "discard" ? await api.discard(run.id, true) : await api.resume(run.id);
+      } else {
+        const request = fetcher ?? window.fetch.bind(window);
+        const response = await request(`${API_BASE_URL}/agent/runs/${encodeURIComponent(run.id)}/${action}`, {
+          method: "POST",
+          headers: requestHeaders(),
+        });
+        if (!response.ok) throw new Error("Run action unavailable");
+        payload = await response.json() as unknown;
+      }
       if (action === "discard") {
         if (payload === null || typeof payload !== "object" || !("discarded" in payload) || payload.discarded !== true) {
           throw new Error("Discard not acknowledged");
@@ -134,6 +150,7 @@ export function RunHistory({ onOpen, fetcher }: RunHistoryProps) {
           ? { ...current, runs: current.runs.filter((item) => item.id !== run.id) }
           : current);
         setNotice("The run's work copy was removed.");
+        onDiscarded?.(run.id);
       } else {
         if (!isRunSummary(payload) || payload.id !== run.id) throw new Error("Invalid resume response");
         setState((current) => current.phase === "ready"
@@ -142,6 +159,7 @@ export function RunHistory({ onOpen, fetcher }: RunHistoryProps) {
             : item) }
           : current);
         setNotice("Run resumed.");
+        if (api) onOpen(run.id);
       }
     } catch {
       setActionError(action === "resume"

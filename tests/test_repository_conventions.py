@@ -431,15 +431,55 @@ def test_final_gate_sees_every_predecessor_and_browser_decision() -> None:
 
 
 
-def test_pull_requests_do_not_run_the_interpreter_matrix() -> None:
+def test_interpreter_matrix_stays_out_of_quality_workflow() -> None:
     quality = _read(WORKFLOWS / "quality.yml")
     compatibility = _read(WORKFLOWS / "python-compatibility.yml")
     triggers = compatibility.split("\njobs:\n", 1)[0]
 
     assert "python-version: [" not in quality, "the interpreter matrix belongs in python-compatibility.yml"
-    assert "pull_request" not in triggers
+    assert "pull_request:" in triggers
     assert "schedule:" in triggers and "push:" in triggers and "workflow_dispatch:" in triggers
     assert "python -m ruff" not in compatibility
+
+
+def test_matching_prs_run_only_path_filtered_agent_sandbox_compatibility() -> None:
+    compatibility = _read(WORKFLOWS / "python-compatibility.yml")
+    triggers = compatibility.split("\njobs:\n", 1)[0]
+    match = re.search(
+        r"^  pull_request:\n    branches: \[main\]\n    paths:\n((?:      - [^\n]+\n)+)",
+        triggers,
+        re.MULTILINE,
+    )
+    assert match, "compatibility PR trigger must filter changed paths"
+    assert set(match.group(1).splitlines()) == {
+        '      - "backend/**"',
+        "      - main.py",
+        "      - app_factory.py",
+        '      - "tests/test_agent_*.py"',
+        '      - "tests/test_sandbox_*.py"',
+        "      - tests/test_worker_containment.py",
+        "      - requirements-dev.txt",
+        "      - .github/workflows/python-compatibility.yml",
+    }
+
+    full = _job_block(compatibility, "python-compatibility")
+    focused = _job_block(compatibility, "agent-sandbox-pr")
+    assert "if: github.event_name != 'pull_request'" in full
+    assert 'python-version: ["3.12", "3.13", "3.14"]' in full
+    assert "run: python -m pytest -q\n" in full
+    assert "python -m compileall -q main.py app_factory.py backend" in full
+    assert "timeout-minutes: 30" in full
+
+    assert "if: github.event_name == 'pull_request'" in focused
+    assert 'python-version: ["3.13", "3.14"]' in focused
+    assert "test_agent_*.py" in focused
+    assert "test_sandbox_*.py" in focused
+    assert "test_worker_containment.py" in focused
+    assert "python -m pytest -q @testPaths" in focused
+    assert "run: python -m pytest -q\n" not in focused
+    assert "python -m compileall" not in focused
+    assert "timeout-minutes: 15" in focused
+    assert "persist-credentials: false" in focused
 
 
 def test_the_locked_interpreter_is_not_repeated_in_the_matrix() -> None:
