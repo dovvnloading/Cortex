@@ -163,7 +163,7 @@ class ShellTools:
 
     def __init__(
         self, workcopy: str | os.PathLike[str], run_id: str, *, mode: str,
-        on_output: Callable[[str], None] | None = None,
+        on_output: Callable[[str, str], None] | None = None,
         launcher_factory: Callable[[Path, str], Launcher] = AutoLauncher,
         jobonly_factory: Callable[[Path], Launcher] = JobOnlyLauncher,
     ) -> None:
@@ -188,7 +188,7 @@ class ShellTools:
         self._foreground: dict[int, ProcessHandle] = {}
         self._background: dict[str, _Background] = {}
 
-    def _emit(self, data: bytes) -> None:
+    def _emit(self, data: bytes, tool_call_id: str) -> None:
         if self._output is None or not data:
             return
         with self._lock:
@@ -202,12 +202,12 @@ class ShellTools:
         # fully drained and the tool observation retains its head and tail.
         for offset in range(0, len(part), 8192):
             try:
-                self._output(part[offset:offset + 8192].decode("utf-8", errors="replace"))
+                self._output(part[offset:offset + 8192].decode("utf-8", errors="replace"), tool_call_id)
             except Exception:
                 return
         if truncated:
             try:
-                self._output("\n[Further shell output omitted from event stream]\n")
+                self._output("\n[Further shell output omitted from event stream]\n", tool_call_id)
             except Exception:
                 pass
 
@@ -332,7 +332,7 @@ class ShellTools:
         if closed:
             process.kill_tree()
             return self._error("run_ended")
-        pump = _Pump(process, self._emit)
+        pump = _Pump(process, lambda chunk: self._emit(chunk, call.id))
         end = monotonic() + timeout
         timed_out = False
         try:
@@ -364,12 +364,12 @@ class ShellTools:
             if not pump.done.is_set():
                 process.kill_tree()
 
-    def _background_output(self, identifier: str, data: bytes) -> None:
+    def _background_output(self, identifier: str, data: bytes, tool_call_id: str) -> None:
         with self._lock:
             background = self._background.get(identifier)
         if background is not None:
             background.append(data)
-        self._emit(data)
+        self._emit(data, tool_call_id)
 
     def _start_background(self, call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
         with self._lock:
@@ -401,7 +401,7 @@ class ShellTools:
         if closed or background is None:
             process.kill_tree()
             return self._error("run_ended")
-        background.pump = _Pump(process, lambda data: self._background_output(identifier, data))
+        background.pump = _Pump(process, lambda data: self._background_output(identifier, data, call.id))
         return ToolResult(
             json.dumps({"id": identifier, "pid": process.pid, "level": process.level}),
             summary="Background command started",
@@ -469,7 +469,7 @@ class ShellTools:
 
 def register_shell_tools(
     registry: ToolRegistry, workcopy: str | os.PathLike[str], run_id: str, *, mode: str,
-    on_output: Callable[[str], None] | None = None,
+    on_output: Callable[[str, str], None] | None = None,
 ) -> ShellTools:
     """Register all four shell operations on an opted-in run, returning cleanup owner."""
     shell = ShellTools(workcopy, run_id, mode=mode, on_output=on_output)
