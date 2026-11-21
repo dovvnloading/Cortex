@@ -150,8 +150,9 @@ SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
         _tool_turn(("edit_file", {
             "path": "math.js", "old": "return left - right;", "new": "return left + right;",
         })),
+        # cmd selects npm.cmd on Windows rather than execution-policy-restricted npm.ps1.
         _tool_turn(("run_command", {
-            "command": "npm run test", "timeout_s": 30, "network": False, "shell": "powershell",
+            "command": "npm run test", "timeout_s": 30, "network": False, "shell": "cmd",
         })),
         _final("Fixed the JavaScript addition and verified it with node --test."),
     ),
@@ -190,7 +191,10 @@ SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
         _tool_turn(("write_file", {
             "path": "slug.py",
             "content": "import re\n\n\ndef slugify(text: str) -> str:\n"
-                       "    return re.sub(r\"[^a-z0-9]+\", \"-\", text.lower()).strip(\"-\")\n",
+                       "    ascii_lower = text.translate(str.maketrans(\n"
+                       "        \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\", \"abcdefghijklmnopqrstuvwxyz\",\n"
+                       "    ))\n"
+                       "    return re.sub(r\"[^a-z0-9]+\", \"-\", ascii_lower).strip(\"-\")\n",
         })),
         _tool_turn(("run_command", {
             "command": "python -m pytest -q spec_cases.py", "timeout_s": 30,

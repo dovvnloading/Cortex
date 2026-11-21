@@ -1,7 +1,7 @@
 {
   "goal": "Read SPEC.md and spec_cases.py, then create slug.py satisfying the written specification. Do not alter any existing files. Verify with python -m pytest -q spec_cases.py.",
   "expected_changes": {
-    "slug.py": "import re\n\n\ndef slugify(text: str) -> str:\n    return re.sub(r\"[^a-z0-9]+\", \"-\", text.lower()).strip(\"-\")\n"
+    "slug.py": "import re\n\n\ndef slugify(text: str) -> str:\n    ascii_lower = text.translate(str.maketrans(\n        \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\", \"abcdefghijklmnopqrstuvwxyz\",\n    ))\n    return re.sub(r\"[^a-z0-9]+\", \"-\", ascii_lower).strip(\"-\")\n"
   },
   "answer_contains": "slug.py",
   "require_read": true

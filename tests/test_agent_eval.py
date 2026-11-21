@@ -12,6 +12,7 @@ import tomllib
 import pytest
 
 from cortex_backend.agent.loop import AgentLoop
+from cortex_backend.agent.policy import classify, decide
 from tools import agent_eval
 from tools import agent_eval_replay
 
@@ -182,6 +183,16 @@ def test_extended_fixtures_are_excluded_from_outer_pytest_collection(name: str) 
         assert manifest == {"private": True, "scripts": {"test": "node --test"}}
 
 
+def test_js_scripted_command_uses_windows_cmd_and_no_network() -> None:
+    reply = json.loads(agent_eval.SCRIPTED_REPLIES["fix-failing-js-test"][2])
+    call, = reply["tool_calls"]
+    assert call["name"] == "run_command"
+    assert call["arguments"] == {
+        "command": "npm run test", "timeout_s": 30, "network": False, "shell": "cmd",
+    }
+    assert decide(classify("npm run test", "cmd", "appcontainer"), "auto_sandboxed") == "allow"
+
+
 @pytest.mark.parametrize("name", _VERIFIED_TASKS)
 def test_fixture_native_check_fails_before_repair_and_passes_after(
     name: str, tmp_path: Path,
@@ -238,6 +249,23 @@ def test_new_tasks_reject_an_unexpected_verification_command(
     case = agent_eval.run_suite(task=name)["tasks"][0]
     assert case["checks"]["end_state"] is True
     assert case["checks"]["verification_command"] is False
+    assert case["passed"] is False
+
+
+def test_rename_fails_if_any_import_or_reference_is_left_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "rename-across-files"
+    replies = list(agent_eval.SCRIPTED_REPLIES[name])
+    changes = json.loads(replies[1])
+    assert len(changes["tool_calls"]) == 3
+    changes["tool_calls"].pop()  # Leave summary.py importing and calling display_name.
+    replies[1] = json.dumps(changes)
+    scripted = dict(agent_eval.SCRIPTED_REPLIES)
+    scripted[name] = tuple(replies)
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", scripted)
+    case = agent_eval.run_suite(task=name)["tasks"][0]
+    assert case["checks"]["end_state"] is False
     assert case["passed"] is False
 
 
