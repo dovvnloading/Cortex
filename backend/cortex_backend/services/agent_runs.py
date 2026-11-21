@@ -334,7 +334,7 @@ class AgentRuns:
                 register_plan_tool(registry, store, run_id, owner=owner)
                 _register_web_fetch(registry)
                 if mode != "plan_only":
-                    register_git_tools(registry, prepared.path, run_id)
+                    register_git_tools(registry, prepared.path, run_id, require_approval=True)
                     shell = register_shell_tools(
                         registry, prepared.path, run_id, mode=mode,
                         on_output=lambda text: self._shell_output(run_id, text),
