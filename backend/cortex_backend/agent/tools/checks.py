@@ -125,10 +125,12 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     projects = sorted(path for path in files if path.casefold().endswith(".csproj"))
     # MSBuild targets can execute commands before tests, including when a
     # solution rather than an individual project is selected.
+    # Imported .targets/.props can carry the same executable hooks as a
+    # .csproj; UsingTask may load project-controlled executable code too.
     build_hooks = any(
-        b"<exec" in files[path].lower()
+        any(marker in files[path].lower() for marker in (b"<exec", b"<usingtask"))
         for path in files
-        if path.casefold().endswith((".csproj", "directory.build.targets", "directory.build.props"))
+        if path.casefold().endswith((".csproj", ".targets", ".props"))
     )
     for path in solutions or projects:
         checks.append(DetectedCheck(
