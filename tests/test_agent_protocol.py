@@ -230,3 +230,90 @@ def test_llamacpp_request_passes_through_tools_and_json_schema() -> None:
         "name": "agent_turn", "schema": schema, "strict": True,
     }}
     assert {key: value for key, value in result.items() if key not in ("tools", "response_format")} == original
+
+
+def test_nested_extra_fields_are_rejected_even_without_additional_properties_keyword() -> None:
+    nested = ToolSpec("lookup", "lookup", {
+        "type": "object", "properties": {"metadata": {
+            "type": "object", "properties": {"allowed": {"type": "integer"}}, "required": ["allowed"],
+        }}, "required": ["metadata"],
+    })
+    call = {"name": "lookup", "arguments": {"metadata": {"allowed": 1, "unoffered": "no"}}}
+    client = _ScriptedClient({"message": {"content": _json_envelope(tool_calls=[call])}})
+    with pytest.raises(ProtocolError) as caught:
+        call_model(client, model="x", messages=[], tools=[nested], options={})
+    assert caught.value.code == "extra_argument"
+
+
+def test_optional_union_object_still_rejects_extra_keys() -> None:
+    union = ToolSpec("lookup", "lookup", {
+        "type": "object", "properties": {"payload": {
+            "type": ["object", "null"], "properties": {"ok": {"type": "string"}},
+        }}, "required": ["payload"],
+    })
+    call = {"name": "lookup", "arguments": {"payload": {"ok": "yes", "extra": 1}}}
+    client = _ScriptedClient({"message": {"content": _json_envelope(tool_calls=[call])}},
+                             RuntimeCapabilities(json_schema=True))
+    with pytest.raises(ProtocolError) as caught:
+        call_model(client, model="x", messages=[], tools=[union], options={})
+    assert caught.value.code == "extra_argument"
+
+
+def test_native_function_envelope_has_no_escape_hatch() -> None:
+    reply = {"message": {"content": "", "tool_calls": [{
+        "function": {"name": "lookup", "arguments": {"key": "abc"}, "execute": True},
+    }]}}
+    client = _ScriptedClient(reply, RuntimeCapabilities(native_tools=True))
+    with pytest.raises(ProtocolError) as caught:
+        call_model(client, model="x", messages=[], tools=[TOOL], options={})
+    assert caught.value.code == "extra_fields"
+
+
+def test_streamed_ollama_object_chunks_preserve_tool_calls() -> None:
+    from cortex_backend.services.chat_client import OllamaChatClient
+
+    class _Stream:
+        def chat(self, **kwargs: object):
+            assert kwargs["stream"] is True
+            yield SimpleNamespace(
+                message=SimpleNamespace(content="", thinking=None, tool_calls=[{
+                    "function": {"name": "lookup", "arguments": {"key": "abc"}},
+                }]), done=True, model_dump=lambda: {"done": True},
+            )
+
+    result = OllamaChatClient(_Stream()).chat(
+        model="example", messages=[], options={}, tools=[{"type": "function"}], cancellation_event=Event(),
+    )
+    assert result["message"]["tool_calls"] == [
+        {"function": {"name": "lookup", "arguments": {"key": "abc"}}},
+    ]
+
+
+def test_streamed_llamacpp_tool_call_fragments_are_assembled() -> None:
+    import time
+    from pathlib import Path
+
+    import httpx
+
+    from cortex_backend.llamacpp.chat_client import LlamaCppChatClient
+
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_7",
+            "function": {"name": "lookup", "arguments": ""}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0,
+            "function": {"arguments": '{"key":"abc"}'}}]}, "finish_reason": "tool_calls"}]},
+    ]
+    sse = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, text=sse)))
+    client = LlamaCppChatClient(None, models_directory=lambda: Path("."), http_client=http)
+    try:
+        result = client._chat_abortable(
+            "http://127.0.0.1:9999", [], {}, time.monotonic(), Event(), None,
+            tools=[{"type": "function"}],
+        )
+    finally:
+        http.close()
+    assert result["message"]["tool_calls"] == [{
+        "id": "call_7", "type": "function", "function": {"name": "lookup", "arguments": '{"key":"abc"}'},
+    }]
+    assert result["done_reason"] == "tool_calls"
