@@ -65,7 +65,7 @@ def _project(tmp_path: Path) -> Path:
     root = tmp_path / "source-project"
     root.mkdir()
     for name, content in _OLD.items():
-        (root / name).write_text(content, encoding="utf-8")
+        (root / name).write_bytes(content.encode("utf-8"))
     return root
 
 
@@ -364,7 +364,7 @@ def _staged(tmp_path: Path) -> tuple[AgentRuns, AgentRun, WorkCopy, Path]:
     _await(manager, run.id, "completed")
     copy = manager._live[run.id].copy
     for name, value in _NEW.items():
-        (copy.path / name).write_text(value, encoding="utf-8")
+        (copy.path / name).write_bytes(value.encode("utf-8"))
     assert set(manager.changeset(run.id, owner=_OWNER)) == set(_NEW)
     _assert_project(project, _OLD)
     return manager, run, copy, project
