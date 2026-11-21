@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 import sys
 from threading import Event, Thread
 from time import monotonic, sleep
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
 from cortex_backend.agent.loop import AgentLoop
 from cortex_backend.agent.protocol import RuntimeCapabilities, ToolCall
 from cortex_backend.agent.run_store import AgentRunStore
-from cortex_backend.agent.sandbox import JobOnlyLauncher, UnsandboxedFallbackRequired
+from cortex_backend.agent.sandbox import AppContainerLauncher, JobOnlyLauncher, UnsandboxedFallbackRequired
+from cortex_backend.agent.sandbox.base import RunningProcess
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
@@ -58,8 +61,10 @@ class FakeLauncher:
         return self.process
 
 
-def _context(*, approved: bool = False, cancellation: Event | None = None) -> ToolContext:
-    return ToolContext(cancellation or Event(), monotonic() + 30, approved=approved)
+def _context(
+    *, approved: bool = False, cancellation: Event | None = None, deadline_s: float = 30,
+) -> ToolContext:
+    return ToolContext(cancellation or Event(), monotonic() + deadline_s, approved=approved)
 
 
 def _call(name: str, **arguments: object) -> ToolCall:
@@ -173,6 +178,58 @@ def test_timeout_kills_process_tree_and_reports_timeout(tmp_path: Path):
         response = registry.execute(call, _context())
         payload = _result(response)
         assert payload["timed_out"] is True
+        assert isinstance(response, ToolResult) and response.success is False
+        assert process.killed.is_set()
+    finally:
+        shell.close()
+
+
+def test_sandbox_kill_terminates_job_explicitly_and_never_returns_zero():
+    killed = Event()
+    calls: list[tuple[str, int | None]] = []
+
+    class ZeroExitProcess:
+        pid = 4242
+        stdout = BytesIO()
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert killed.wait(timeout or 2)
+            return 0  # simulate Windows' kill-on-close result
+
+        def kill(self) -> None:
+            killed.set()
+
+    class FakeJob:
+        def terminate(self, exit_code: int) -> None:
+            calls.append(("terminate", exit_code))
+
+        def close(self) -> None:
+            calls.append(("close", None))
+
+    process = RunningProcess(ZeroExitProcess(), FakeJob(), "unsandboxed", lambda: None)  # type: ignore[arg-type]
+    process.kill_tree()
+    assert process.wait(timeout=1) == 1
+    assert calls[:2] == [("terminate", 1), ("close", None)]
+
+
+@pytest.mark.parametrize("level", ["appcontainer", "unsandboxed"])
+def test_timeout_never_reports_success_even_if_killed_process_returns_zero(tmp_path: Path, level: str):
+    class ZeroOnKill(FakeProcess):
+        def wait(self, timeout: float | None = None) -> int:
+            super().wait(timeout)
+            return 0  # reproduce Windows' misleading kill-on-close status
+
+    process = ZeroOnKill(level=level, hang=True)
+    registry, shell, _ = _registry(tmp_path, level=level, process=process)
+    try:
+        response = registry.execute(
+            _call("run_command", command="dir", shell="cmd", timeout_s=0.1,
+                  network=level == "unsandboxed"),
+            _context(approved=True),
+        )
+        payload = _result(response)
+        assert payload["timed_out"] is True
+        assert payload["exit_code"] is None or payload["exit_code"] != 0
         assert isinstance(response, ToolResult) and response.success is False
         assert process.killed.is_set()
     finally:
@@ -356,13 +413,47 @@ def test_windows_jobonly_real_processes_use_temp_and_leave_no_profiles(tmp_path:
     for spec in SHELL_TOOLS:
         registry.register(spec, shell.handle)
     try:
-        call = _call("run_command", command="Write-Output shell-smoke", timeout_s=10, network=True)
+        call = _call("run_command", command="Write-Output shell-smoke", timeout_s=60, network=True)
         assert isinstance(registry.execute(call, _context()), NeedsApproval)
-        result = _result(registry.execute(call, _context(approved=True)))
+        result = _result(registry.execute(call, _context(approved=True, deadline_s=90)))
+        assert result["timed_out"] is False
         assert result["exit_code"] == 0 and "shell-smoke" in str(result["output"])
         slow = _call("run_command", command="Start-Sleep -Seconds 20", timeout_s=0.2, network=True)
         timeout = _result(registry.execute(slow, _context(approved=True)))
         assert timeout["timed_out"] is True
+        assert timeout["exit_code"] is None or timeout["exit_code"] != 0
     finally:
         shell.close()
     assert set(win_appcontainer.list_profiles()) == existing
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Job Objects and AppContainer")
+@pytest.mark.parametrize("launcher_kind", ["jobonly", "appcontainer"])
+def test_windows_timed_out_run_command_has_no_success_exit_code(tmp_path: Path, launcher_kind: str):
+    """Real job termination must not be mistaken for a completed command."""
+    def launcher_factory(root: Path, run_id: str) -> JobOnlyLauncher | AppContainerLauncher:
+        if launcher_kind == "jobonly":
+            return JobOnlyLauncher(root)
+        return AppContainerLauncher(root, run_id)
+
+    registry = ToolRegistry()
+    shell = ShellTools(
+        tmp_path, f"timeout-exit-{uuid4().hex}", mode="ask",
+        launcher_factory=launcher_factory,
+    )
+    for spec in SHELL_TOOLS:
+        registry.register(spec, shell.handle)
+    try:
+        # cmd.exe's built-in FOR loop stays alive without needing network access
+        # or PowerShell's variable cold-start latency.
+        call = _call(
+            "run_command", command="for /L %i in (1,1,2147483647) do @ver >NUL",
+            shell="cmd", timeout_s=0.2, network=launcher_kind == "jobonly",
+        )
+        response = registry.execute(call, _context(approved=True))
+        payload = _result(response)
+        assert payload["timed_out"] is True
+        assert payload["exit_code"] is None or payload["exit_code"] != 0
+        assert isinstance(response, ToolResult) and response.success is False
+    finally:
+        shell.close()

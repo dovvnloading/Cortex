@@ -347,13 +347,16 @@ class ShellTools:
             pump.done.wait(1)
             if context.stopped():
                 raise ToolInterrupted("shell cancelled or run deadline reached")
-            data = {"exit_code": pump.exit_code, "timed_out": timed_out, **pump.excerpt.result()}
+            # A job killed on timeout can report 0 despite never completing.
+            # Cancellation raises ToolInterrupted and never returns a success observation.
+            exit_code = None if timed_out and pump.exit_code == 0 else pump.exit_code
+            data = {"exit_code": exit_code, "timed_out": timed_out, **pump.excerpt.result()}
             if pump.failed and not timed_out:
                 return self._error("process_failed")
             return ToolResult(
                 json.dumps(data, ensure_ascii=False),
                 summary="Command timed out" if timed_out else "Command exited",
-                success=not timed_out and pump.exit_code == 0,
+                success=not timed_out and exit_code == 0,
             )
         finally:
             with self._lock:

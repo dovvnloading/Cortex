@@ -199,6 +199,7 @@ class RunningProcess:
         self._condition = threading.Condition()
         self._chunks: deque[bytes] = deque(maxlen=256)
         self._result: int | None = None
+        self._killed = False
         self._error: Exception | None = None
         self._tree_lock = threading.Lock()
         self._reader = threading.Thread(target=self._drain, name="cortex-agent-stdout", daemon=True)
@@ -261,11 +262,16 @@ class RunningProcess:
         if self._error is not None:
             raise self._error
         assert self._result is not None
-        return self._result
+        # A close-triggered job kill may be observed as exit code 0 on Windows.
+        return 1 if self._killed and self._result == 0 else self._result
 
     def kill_tree(self) -> None:
         with self._tree_lock:
-            self._job.close()
+            self._killed = True
+            try:
+                self._job.terminate(1)
+            finally:
+                self._job.close()
             try:
                 self._process.kill()
             except OSError:

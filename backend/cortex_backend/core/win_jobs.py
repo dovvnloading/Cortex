@@ -138,6 +138,7 @@ class JobWin32(Protocol):
     def SetInformationJobObject(self, job: int, info_class: int, info: Any, info_size: int) -> int: ...
     def OpenProcess(self, access: int, inherit_handle: int, pid: int) -> int: ...
     def AssignProcessToJobObject(self, job: int, process: int) -> int: ...
+    def TerminateJobObject(self, job: int, exit_code: int) -> int: ...
     def CloseHandle(self, handle: int) -> int: ...
 
 
@@ -151,6 +152,8 @@ def real_job_win32() -> JobWin32:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     return kernel32
@@ -258,6 +261,23 @@ class KillOnCloseJob:
             raise JobObjectError("could not assign the process to containment") from exc
         if not assigned:
             raise JobObjectError("could not assign the process to containment")
+
+    def terminate(self, exit_code: int = 1) -> None:
+        """Explicitly kill assigned processes with a nonzero exit status.
+
+        Closing a kill-on-close job alone can give a killed process status 0
+        on Windows. Call this before close() for intentional termination.
+        """
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int) or not 1 <= exit_code <= 0xFFFFFFFF:
+            raise ValueError("job termination exit code must be a nonzero DWORD")
+        win32, job = self._win32, self._handle
+        if win32 is None or job is None:
+            return
+        try:
+            if not win32.TerminateJobObject(job, exit_code):
+                logger.warning("Could not explicitly terminate a process job; kill-on-close remains active.")
+        except (AttributeError, OSError):
+            logger.warning("Could not explicitly terminate a process job; kill-on-close remains active.")
 
     def close(self) -> None:
         """Close the job, ending every process still in it. Safe to repeat."""
