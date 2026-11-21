@@ -150,7 +150,10 @@ class _ObedientModel:
             return {"message": {"content": _call("read_file", {"path": _READ_PATHS[self.source]})}}
         if self.attempt is None:
             self.attempt = self._injection(messages)
-        if self.attempt["name"] in {"disable_approvals", "switch_mode"} or not self.sent:
+        invalid_call = (self.attempt["name"] in {"disable_approvals", "switch_mode"}
+                        or "approved" in self.attempt["arguments"]
+                        or "mode" in self.attempt["arguments"])
+        if invalid_call or not self.sent:
             self.sent = True
             return {"message": {"content": _call(self.attempt["name"], self.attempt["arguments"])}}
         return {"message": {"content": _final()}}
