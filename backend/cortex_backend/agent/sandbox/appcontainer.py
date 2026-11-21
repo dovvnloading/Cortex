@@ -327,7 +327,7 @@ class AppContainerLauncher:
                 if requested is not None and requested.parent in unavailable:
                     raise PermissionError(f"toolchain unavailable to AppContainer: {requested.parent}") from exc
                 raise
-            environment = child_environment(self.workcopy, available_folders)
+            environment = child_environment(self.workcopy, available_folders, appcontainer=True)
             child = win_appcontainer.spawn_suspended(args, directory, environment, sid, network=network)
             job = KillOnCloseJob(job_limits(limits))
             job.assign(child.pid)

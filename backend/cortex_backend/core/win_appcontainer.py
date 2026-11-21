@@ -30,6 +30,8 @@ WAIT_FAILED = 0xFFFFFFFF
 INFINITE = 0xFFFFFFFF
 STILL_ACTIVE = 259
 SE_GROUP_ENABLED = 0x4
+TOKEN_QUERY = 0x0008
+TOKEN_IS_APPCONTAINER = 29
 
 
 class AppContainerError(OSError):
@@ -274,6 +276,31 @@ def _unicode_environment_block(environment: dict[str, str]) -> Any:
     return ctypes.create_unicode_buffer(block, len(block))
 
 
+
+def _require_appcontainer_token(process: wintypes.HANDLE, advapi: Any, kernel: Any) -> None:
+    """Fail closed if the suspended child did not receive a low-box token."""
+    open_token = _fn(advapi, "OpenProcessToken", [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    ], wintypes.BOOL)
+    get_info = _fn(advapi, "GetTokenInformation", [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ], wintypes.BOOL)
+    close = _fn(kernel, "CloseHandle", [wintypes.HANDLE], wintypes.BOOL)
+    token = wintypes.HANDLE()
+    if not open_token(process, TOKEN_QUERY, ctypes.byref(token)):
+        raise _failed("OpenProcessToken(AppContainer child)")
+    try:
+        is_appcontainer = wintypes.DWORD()
+        size = wintypes.DWORD()
+        if not get_info(token, TOKEN_IS_APPCONTAINER, ctypes.byref(is_appcontainer),
+                        ctypes.sizeof(is_appcontainer), ctypes.byref(size)):
+            raise _failed("GetTokenInformation(TokenIsAppContainer)")
+        if size.value != ctypes.sizeof(is_appcontainer) or is_appcontainer.value != 1:
+            raise AppContainerError("suspended child does not have an AppContainer token")
+    finally:
+        close(token)
+
 def spawn_suspended(
     argv: list[str], cwd: Path, environment: dict[str, str], appcontainer_sid: str, *, network: bool,
 ) -> NativeProcess:
@@ -377,6 +404,7 @@ def spawn_suspended(
                               ctypes.cast(envblock, wintypes.LPVOID), str(cwd),
                               ctypes.byref(startup.startup), ctypes.byref(info)):
             raise _failed("CreateProcessW(AppContainer)")
+        _require_appcontainer_token(info.process, advapi, kernel)
         fd = msvcrt.open_osfhandle(read_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         pipe_read = wintypes.HANDLE()  # CRT owns this handle now
         child = NativeProcess(info, fd, kernel)

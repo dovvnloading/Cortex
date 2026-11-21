@@ -141,6 +141,43 @@ def isolated_windows_toolchain(_staged_python: Path, monkeypatch: pytest.MonkeyP
     ))
 
 
+def test_suspended_child_token_is_checked_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Do not run a child if Windows ignored the security-capabilities attribute."""
+    import ctypes
+    from ctypes import wintypes
+
+    closed: list[int] = []
+
+    def open_token(_process, access, result):
+        assert access == win_appcontainer.TOKEN_QUERY
+        result._obj.value = 123
+        return 1
+
+    def get_info(token, information_class, value, size, returned):
+        assert token.value == 123
+        assert information_class == win_appcontainer.TOKEN_IS_APPCONTAINER
+        assert size == ctypes.sizeof(wintypes.DWORD)
+        value._obj.value = 0
+        returned._obj.value = size
+        return 1
+
+    def close_token(handle):
+        closed.append(handle.value)
+        return 1
+
+    functions = {
+        "OpenProcessToken": open_token,
+        "GetTokenInformation": get_info,
+        "CloseHandle": close_token,
+    }
+    monkeypatch.setattr(win_appcontainer, "_fn", lambda _dll, name, *_a: functions[name])
+    with pytest.raises(win_appcontainer.AppContainerError, match="does not have an AppContainer token"):
+        win_appcontainer._require_appcontainer_token(wintypes.HANDLE(4), object(), object())
+    assert closed == [123]
+
+
 @windows_only
 def test_windows_python_and_cmd_and_profile_are_cleaned(
     tmp_path: Path, isolated_windows_toolchain: None,
@@ -199,18 +236,38 @@ def test_windows_network_off_denies_loopback_and_public_ip(
         listener.listen(1)
         port = listener.getsockname()[1]
         script = (
-            "import json,socket\n"
-            "def connect(host, port):\n"
-            "    try:\n"
-            "        s=socket.create_connection((host, port), timeout=2); s.close(); return 'connected'\n"
-            "    except OSError as error: return getattr(error, 'winerror', None) or error.errno\n"
-            f"print(json.dumps([connect('127.0.0.1',{port}), connect('1.1.1.1',443)]))\n"
+            "import ctypes,json,socket\n"
+            "from ctypes import wintypes\n"
+            "kernel=ctypes.WinDLL('kernel32',use_last_error=True)\n"
+            "advapi=ctypes.WinDLL('advapi32',use_last_error=True)\n"
+            "kernel.GetCurrentProcess.restype=wintypes.HANDLE\n"
+            "kernel.CloseHandle.argtypes=[wintypes.HANDLE]\n"
+            "advapi.OpenProcessToken.argtypes=[wintypes.HANDLE,wintypes.DWORD,ctypes.POINTER(wintypes.HANDLE)]\n"
+            "advapi.OpenProcessToken.restype=wintypes.BOOL\n"
+            "advapi.GetTokenInformation.argtypes=[wintypes.HANDLE,ctypes.c_int,wintypes.LPVOID,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]\n"
+            "advapi.GetTokenInformation.restype=wintypes.BOOL\n"
+            "token=wintypes.HANDLE()\n"
+            "assert advapi.OpenProcessToken(kernel.GetCurrentProcess(),8,ctypes.byref(token))\n"
+            "try:\n"
+            "    is_appcontainer=wintypes.DWORD()\n"
+            "    returned=wintypes.DWORD()\n"
+            "    assert advapi.GetTokenInformation(token,29,ctypes.byref(is_appcontainer),ctypes.sizeof(is_appcontainer),ctypes.byref(returned))\n"
+            "    assert returned.value == ctypes.sizeof(is_appcontainer)\n"
+            "finally:\n"
+            "    kernel.CloseHandle(token)\n"
+            "def connect(host,port):\n"
+            "    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:\n"
+            "        sock.settimeout(2)\n"
+            "        return sock.connect_ex((host,port))\n"
+            f"print(json.dumps({{'appcontainer': is_appcontainer.value, 'errors': [connect('127.0.0.1',{port}),connect('1.1.1.1',443)]}}))\n"
         )
         launcher = AppContainerLauncher(tmp_path, uuid4().hex)
         output, code = _run(launcher, ["python", "-c", script], tmp_path)
     assert code == 0
     # WSAEACCES, rather than timeout/refused (which could hide a network leak).
-    assert json.loads(output) == [10013, 10013]
+    result = json.loads(output)
+    assert result["appcontainer"] == 1  # GetTokenInformation(TokenIsAppContainer)
+    assert result["errors"] == [10013, 10013]
     assert launcher.name not in win_appcontainer.list_profiles()
 
 
@@ -266,7 +323,7 @@ def _fake_windows_launch(
     monkeypatch.setattr(appcontainer.win_acl, "tool_folder_policy", lambda path: (
         policy if path == tool_dir else "grantable"
     ))
-    monkeypatch.setattr(appcontainer, "child_environment", lambda *_a: {"PATH": str(tool_dir)})
+    monkeypatch.setattr(appcontainer, "child_environment", lambda *_a, **_kw: {"PATH": str(tool_dir)})
     monkeypatch.setattr(appcontainer, "system_directory", lambda: None)
     monkeypatch.setattr(win_appcontainer, "derive_profile_sid", lambda *_a: sid)
 
