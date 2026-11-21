@@ -317,16 +317,33 @@ describe("AgentPage", () => {
   it("keeps journal Undo after confirmed Discard, requiring another confirmation and server ack", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
+    const pending = {
+      path: "pending.py", kind: "add", baseline_sha256: null,
+      new_sha256: "pending", diff: "+pending = True",
+    };
+    api.agentChangeset.mockImplementation(async (runId: string) => {
+      // The accepted file drops out, but this second change remains staged
+      // until Discard destroys the disposable copy.
+      if (api.discardAgentRun.mock.calls.length > 0) throw new Error("copy unavailable");
+      const changes = api.acceptAgentChanges.mock.calls.length > 0 ? [pending] : [
+        { path: "app.py", kind: "modify", baseline_sha256: "before", new_sha256: "after",
+          diff: "-value = 42\\n+value = 43" },
+        pending,
+      ];
+      return { run_id: runId, changes };
+    });
     let resolveUndo!: (value: { paths: string[] }) => void;
     api.undoAgentChanges.mockImplementation(() => new Promise((resolve) => { resolveUndo = resolve; }));
     page(api);
     await prepare(user);
     await user.click(screen.getByRole("button", { name: "Start Agent" }));
     await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("checkbox", { name: "Select pending.py" }));
     await user.click(screen.getByRole("button", { name: "Accept selected to project" }));
     await user.click(screen.getByRole("button", { name: "Confirm accept" }));
     await screen.findByText("Accepted to the project: app.py");
 
+    expect(await screen.findByRole("checkbox", { name: "Select pending.py" })).toBeChecked();
     const undo = await screen.findByRole("button", { name: "Undo" });
     expect(undo).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Discard all" }));
