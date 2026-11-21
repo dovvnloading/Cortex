@@ -115,7 +115,9 @@ def _strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     def close(node: Any) -> None:
         if not isinstance(node, dict):
             return
-        if node.get("type") == "object" or "properties" in node:
+        if (node.get("type") == "object" or
+                isinstance(node.get("type"), list) and "object" in node["type"] or
+                "properties" in node):
             node["additionalProperties"] = False
         for key in ("properties", "$defs", "definitions"):
             children = node.get(key)
@@ -245,7 +247,11 @@ def _check_schema(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any]
             raise ProtocolError("invalid_tool_schema", "Invalid JSON Schema enum.")
         if value not in choices:
             raise ProtocolError("invalid_arguments", "Argument is not one of the allowed values.")
-    if isinstance(value, dict) and (schema.get("type") == "object" or "properties" in schema):
+    if isinstance(value, dict) and (
+        schema.get("type") == "object"
+        or isinstance(schema.get("type"), list) and "object" in schema["type"]
+        or "properties" in schema
+    ):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required, list):
@@ -433,7 +439,7 @@ def call_model(
                 "name": tool.name, "description": tool.description, "parameters": _strict_schema(tool.json_schema),
             }} for tool in tools]
         else:
-            request["messages"] = [*messages, {"role": "system", "content": _instructions(tools)}]
+            request["messages"] = [{"role": "system", "content": _instructions(tools)}, *messages]
             if capabilities.json_schema:
                 request["format"] = _envelope_schema(tools)
     response = client.chat(**request)
