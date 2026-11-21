@@ -1785,6 +1785,7 @@ class LlamaServerManager:
             "--host", "127.0.0.1",
             "--port", "0",
             "--reasoning-format", "deepseek",
+            "--jinja",  # Enable the native tool-call template for managed llama-server.
             "-ngl", "auto" if backend == "vulkan" else "0",
             # One slot. Cortex serialises generations, and llama-server's "auto"
             # slot count leaves the total ``-c`` budget to be shared between
