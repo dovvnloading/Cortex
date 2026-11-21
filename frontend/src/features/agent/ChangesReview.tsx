@@ -15,10 +15,15 @@ export type ChangesReviewProps = {
   onDiscard: () => void;
   onUndo: () => void;
   accepted: boolean;
+  /** True only when the backend reports an owner-scoped undo checkpoint. */
+  allowRecovery?: boolean;
+  busy?: boolean;
+  error?: string | null;
+  notice?: string | null;
 };
 
 type Confirmation = {
-  action: "accept" | "discard";
+  action: "accept" | "discard" | "undo";
   signature: string;
   paths: string[];
 };
@@ -69,10 +74,12 @@ function DiffText({ diff }: { diff: string }) {
 }
 
 /**
- * Review-only UI for a future Agent mode. All filesystem operations remain
- * with the caller; even selected paths are not accepted without fresh consent.
+ * Displays a work-copy snapshot; every write remains with the caller, after
+ * a deliberate selection and a second confirmation in this dialog.
  */
-export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, accepted }: ChangesReviewProps) {
+export function ChangesReview({
+  summary, changes, onAccept, onDiscard, onUndo, accepted, allowRecovery = false, busy = false, error, notice,
+}: ChangesReviewProps) {
   const diffId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstCheckboxRef = useRef<HTMLInputElement>(null);
@@ -106,7 +113,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
   const selectedPaths = changes.filter((change) => !unchecked.includes(change.path)).map((change) => change.path);
   const confirmationCurrent = confirmation !== null
     && confirmation.signature === signature
-    && (confirmation.action === "discard" || (
+    && (confirmation.action !== "accept" || (
       selectedPaths.length > 0
       && selectedPaths.length === confirmation.paths.length
       && selectedPaths.every((path, index) => path === confirmation.paths[index])
@@ -142,7 +149,8 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
     } else if (confirmation) {
       (confirmationCurrent ? confirmButtonRef : cancelButtonRef).current?.focus();
     } else if (lastConfirmation.current) {
-      (lastConfirmation.current === "accept" ? acceptButtonRef : discardButtonRef).current?.focus();
+      (lastConfirmation.current === "accept" ? acceptButtonRef
+        : lastConfirmation.current === "undo" ? undoButtonRef : discardButtonRef).current?.focus();
     }
     lastConfirmation.current = confirmation?.action ?? null;
     previouslyAccepted.current = accepted;
@@ -173,22 +181,31 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
   };
 
   const completeConfirmation = () => {
-    if (!confirmation || !confirmationCurrent || accepted) return;
-    if (confirmation.action === "accept") {
-      if (confirmation.paths.length === 0) return;
+    if (!confirmation || !confirmationCurrent || busy) return;
+    if (confirmation.action === "accept" && !accepted && confirmation.paths.length > 0) {
       setConfirmation(null);
       onAccept([...confirmation.paths]);
-    } else {
+    } else if (confirmation.action === "discard" && !accepted) {
       setConfirmation(null);
       onDiscard();
+    } else if (confirmation.action === "undo" && (accepted || allowRecovery)) {
+      setConfirmation(null);
+      onUndo();
     }
   };
 
   return (
+    <>
+      {dismissedFor === reviewKey && (
+        <button type="button" className="button button-secondary" onClick={() => setDismissedFor(null)}>
+          Reopen changes review
+        </button>
+      )}
     <AlertDialog.Root
       open={dismissedFor !== reviewKey}
       onOpenChange={(open) => {
         if (!open) {
+          if (busy) return;
           if (confirmation) setConfirmation(null);
           else setDismissedFor(reviewKey);
         }
@@ -216,6 +233,9 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
         >
           {summary}
         </AlertDialog.Description>
+        {busy && <p role="status">Waiting for the server to confirm the action…</p>}
+        {error && <p role="alert" className="coding-error">{error}</p>}
+        {notice && <p role="status">{notice}</p>}
 
         {changes.length === 0 ? (
           <p>No files to review.</p>
@@ -237,7 +257,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
                         type="checkbox"
                         aria-label={"Select " + change.path}
                         checked={!unchecked.includes(change.path)}
-                        disabled={accepted || confirmation !== null}
+                        disabled={accepted || confirmation !== null || busy}
                         onChange={(event) => changeSelection(change.path, event.target.checked)}
                       />
                       <span>{change.path}</span>
@@ -253,7 +273,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
                       className="button button-secondary"
                       aria-expanded={visible}
                       aria-controls={visible ? id : undefined}
-                      disabled={confirmation !== null}
+                      disabled={confirmation !== null || busy}
                       onClick={() => toggleDiff(change.path)}
                     >
                       {visible ? "Hide changes" : "Show changes"}
@@ -266,19 +286,15 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
           </ul>
         )}
 
-        {accepted ? (
-          <div className="dialog-actions" style={{ marginTop: 20 }}>
-            <span role="status" style={{ marginRight: "auto" }}>Changes accepted to the project.</span>
-            <button ref={undoButtonRef} type="button" className="button button-secondary" onClick={() => { setConfirmation(null); onUndo(); }}>
-              Undo
-            </button>
-          </div>
-        ) : confirmation ? (
-          <div role="group" aria-label={confirmation.action === "accept" ? "Accept confirmation" : "Discard confirmation"}>
+        {confirmation ? (
+          <div role="group" aria-label={confirmation.action === "accept" ? "Accept confirmation"
+            : confirmation.action === "undo" ? "Undo confirmation" : "Discard confirmation"}>
             <p>
               {confirmation.action === "accept"
                 ? "Apply changes to " + confirmation.paths.length + " " + (confirmation.paths.length === 1 ? "file" : "files") + " in your project?"
-                : "Discard all " + changes.length + " pending " + (changes.length === 1 ? "file change" : "file changes") + "? No project files will be updated."}
+                : confirmation.action === "undo"
+                  ? "Restore the original project files from this run? Undo will be refused if any file has unexpected changes."
+                  : "Discard all " + changes.length + " pending " + (changes.length === 1 ? "file change" : "file changes") + "? No project files will be updated."}
             </p>
             {!confirmationCurrent && <p role="alert">Changes or selection changed. Cancel and review again.</p>}
             <div className="dialog-actions" style={{ marginTop: 16 }}>
@@ -289,19 +305,49 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
                 ref={confirmButtonRef}
                 type="button"
                 className={confirmation.action === "discard" ? "button button-danger" : "button button-primary"}
-                disabled={!confirmationCurrent}
+                disabled={!confirmationCurrent || busy}
                 onClick={completeConfirmation}
               >
-                {confirmation.action === "accept" ? "Confirm accept" : "Confirm discard"}
+                {confirmation.action === "accept" ? "Confirm accept"
+                  : confirmation.action === "undo" ? "Confirm undo" : "Confirm discard"}
               </button>
             </div>
           </div>
+        ) : accepted ? (
+          <div className="dialog-actions" style={{ marginTop: 20 }}>
+            <span role="status" style={{ marginRight: "auto" }}>Changes accepted to the project.</span>
+            <button ref={undoButtonRef} type="button" className="button button-secondary"
+              disabled={busy}
+              onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
+              Undo
+            </button>
+          </div>
+        ) : changes.length === 0 && allowRecovery ? (
+          <div className="dialog-actions" style={{ marginTop: 20, flexWrap: "wrap" }}>
+            <p>Previously accepted edits may be recoverable from this run's journal. The server will refuse undo if no checkpoint exists or the files have changed unexpectedly.</p>
+            <button ref={undoButtonRef} type="button" className="button button-secondary"
+              disabled={busy}
+              onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
+              Undo previously accepted changes
+            </button>
+            <button ref={discardButtonRef} type="button" className="button button-secondary"
+              disabled={busy} onClick={() => setConfirmation({ action: "discard", signature, paths: [] })}>
+              Discard all
+            </button>
+          </div>
         ) : (
           <div className="dialog-actions" style={{ marginTop: 20, flexWrap: "wrap" }}>
+            {allowRecovery && (
+              <button ref={undoButtonRef} type="button" className="button button-secondary"
+                disabled={busy} onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
+                Undo
+              </button>
+            )}
             <button
               ref={discardButtonRef}
               type="button"
               className="button button-secondary"
+              disabled={busy}
               onClick={() => setConfirmation({ action: "discard", signature, paths: [] })}
             >
               Discard all
@@ -310,7 +356,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
               ref={acceptButtonRef}
               type="button"
               className="button button-primary"
-              disabled={selectedPaths.length === 0}
+              disabled={selectedPaths.length === 0 || busy}
               onClick={() => {
                 if (selectedPaths.length > 0) setConfirmation({ action: "accept", signature, paths: [...selectedPaths] });
               }}
@@ -321,5 +367,6 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
         )}
       </DialogContent>
     </AlertDialog.Root>
+    </>
   );
 }

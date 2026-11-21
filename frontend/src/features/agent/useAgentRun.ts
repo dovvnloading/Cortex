@@ -85,7 +85,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
   const [events, setEvents] = useState<AgentSSEEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"idle" | "live" | "reconnecting">("idle");
-  const [busy, setBusy] = useState<"starting" | "deciding" | "stopping" | "resuming" | null>(null);
+  const [busy, setBusy] = useState<"starting" | "deciding" | "stopping" | "resuming" | "opening" | null>(null);
   const [resumeRequired, setResumeRequired] = useState(false);
   const [followVersion, setFollowVersion] = useState(0);
   const cursorRef = useRef(0);
@@ -191,6 +191,35 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     }
   };
 
+  const open = async (id: string): Promise<void> => {
+    if (!enabled || busy || !id) return;
+    setBusy("opening");
+    setError(null);
+    try {
+      const selected = await api.get(id);
+      if (selected.id !== id) throw new Error("The requested run was not returned.");
+      cursorRef.current = 0;
+      statusRef.current = selected.status;
+      setEvents([]);
+      setResumeRequired(false);
+      setRun(selected);
+      setFollowVersion((previous) => previous + 1);
+    } catch (cause) {
+      setError(describeApiError(cause, "Could not open this agent run."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const forget = (id: string): void => {
+    if (run?.id !== id) return;
+    cursorRef.current = 0;
+    statusRef.current = null;
+    setEvents([]);
+    setResumeRequired(false);
+    setRun(null);
+  };
+
   const decide = async (seq: number, decision: DecideAgentApproval["decision"]): Promise<void> => {
     if (!enabled || busy || !run || !pendingApproval || pendingApproval.seq !== seq) return;
     setBusy("deciding");
@@ -253,5 +282,5 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     }
   };
 
-  return { run, events, pendingApproval, error, connection, busy, resumeRequired, start, decide, resume, stop };
+  return { run, events, pendingApproval, error, connection, busy, resumeRequired, start, open, forget, decide, resume, stop };
 }
