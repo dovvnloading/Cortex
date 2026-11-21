@@ -19,7 +19,8 @@ from uuid import uuid4
 from cortex_backend.agent.context_instructions import load_project_instructions
 from cortex_backend.agent.context_repo_map import build_repo_map
 from cortex_backend.agent.loop import AgentLoop, LoopBudgets, LoopResult
-from cortex_backend.agent.protocol import ToolCall, ToolSpec
+from cortex_backend.agent.model_profiles import DEFAULT_PROBE_CONTEXT_SIZE, ProfileSchemaError, ProfileStore
+from cortex_backend.agent.protocol import ProtocolPath, ToolCall, ToolSpec
 from cortex_backend.agent.run_store import (
     AgentRun, AgentRunStore, AgentStep, ApprovalExpiredError,
     ApprovalUnavailableError, InvalidRunTransitionError,
@@ -27,8 +28,11 @@ from cortex_backend.agent.run_store import (
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
+from cortex_backend.agent.tools.files import register_file_tools
 from cortex_backend.agent.tools.git import register_git_tools
+from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
+from cortex_backend.agent.tools.web import WebFetchError, fetch_url
 from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
@@ -80,77 +84,61 @@ class _LiveRun:
     terminal: bool = False
 
 
-def _file_registry(copy: WorkCopy, mode: str) -> ToolRegistry:
-    """Offer the legacy bounded file tools; the opted-in shell is added separately.
+_WEB_FETCH = ToolSpec(
+    "web_fetch", "Fetch a public HTTP(S) reference only after approval for this exact URL.", {
+        "type": "object",
+        "properties": {"url": {"type": "string", "minLength": 1, "maxLength": 2048}},
+        "required": ["url"], "additionalProperties": False,
+    },
+)
 
-    Without a verified Windows process sandbox, even auto_sandboxed asks before
-    a replacement; model text alone can never grant that approval.
-    """
-    registry = ToolRegistry()
-    registry.register(
-        ToolSpec("list_files", "List eligible source paths in the work copy.", {
-            "type": "object", "properties": {}, "required": [], "additionalProperties": False,
-        }),
-        lambda _call, _context: ToolResult(
-            "\n".join(copy.list_paths()[:200]) or "(no eligible source files)",
-        ),
-    )
 
-    def read_file(call: ToolCall, context: ToolContext) -> ToolResult:
+def _register_web_fetch(registry: ToolRegistry) -> None:
+    def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+        url = call.arguments.get("url")
+        if not isinstance(url, str) or not 1 <= len(url) <= 2048:
+            return ToolResult("Invalid web URL.", success=False)
+        if not context.approved:
+            # URL (including its query) is shown only in the ephemeral approval
+            # request; it is never persisted in the run's metadata ledger.
+            return NeedsApproval({
+                "tool": "web_fetch", "url": url,
+                "summary": "Fetch this exact public URL once.",
+            })
         if context.stopped():
-            raise ToolInterrupted("Agent tool interrupted.")
-        path = str(call.arguments["path"])
-        text, digest = copy.read_text(path)
-        start = int(call.arguments.get("start_line", 1))
-        lines = text.splitlines()
-        selected = lines[start - 1:start + 79]
-        return ToolResult(
-            "SHA-256: " + digest + "\n"
-            + "\n".join(f"{start + offset}: {line}" for offset, line in enumerate(selected))[:8000],
-        )
+            raise ToolInterrupted("Web fetch interrupted.")
+        try:
+            return ToolResult(fetch_url(url, approved=True), summary="Web reference fetched")
+        except (WebFetchError, ValueError, PermissionError, TimeoutError):
+            return ToolResult("Web fetch refused.", success=False)
 
-    registry.register(
-        ToolSpec("read_file", "Read up to 80 lines of an eligible work-copy file.", {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-                "start_line": {"type": "integer", "minimum": 1},
-            },
-            "required": ["path"], "additionalProperties": False,
-        }),
-        read_file,
-    )
-    if mode != "plan_only":
-        def replace_file(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
-            path = str(call.arguments["path"])
-            if not context.approved:
-                return NeedsApproval({
-                    "tool": "replace_file", "path": path,
-                    "summary": "Stage one replacement in the disposable work copy.",
-                })
-            if context.stopped():
-                raise ToolInterrupted("Agent tool interrupted.")
-            digest = copy.replace_text(
-                path, str(call.arguments["expected_sha256"]),
-                str(call.arguments["old_text"]), str(call.arguments["new_text"]),
-            )
-            return ToolResult("Replacement staged in the work copy. SHA-256: " + digest)
+    registry.register(_WEB_FETCH, handle)
 
-        registry.register(
-            ToolSpec("replace_file", "Stage one exact replacement in the work copy; requires approval.", {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "minLength": 1, "maxLength": 1024},
-                    "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                    "old_text": {"type": "string", "minLength": 1, "maxLength": 8000},
-                    "new_text": {"type": "string", "maxLength": 8000},
-                },
-                "required": ["path", "expected_sha256", "old_text", "new_text"],
-                "additionalProperties": False,
-            }),
-            replace_file,
-        )
-    return registry
+
+def _profile_settings(
+    data_dir: Path, model: str, budgets: dict[str, int | float],
+) -> tuple[ProtocolPath, dict[str, int | float], dict[str, int]]:
+    """Select only a passing profile; an unknown or corrupt record fails closed.
+
+    A measured num_ctx is a token count. The agent's character budget uses a
+    conservative four-characters-per-token bound, never an increased ceiling.
+    """
+    try:
+        profiles = ProfileStore(data_dir).load()
+    except (OSError, ProfileSchemaError):
+        profiles = []
+        logger.warning("Agent model profiles unavailable; using safe defaults.")
+    selected = next((
+        profile for profile in profiles
+        if profile.model == model and profile.recommended and all(profile.passed.values())
+    ), None)
+    protocol_path: ProtocolPath = selected.protocol_path if selected is not None else "plain_json"
+    context_size = selected.context_size if selected is not None else DEFAULT_PROBE_CONTEXT_SIZE
+    narrowed = dict(budgets)
+    narrowed["max_context_chars"] = min(int(budgets["max_context_chars"]), context_size * 4)
+    # Also bound the actual model request to the run's narrower context budget.
+    model_ctx = min(context_size, max(1, int(narrowed["max_context_chars"]) // 4))
+    return protocol_path, narrowed, {"num_ctx": model_ctx}
 
 
 class AgentRuns:
@@ -319,6 +307,9 @@ class AgentRuns:
             except (TypeError, ValueError) as exc:
                 raise AgentWorkflowError("invalid_budgets") from exc
             directory = self._directory()
+            protocol_path, normalized_budgets, model_options = _profile_settings(
+                directory, model, normalized_budgets,
+            )
             store = self._ledger()
             run_id = uuid4().hex
             # Reserve before any filesystem I/O; another request cannot copy
@@ -336,7 +327,12 @@ class AgentRuns:
                     owner=owner, project_root=prepared.project_root, workcopy=prepared.path,
                     mode=mode, model=model, budgets=normalized_budgets, run_id=run_id,
                 )
-                registry = _file_registry(prepared, mode)
+                registry = ToolRegistry()
+                register_file_tools(
+                    registry, prepared.path, read_only=mode == "plan_only", require_approval=True,
+                )
+                register_plan_tool(registry, store, run_id, owner=owner)
+                _register_web_fetch(registry)
                 if mode != "plan_only":
                     register_git_tools(registry, prepared.path, run_id)
                     shell = register_shell_tools(
@@ -351,7 +347,10 @@ class AgentRuns:
                     store, self._client, model, registry, normalized_budgets,
                     owner=owner, goal=goal, after_tool=self._after_tool(run_id),
                     context_providers=providers,
+                    protocol_path=protocol_path, model_options=model_options,
                 )
+                if isinstance(loop, AgentLoop):
+                    plan_guard(loop)
                 managed = _LiveRun(run_id, owner, prepared, loop, shell=shell)
                 self._live[run_id] = managed
                 self._emit(managed, "status", {"status": "pending"})
