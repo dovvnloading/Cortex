@@ -1,20 +1,25 @@
 name: Python compatibility
 
-# The supported-interpreter matrix, kept out of the pull request path. The
-# Quality workflow already runs the whole suite on Python 3.11 against the
-# hash-pinned locks, so repeating it there on every pull request only spent
-# Windows minutes. Here it runs against the other supported interpreters, and
-# against the loose, unlocked requirements, where it can catch a dependency
-# that breaks on one Python version only.
-#
-# It runs on every push to main, once a week (upstream releases can break an
-# unlocked install with no change to this repository), and on demand from the
-# Actions tab. Ruff is not repeated: lint results do not depend on the
-# interpreter that runs the tests.
+# Keep the interpreter matrix out of the required Quality workflow.
+# Matching pull requests run only agent/sandbox coverage on Python 3.13 and
+# 3.14; pushes to main, weekly schedules, and manual runs still exercise the
+# full suite on all three unlocked interpreters (3.12 through 3.14).
+# Ruff is not repeated: lint results do not depend on the interpreter.
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - main.py
+      - app_factory.py
+      - "tests/test_agent_*.py"
+      - "tests/test_sandbox_*.py"
+      - tests/test_worker_containment.py
+      - requirements-dev.txt
+      - .github/workflows/python-compatibility.yml
   schedule:
     - cron: "43 5 * * 1"
   workflow_dispatch:
@@ -24,6 +29,7 @@ permissions:
 
 jobs:
   python-compatibility:
+    if: github.event_name != 'pull_request'
     name: Python ${{ matrix.python-version }} compatibility
     strategy:
       fail-fast: false
@@ -57,3 +63,42 @@ jobs:
 
       - name: Compile application modules
         run: python -m compileall -q main.py app_factory.py backend
+
+  agent-sandbox-pr:
+    name: Agent/sandbox (Python ${{ matrix.python-version }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Keep the unlocked requirements used by the full compatibility suite.
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # PowerShell does not expand native-command pytest globs.
+      - name: Run agent and sandbox tests
+        shell: pwsh
+        run: |
+          $agentTests = @(Get-ChildItem -Path tests -File -Filter 'test_agent_*.py')
+          $sandboxTests = @(Get-ChildItem -Path tests -File -Filter 'test_sandbox_*.py')
+          $workerTest = Get-Item -Path tests/test_worker_containment.py
+          if ($agentTests.Count -eq 0 -or $sandboxTests.Count -eq 0) {
+            throw 'Expected agent and sandbox test files were not found.'
+          }
+          $testPaths = @(($agentTests + $sandboxTests + @($workerTest)) | ForEach-Object { $_.FullName })
+          python -m pytest -q @testPaths
