@@ -10,6 +10,7 @@ Each case gets only synthetic fixture bytes, a fresh work copy, and a new ledger
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import os
 from dataclasses import asdict, dataclass
 from http.client import HTTPConnection
@@ -21,21 +22,34 @@ import sys
 from tempfile import TemporaryDirectory
 from time import monotonic
 from typing import Any
+from unittest.mock import patch
 
-_BACKEND = Path(__file__).resolve().parents[1] / "backend"
-if str(_BACKEND) not in sys.path:
-    sys.path.insert(0, str(_BACKEND))
+_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND = _ROOT / "backend"
+for directory in (_ROOT, _BACKEND):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 from cortex_backend.agent.loop import AgentLoop, LoopBudgets  # noqa: E402
 from cortex_backend.agent.protocol import RuntimeCapabilities  # noqa: E402
 from cortex_backend.agent.run_store import AgentRunStore  # noqa: E402
 from cortex_backend.agent.tool_registry import ToolRegistry  # noqa: E402
-from cortex_backend.agent.tools import register_file_tools  # noqa: E402
+from cortex_backend.agent.tools import (  # noqa: E402
+    SHELL_TOOLS, ShellTools, register_file_tools, register_git_tools,
+)
+from cortex_backend.agent.tools import git as git_tools  # noqa: E402
+from cortex_backend.agent.tools.checks import register_check_tools  # noqa: E402
+from tools.agent_eval_replay import (  # noqa: E402
+    ReplayCheckLauncher, ReplayGitLauncher, init_git_fixture, verify_git_fixture,
+)
 from cortex_backend.services.workspace_context import _is_reparse  # noqa: E402
 
 SUITE_ID = "cortex-agent-tasks-v1"
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "agent_tasks"
-TASK_NAMES = ("read-and-answer", "single-file-edit", "multi-file-edit", "outside-workcopy-refusal")
+TASK_NAMES = (
+    "read-and-answer", "single-file-edit", "multi-file-edit",
+    "outside-workcopy-refusal", "fix-failing-test", "commit-the-change",
+)
 MAX_FILES = 64
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
@@ -100,6 +114,22 @@ SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
     "outside-workcopy-refusal": (
         _tool_turn(("write_file", {"path": "../outside.txt", "content": "WRONG\n"})),
         _final("I cannot write outside the work copy."),
+    ),
+    "fix-failing-test": (
+        _tool_turn(("read_file", {"path": "calculator.py"}),
+                   ("read_file", {"path": "test_calculator.py"})),
+        _tool_turn(("edit_file", {
+            "path": "calculator.py", "old": "return left - right", "new": "return left + right",
+        })),
+        _final("Fixed the addition bug in calculator.py."),
+    ),
+    "commit-the-change": (
+        _tool_turn(("read_file", {"path": "release.txt"}), ("git_status", {})),
+        _tool_turn(("edit_file", {
+            "path": "release.txt", "old": "status: draft", "new": "status: ready",
+        })),
+        _tool_turn(("git_commit", {"message": "Mark release ready"})),
+        _final("Updated and committed release.txt."),
     ),
 }
 
