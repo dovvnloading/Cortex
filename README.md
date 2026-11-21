@@ -321,17 +321,42 @@ select an approval mode. Each run asks for consent to read and copy eligible
 files from that folder. A cloud model asks separately before sending the
 goal and project context to the named provider.
 
-**Plan only** can read and plan but cannot run shell commands or edit files.
-Shell commands are classified as inspection, build/test, work-copy edits,
-network or package operations, dangerous actions, or unknown commands.
-A command chain uses its most restrictive class. **Ask before every
-command** requires **Allow once** for each non-dangerous command that
-starts a process. **Auto-approve safe commands in the sandbox** skips
-approval only for recognized inspection or build/test commands in a
-verified AppContainer. Edits, network operations and unknown commands
-still need approval. Dangerous commands are refused in all modes.
-File replacements also need **Allow once**, even in auto mode.
-Approvals are one-time and expire. You can deny an action or stop the run.
+Every live Agent run exposes work-copy \`list_dir\`, \`glob\`, \`grep\`
+and \`read_file\` for bounded file research, \`update_plan\` for a visible
+task plan, and \`web_fetch\` for public HTTP(S) text references. The
+selected mode determines which other tools are registered:
+
+- **Plan only** exposes exactly those six tools. It cannot write, edit,
+  move or delete files, use Git, start shell processes or run project checks.
+- **Ask before every command** additionally exposes work-copy
+  \`write_file\`, \`edit_file\`, \`delete_file\`, \`move_file\`; local
+  \`git_status\`, \`git_diff\`, \`git_log\`, \`git_show\`, \`git_commit\`;
+  \`run_command\`, \`start_background\`, \`read_background\`,
+  \`stop_background\`; and \`run_checks\`. Every file mutation,
+  \`git_commit\`, and non-dangerous command that starts a process requires
+  its own **Allow once** approval.
+- **Auto-approve safe commands in the sandbox** exposes the same tools
+  as Ask. Only recognized inspection and build/test shell commands in a
+  verified AppContainer can skip command approval. Work-copy edits,
+  network or package operations, and unknown shell commands still need
+  approval. All four file mutations and \`git_commit\` require **Allow
+  once** even in auto mode.
+
+Shell commands are classified by risk; a command chain uses its most
+restrictive class. Dangerous commands are refused in both shell-enabled
+modes. \`web_fetch\` **never auto-approves**: every call, in every mode,
+shows the exact requested URL (including its query) and requires a
+separate **Allow once**. Approvals expire, and you can deny an action
+or stop the run.
+
+\`update_plan\` records item statuses without executing tasks. If a
+published plan still has unfinished items when the model tries to answer,
+the final-answer guard nudges it once to update the plan, subject to run
+budgets. A recommended per-model capability profile with passing
+single-call, ordered-call and prompt-injection checks selects the
+supported native-tools, constrained-JSON or plain-JSON protocol and
+caps the context budget. Unknown, failing or corrupt profiles use
+conservative plain-JSON and context defaults.
 
 `run_command` starts PowerShell or cmd in the disposable work copy.
 The AppContainer gets an allowlisted environment, not inherited host
@@ -567,10 +592,10 @@ For contributor setup, install `requirements-dev.txt` as described in
 ```
 
 For coding-agent work, read the repository-level [agent operating
-contract](AGENTS.md) first. Cortex's current product boundary is bounded local
-execution: approval-gated code in a restricted Python subset, safe computation,
-and fixed-function image recipes. Nothing here enables arbitrary workspace or
-shell authority.
+contract](AGENTS.md) first. Ordinary chat's execution boundary remains
+approval-gated code in a restricted Python subset, safe computation, and
+fixed-function image recipes. It does not inherit Agent mode's separately
+consented work-copy file, Git, shell, check or web-fetch tools.
 
 The backend also ships a deterministic trajectory evaluator that exercises
 code-proposal admission, validation, bounded repair, cancellation, contextual
