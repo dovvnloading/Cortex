@@ -118,6 +118,10 @@ class _FakeWin32:
         self.calls.append(("AssignProcessToJobObject", job, process))
         return 1 if self.assign else 0
 
+    def TerminateJobObject(self, job, exit_code):
+        self.calls.append(("TerminateJobObject", job, exit_code))
+        return 1
+
     def CloseHandle(self, handle):
         self.calls.append(("CloseHandle", handle))
         return 1 if self.close else 0
@@ -150,6 +154,22 @@ def test_closing_the_job_closes_its_handle_once_and_refuses_later_assignment():
     assert job.closed is True
     with pytest.raises(JobObjectError, match="closed"):
         job.assign(1)
+
+
+def test_explicit_job_termination_uses_nonzero_exit_before_close():
+    win32 = _FakeWin32(create=11)
+    job = KillOnCloseJob(win32_factory=lambda: win32)
+
+    with pytest.raises(ValueError, match="nonzero"):
+        job.terminate(0)
+    job.terminate(1)
+    job.close()
+    job.terminate(1)  # closing makes repeated termination a no-op
+
+    assert win32.calls[-2:] == [
+        ("TerminateJobObject", 11, 1),
+        ("CloseHandle", 11),
+    ]
 
 
 def test_a_job_that_cannot_be_created_fails_closed():

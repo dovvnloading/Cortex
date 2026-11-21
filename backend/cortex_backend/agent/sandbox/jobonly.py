@@ -66,7 +66,9 @@ class JobOnlyLauncher:
         process = subprocess.Popen(
             args, cwd=directory, env=environment, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
-            close_fds=True, creationflags=CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            # RunningProcess reads in 8 KiB chunks. A buffered pipe hides short
+            # PowerShell output until EOF, which can outlast the command timeout.
+            bufsize=0, close_fds=True, creationflags=CREATE_SUSPENDED | CREATE_NO_WINDOW,
         )
         job: KillOnCloseJob | None = None
         try:
