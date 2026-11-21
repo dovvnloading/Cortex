@@ -227,18 +227,29 @@ class ShellTools:
 
     def _permission(
         self, command: str, shell: str, network: bool, context: ToolContext, launcher: Launcher,
-        tool: str,
+        tool: str, *, check_risk: str | None = None,
     ) -> NeedsApproval | ToolResult | None:
         level = launcher.level
         if level not in {"appcontainer", "unsandboxed"}:
             return self._error("unknown_sandbox_level")
         verdict = classify(command, shell, level)
         decision = decide(verdict, self.mode)
-        if decision == "refuse":
+        if check_risk not in {None, "safe", "ask", "network", "dangerous"}:
+            return self._error("invalid_check_risk")
+        if decision == "refuse" or check_risk == "dangerous":
             return self._error("command_denied")
         if level == "unsandboxed" and not network:
+            # No Job Object can enforce network=False. Park each implicit
+            # check visibly, then still refuse on approval; never silently
+            # downgrade an offline check to network-enabled execution.
+            if check_risk is not None and not context.approved:
+                return NeedsApproval({
+                    "tool": tool, "command": command, "shell": shell, "level": level,
+                    "network": False, "reason": "unsandboxed_offline_unavailable",
+                    "summary": "Job-only cannot isolate the network; this check cannot execute offline.",
+                })
             return self._error("unsandboxed_cannot_disable_network")
-        if decision == "ask" or network:
+        if decision == "ask" or network or check_risk in {"ask", "network"}:
             if not context.approved:
                 return NeedsApproval({
                     "tool": tool, "command": command, "shell": shell, "level": level,
@@ -250,7 +261,7 @@ class ShellTools:
         return None
 
     def _prepare(
-        self, call: ToolCall, context: ToolContext,
+        self, call: ToolCall, context: ToolContext, *, check_risk: str | None = None,
     ) -> tuple[list[str], str, bool, Launcher] | NeedsApproval | ToolResult:
         if context.stopped():
             raise ToolInterrupted("shell interrupted")
@@ -267,7 +278,9 @@ class ShellTools:
         try:
             _check_root(self.workcopy, self._identity)
             launcher = self._launcher()
-            permission = self._permission(command, shell, network, context, launcher, call.name)
+            permission = self._permission(
+                command, shell, network, context, launcher, call.name, check_risk=check_risk,
+            )
             if permission is not None:
                 return permission
             argv = _shell_argv(command, shell)
@@ -310,12 +323,14 @@ class ShellTools:
             return self._error("run_ended")
         return process
 
-    def _run(self, call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+    def _run(
+        self, call: ToolCall, context: ToolContext, *, check_risk: str | None = None,
+    ) -> ToolResult | NeedsApproval:
         timeout = call.arguments.get("timeout_s")
         if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
                 or not 0.1 <= timeout <= _MAX_TIMEOUT):
             return self._error("invalid_timeout")
-        prepared = self._prepare(call, context)
+        prepared = self._prepare(call, context, check_risk=check_risk)
         if not isinstance(prepared, tuple):
             return prepared
         argv, command, network, launcher = prepared
@@ -437,14 +452,18 @@ class ShellTools:
             return self._error("background_stop_failed")
         return ToolResult(json.dumps({"stopped": True}), summary="Background process stopped")
 
-    def handle(self, call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+    def handle(
+        self, call: ToolCall, context: ToolContext, *, check_risk: str | None = None,
+    ) -> ToolResult | NeedsApproval:
         if context.stopped():
             raise ToolInterrupted("shell interrupted")
         with self._lock:
             if self._closed:
                 return self._error("run_ended")
         if call.name == "run_command":
-            return self._run(call, context)
+            return self._run(call, context, check_risk=check_risk)
+        if check_risk is not None:
+            return self._error("invalid_arguments")
         if call.name == "start_background":
             return self._start_background(call, context)
         if call.name == "read_background":
