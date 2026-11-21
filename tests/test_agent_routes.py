@@ -287,6 +287,7 @@ def test_second_run_conflicts_and_cancel_releases_one_worker(tmp_path: Path) -> 
         cancellation = client.post(f"{ROOT}/{blocked_run}/cancel", headers=headers)
         assert cancellation.status_code == 200
         _run_done(client, headers, blocked_run, "cancelled")
+        wait_until(lambda: app.state.agent_workflow._active_id is None)
         next_run = client.post(ROOT, headers=headers, json=_start(project))
         assert next_run.status_code == 202
         _run_done(client, headers, next_run.json()["id"])
