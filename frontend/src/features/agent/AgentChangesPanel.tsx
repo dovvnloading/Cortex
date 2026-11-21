@@ -25,10 +25,6 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
 
   useEffect(() => {
     let current = true;
-    setChanges(null);
-    setLoadError(null);
-    setError(null);
-    setNotice(null);
     void api.changeset(runId).then((result) => {
       if (!current) return;
       setChanges(result.changes);
@@ -84,7 +80,13 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
       {loadError && (
         <>
           <p role="alert" className="coding-error">{loadError}</p>
-          <button type="button" className="coding-quiet" onClick={() => setRetry((value) => value + 1)}>Retry changeset</button>
+          <button type="button" className="coding-quiet" onClick={() => {
+            setChanges(null);
+            setLoadError(null);
+            setError(null);
+            setNotice(null);
+            setRetry((value) => value + 1);
+          }}>Retry changeset</button>
         </>
       )}
       {discarded ? <p role="status">{notice}</p> : changes !== null && (
