@@ -208,6 +208,18 @@ def _remove(root: Path, relative: str) -> None:
     path.unlink()
 
 
+def _purge_onexc(path: Path, error: PermissionError) -> None:
+    """Retry read-only regular files, without changing permissions on links."""
+    try:
+        info = path.lstat()
+    except OSError:
+        raise error from None
+    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+        raise error
+    os.chmod(path, stat.S_IWRITE)
+    path.unlink()
+
+
 def _purge(directory: Path, *, keep_gitfile: bool = False) -> None:
     """Delete only directory entries under our copy, never traverse a link."""
     with os.scandir(directory) as iterator:
@@ -226,7 +238,10 @@ def _purge(directory: Path, *, keep_gitfile: bool = False) -> None:
             _purge(path)
             path.rmdir()
         else:
-            path.unlink()
+            try:
+                path.unlink()
+            except PermissionError as exc:
+                _purge_onexc(path, exc)
 
 
 def _rules(files: Mapping[str, _File]) -> tuple[_IgnoreRule, ...]:
@@ -506,6 +521,9 @@ class WorkCopy:
         private = paths.data_dir
         if root == private or root.is_relative_to(private) or private.is_relative_to(root):
             raise WorkCopyError("protected_root")
+        # _head() treats Git errors as a missing HEAD. Refuse includes before
+        # Windows private-path setup can start icacls.exe or any work-copy Git.
+        _refuse_external_git_includes(root)
         root_info = root.lstat()
         root_identity = (root_info.st_dev, root_info.st_ino)
         source = _snapshot(root)

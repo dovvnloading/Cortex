@@ -68,7 +68,7 @@ def _git(repo: Path, *arguments: str) -> str:
     }, f"fixture attempted an unexpected Git command: {arguments!r}"
     result = subprocess.run(
         ["git", *arguments], cwd=repo, env=dict(os.environ),
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, capture_output=True,
         text=True, timeout=15, check=True,
     )
     return result.stdout.strip()
@@ -218,7 +218,7 @@ def test_core_hookspath_payload_directory_is_ignored(tmp_path: Path, git_launche
     for name, marker in markers.items():
         _script(directory / name, marker)
     _git(repo, "config", "--local", "core.hooksPath", str(directory))
-    assert str(directory) in (repo / ".git" / "config").read_text(encoding="utf-8")
+    assert _git(repo, "config", "--get", "core.hooksPath") == str(directory)
     (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
 
     result, data = _call(_registry(repo), "git_commit", message="ignore hostile core.hooksPath")
@@ -396,6 +396,10 @@ def test_hostile_workcopy_isolated_from_source_git(tmp_path: Path, git_launches)
             assert result.success, (name, data)
             _assert_no_markers(markers)
         assert (copy.path / ".cortex-agent-git" / "HEAD").is_file()
+        assert _git(
+            copy.path, "--git-dir=.cortex-agent-git", "--work-tree=.",
+            "show", "-s", "--format=%s", "HEAD",
+        ) == "agent copy only"
         assert all(root == copy.path for root, _, _ in git_launches)
         assert all("--git-dir=.git" not in argv for _, argv, _ in git_launches)
         assert _git(repo, "rev-parse", "HEAD") == original_head
