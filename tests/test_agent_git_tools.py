@@ -268,14 +268,28 @@ def test_bounded_output_and_unsafe_repository_config(tmp_path: Path, harness) ->
     assert len(harness) == count
 
 
-def test_gitfile_outside_workcopy_refused(tmp_path: Path, harness) -> None:
+def test_linked_worktree_uses_local_history_without_taking_original_git_objects(
+    tmp_path: Path, harness,
+) -> None:
     repo, env = _repo(tmp_path)
     linked = tmp_path / "linked"
     _git(repo, "worktree", "add", "--detach", "-q", str(linked), env=env)
-    result, data = _call(_registry(linked), "git_status")
-    assert result.success is False
-    assert data["error"] == "unsafe_repository"
-    assert harness == []
+    original_head = _git(repo, "rev-parse", "HEAD", env=env)
+    registry = _registry(linked)
+    result, data = _call(registry, "git_status")
+    assert result.success, data
+    assert (linked / ".cortex-agent-git" / "HEAD").is_file()
+    assert (linked / ".git").is_file()  # The original worktree pointer is preserved.
+    (linked / "tracked.txt").write_text("local only\n", encoding="utf-8")
+    result, data = _call(registry, "git_commit", message="local work-copy commit")
+    assert result.success, data
+    assert _git(repo, "rev-parse", "HEAD", env=env) == original_head
+    assert _git(repo, "show", "HEAD:tracked.txt", env=env) == "first"
+    assert _git(repo, "status", "--porcelain", env=env) == ""
+    assert _git(linked, "--git-dir=.cortex-agent-git", "--work-tree=.",
+                "-c", "core.bare=false", "show", "HEAD:tracked.txt", env=env) == "local only"
+    assert all(root == linked for root, _, _ in harness)
+    assert all("--git-dir=.git" not in argv for _, argv, _ in harness)
 
 
 def test_production_git_environment_is_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
