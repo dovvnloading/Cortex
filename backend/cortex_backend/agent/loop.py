@@ -480,5 +480,5 @@ class AgentLoop:
                 if reason is not None:
                     return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
                 return self._stop(run_id, state, "completed", "final_answer", answer=turn.text)
-            state.history.append(_History("assistant", turn.text if turn.text else "Requested registered tools."))
+            state.history.append(_History("assistant", f"Requested {len(turn.tool_calls)} registered tool call(s)."))
             state.queued.extend(turn.tool_calls)
