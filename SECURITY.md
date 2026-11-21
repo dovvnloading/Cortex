@@ -158,7 +158,7 @@ revalidates each redirect, and limits responses to supported text types,
 untrusted reference data, not instructions. Requested URLs and raw tool
 arguments are not saved in the run ledger.
 
-`update_plan` records a bounded visible plan, but does not execute it.
+`update_plan` records a bounded task plan, but does not execute it.
 When the latest recorded plan is unfinished, the live-loop final-answer
 guard nudges the model once before completion, within the run budget.
 Only a recommended per-model capability profile that passes single-call,
