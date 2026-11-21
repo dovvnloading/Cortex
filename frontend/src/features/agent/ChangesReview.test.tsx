@@ -203,6 +203,30 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
   });
 
+  it("starts on Undo when already accepted and supports keyboard undo", async () => {
+    const user = userEvent.setup();
+    const { onUndo } = renderReview({ accepted: true });
+    const undo = screen.getByRole("button", { name: "Undo" });
+    await waitFor(() => expect(undo).toHaveFocus());
+    expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).disabled)).toBe(true);
+    await user.keyboard("{Enter}");
+    expect(onUndo).toHaveBeenCalledOnce();
+  });
+
+  it("supports keyboard discard and its separate confirmation", async () => {
+    const user = userEvent.setup();
+    const { onDiscard, onAccept } = renderReview();
+    screen.getByRole("button", { name: "Discard all" }).focus();
+    await user.keyboard(" ");
+    expect(onDiscard).not.toHaveBeenCalled();
+    const confirm = screen.getByRole("button", { name: "Confirm discard" });
+    expect(confirm).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onDiscard).toHaveBeenCalledOnce();
+    expect(onAccept).not.toHaveBeenCalled();
+  });
+
   it("treats summary, paths, and HTML-looking unified diff content as plain text", async () => {
     const user = userEvent.setup();
     const path = "src/<img src=x onerror=alert(1)>.tsx";
