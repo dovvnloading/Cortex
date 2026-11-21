@@ -24,7 +24,7 @@ from cortex_backend.agent.sandbox.base import canonical_workcopy
 from cortex_backend.services.workspace_context import _is_reparse
 
 from ..protocol import ToolCall, ToolSpec
-from ..tool_registry import ToolContext, ToolInterrupted, ToolRegistry, ToolResult
+from ..tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult
 from ..workcopy import WorkCopyError, _check_root, _valid_path
 
 MAX_OUTPUT_BYTES: Final = 16_384
@@ -315,9 +315,19 @@ class _Git:
 
 
 def register_git_tools(
-    registry: ToolRegistry, workcopy_root: str | os.PathLike[str], run_id: str,
+    registry: ToolRegistry, workcopy_root: str | os.PathLike[str], run_id: str, *,
+    require_approval: bool = False,
 ) -> None:
-    """Register only the five allowlisted, network-disabled Git tools."""
+    """Register the allowlisted Git tools, optionally gating work-copy commits."""
     git = _Git(workcopy_root, run_id)
+
+    def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+        if require_approval and call.name == "git_commit" and not context.approved:
+            return NeedsApproval({
+                "tool": "git_commit",
+                "summary": "Stage and commit changes in the disposable work copy.",
+            })
+        return git.handle(call, context)
+
     for spec in GIT_TOOLS:
-        registry.register(spec, git.handle)
+        registry.register(spec, handle)
