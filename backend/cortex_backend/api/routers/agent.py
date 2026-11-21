@@ -42,6 +42,10 @@ class AcceptAgentChanges(AgentModel):
     confirmed: bool = Field(default=False, strict=True)
 
 
+class UndoAgentChanges(AgentModel):
+    confirmed: bool = Field(default=False, strict=True)
+
+
 class AgentRunResponse(AgentModel):
     id: str
     project_root: str
@@ -77,6 +81,10 @@ class AgentAcceptedResponse(AgentModel):
 
 class AgentDiscardedResponse(AgentModel):
     discarded: bool
+
+
+class AgentUndoneResponse(AgentModel):
+    paths: list[str]
 
 
 class AgentSSEEvent(AgentModel):
@@ -130,6 +138,8 @@ _ERRORS: dict[str, tuple[int, str]] = {
     "checkpoint_pending": (409, "A write requires checkpoint recovery."),
     "checkpoint_limit": (409, "The checkpoint storage limit was reached."),
     "checkpoint_corrupt": (409, "The recovery checkpoint is invalid."),
+    "checkpoint_missing": (409, "There are no accepted changes to undo."),
+    "restore_failed": (409, "The accepted changes could not be restored safely."),
     "recovery_required": (409, "An unfinished recovery checkpoint must be resolved."),
     "storage_unavailable": (503, "Local recovery storage is unavailable."),
     "storage_version": (503, "Local recovery storage uses an unsupported format."),
@@ -338,6 +348,19 @@ def register(
             paths=payload.paths, confirmed=True,
         )
         return AgentAcceptedResponse(paths=list(paths))
+
+    @router.post("/agent/runs/{run_id}/undo", response_model=AgentUndoneResponse)
+    def undo(
+        run_id: str, payload: UndoAgentChanges, request: Request,
+        principal: SessionPrincipal = Depends(enabled),
+    ) -> AgentUndoneResponse:
+        if not payload.confirmed:
+            raise _error("consent_required")
+        workflow: AgentRuns = request.app.state.agent_workflow
+        paths: tuple[str, ...] = _call(
+            workflow.undo, run_id=run_id, owner=principal.session_id, confirmed=True,
+        )
+        return AgentUndoneResponse(paths=list(paths))
 
     @router.post("/agent/runs/{run_id}/discard", response_model=AgentDiscardedResponse)
     def discard(

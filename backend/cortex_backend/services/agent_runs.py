@@ -29,9 +29,11 @@ from cortex_backend.agent.tool_registry import (
 )
 from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
-from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
+from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError, restore
 from cortex_backend.core.paths import AppPathError, AppPaths
-from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
+from cortex_backend.services.workspace_checkpoint import (
+    WorkspaceCheckpointError, WorkspaceCheckpointStore,
+)
 from cortex_backend.services.chat_client import is_cloud_model
 
 
@@ -547,6 +549,32 @@ class AgentRuns:
             if self._owned(run_id, owner).status not in _TERMINAL or managed.driving:
                 raise AgentWorkflowError("busy")
             return managed.copy.accept(paths, confirmed=confirmed)
+
+    def undo(self, run_id: str, *, owner: str, confirmed: bool) -> tuple[str, ...]:
+        """Restore only journaled originals after explicit, owner-scoped consent.
+
+        The recovery journal validates all current source hashes before writing.
+        After a discard or process restart the live work copy is gone, but the
+        owner-scoped checkpoint remains recoverable.
+        """
+        if confirmed is not True:
+            raise AgentWorkflowError("consent_required")
+        with self._lock:
+            run = self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            if run.status not in _TERMINAL or (managed is not None and managed.driving):
+                raise AgentWorkflowError("busy")
+            if managed is not None and managed.owner != owner:
+                raise AgentWorkflowError("not_found")
+            try:
+                if managed is not None:
+                    return managed.copy.undo(confirmed=True)
+                return restore(
+                    run.project_root, run_id, confirmed=True,
+                    data_dir=self._directory(), owner=owner,
+                )
+            except WorkspaceCheckpointError as exc:
+                raise AgentWorkflowError(exc.code) from exc
 
     def discard(self, run_id: str, *, owner: str) -> None:
         with self._lock:
