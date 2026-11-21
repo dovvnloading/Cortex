@@ -1,4 +1,4 @@
-"""Explicit, read-only, ephemeral local repository research from the terminal.
+r"""Explicit, read-only, ephemeral local repository research from the terminal.
 
 Examples (PowerShell, from the Cortex repository root):
   python tools/workspace_research.py --root C:\src\project --allow-read-only --list
