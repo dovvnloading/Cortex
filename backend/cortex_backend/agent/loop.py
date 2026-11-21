@@ -356,7 +356,6 @@ class AgentLoop:
             return None
         return [*fixed, *({"role": item.role, "content": item.content} for item in state.history), *extra]
 
-
     def _complete_final(self, run_id: str, state: _State, answer: str, checks: str | None = None) -> LoopResult:
         """Run existing final hook only after verification has settled."""
         if self.before_final is not None:
@@ -393,7 +392,11 @@ class AgentLoop:
         if timed_out:
             parts.append(f"{number(timed_out)} timed out (not passed)")
         if not_run:
-            why = "approval declined" if state.check_blocked else "run budget exhausted" if budget_limited else "unavailable"
+            denied = any(
+                state.check_results.get(check.key, {}).get("reason") == "approval_declined"
+                for check in checks
+            )
+            why = "approval declined" if denied else "run budget exhausted" if budget_limited else "unavailable"
             parts.append(f"{number(not_run)} not run ({why})")
         if not parts:
             return "tests not run: no test command found"
