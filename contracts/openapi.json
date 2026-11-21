@@ -1,6 +1,30 @@
 {
   "components": {
     "schemas": {
+      "AcceptAgentChanges": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "title": "AcceptAgentChanges",
+        "type": "object"
+      },
       "AddMemoryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -15,6 +39,248 @@
           "memo"
         ],
         "title": "AddMemoryRequest",
+        "type": "object"
+      },
+      "AgentAcceptedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "title": "AgentAcceptedResponse",
+        "type": "object"
+      },
+      "AgentChange": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Sha256"
+          },
+          "diff": {
+            "title": "Diff",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "add",
+              "modify",
+              "delete"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "new_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Sha256"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "baseline_sha256",
+          "new_sha256",
+          "diff"
+        ],
+        "title": "AgentChange",
+        "type": "object"
+      },
+      "AgentChangesetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/AgentChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "changes"
+        ],
+        "title": "AgentChangesetResponse",
+        "type": "object"
+      },
+      "AgentDiscardedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "discarded": {
+            "title": "Discarded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "discarded"
+        ],
+        "title": "AgentDiscardedResponse",
+        "type": "object"
+      },
+      "AgentRunListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "AgentRunListResponse",
+        "type": "object"
+      },
+      "AgentRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "budgets": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "title": "Budgets",
+            "type": "object"
+          },
+          "created": {
+            "title": "Created",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "project_root": {
+            "title": "Project Root",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_root",
+          "mode",
+          "model",
+          "status",
+          "budgets",
+          "created",
+          "updated"
+        ],
+        "title": "AgentRunResponse",
+        "type": "object"
+      },
+      "AgentSSEEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "event": {
+            "enum": [
+              "step",
+              "output",
+              "approval",
+              "status"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "event",
+          "run_id",
+          "data"
+        ],
+        "title": "AgentSSEEvent",
+        "type": "object"
+      },
+      "AgentSettings": {
+        "additionalProperties": false,
+        "description": "Coding-agent access is opt-in and persisted with other settings.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "AgentSettings",
         "type": "object"
       },
       "AppearanceSettings": {
@@ -873,6 +1139,9 @@
         "additionalProperties": false,
         "description": "Complete validated settings snapshot with legacy-compatible defaults.",
         "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/AgentSettings"
+          },
           "appearance": {
             "$ref": "#/components/schemas/AppearanceSettings"
           },
@@ -1058,6 +1327,24 @@
           "at"
         ],
         "title": "DatabaseRecoveryReport",
+        "type": "object"
+      },
+      "DecideAgentApproval": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "allow_once",
+              "deny"
+            ],
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "DecideAgentApproval",
         "type": "object"
       },
       "DiagnosticsResponse": {
@@ -3635,6 +3922,70 @@
         "title": "ShutdownResponse",
         "type": "object"
       },
+      "StartAgentRun": {
+        "additionalProperties": false,
+        "properties": {
+          "budgets": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "title": "Budgets",
+            "type": "object"
+          },
+          "confirmed_cloud": {
+            "default": false,
+            "title": "Confirmed Cloud",
+            "type": "boolean"
+          },
+          "confirmed_project": {
+            "default": false,
+            "title": "Confirmed Project",
+            "type": "boolean"
+          },
+          "goal": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "plan_only",
+              "ask",
+              "auto_sandboxed"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "project_root": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Project Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_root",
+          "goal",
+          "mode",
+          "model"
+        ],
+        "title": "StartAgentRun",
+        "type": "object"
+      },
       "SystemResponse": {
         "additionalProperties": false,
         "properties": {
@@ -3812,6 +4163,486 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/agent/runs": {
+      "get": {
+        "operationId": "list_runs_api_v1_agent_runs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "List Runs"
+      },
+      "post": {
+        "operationId": "start_api_v1_agent_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartAgentRun"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Start"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}": {
+      "get": {
+        "operationId": "get_run_api_v1_agent_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Get Run"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/accept": {
+      "post": {
+        "operationId": "accept_api_v1_agent_runs__run_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptAgentChanges"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Accept"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/approvals/{seq}": {
+      "post": {
+        "operationId": "approval_api_v1_agent_runs__run_id__approvals__seq__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "seq",
+            "required": true,
+            "schema": {
+              "title": "Seq",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideAgentApproval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Approval"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancel_api_v1_agent_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Cancel"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/changeset": {
+      "get": {
+        "operationId": "changeset_api_v1_agent_runs__run_id__changeset_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentChangesetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Changeset"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/discard": {
+      "post": {
+        "operationId": "discard_api_v1_agent_runs__run_id__discard_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDiscardedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Discard"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/events": {
+      "get": {
+        "operationId": "events_api_v1_agent_runs__run_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Resume after this agent event sequence number.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Resume after this agent event sequence number.",
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSSEEvent"
+                }
+              }
+            },
+            "description": "Server-sent agent events.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevent intermediary caching of the live event stream.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Accel-Buffering": {
+                "description": "Disable proxy buffering for incremental events.",
+                "schema": {
+                  "enum": [
+                    "no"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Events"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/resume": {
+      "post": {
+        "operationId": "resume_api_v1_agent_runs__run_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Resume"
+      }
+    },
     "/api/v1/attachments": {
       "post": {
         "description": "Stage one bounded image or text document for a chat turn.\n\nThe browser receives opaque metadata only.  Content is retained in the\nowner-scoped local attachment store and is resolved only when the\ngeneration job starts.",
