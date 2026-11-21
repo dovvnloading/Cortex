@@ -198,31 +198,33 @@ describe("AgentPage", () => {
     expect(api.acceptAgentChanges).not.toHaveBeenCalled();
   });
 
-  it("refreshes saved checkpoints after confirmed Agent accept and undo", async () => {
+  it("rechecks installation-owned legacy recovery after confirmed Agent accept and undo", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
-    let saved = false;
-    const checkpoint = {
-      id: "agent-workcopy-run-1", root: "C:\\dev\\sample", state: "active",
+    let agentUndoAvailable = false;
+    const legacyCheckpoint = {
+      id: "legacy-checkpoint", root: "C:\\dev\\old-project", state: "pending",
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z",
       paths: ["app.py"], file_count: 1,
     };
-    api.workspaceCheckpoints.mockImplementation(async () => ({
-      checkpoints: saved ? [checkpoint] : [],
+    // The saved-recovery endpoint lists installation-owned Project workspace journals.
+    // Agent accepts use session-owned journals and have their own confirmed run undo.
+    api.workspaceCheckpoints.mockResolvedValue({ checkpoints: [legacyCheckpoint] });
+    api.agentRun.mockImplementation(async () => ({
+      ...run, undo_available: agentUndoAvailable,
     }));
-    api.agentRun.mockImplementation(async () => ({ ...run, undo_available: saved }));
     api.acceptAgentChanges.mockImplementation(async () => {
-      saved = true;
+      agentUndoAvailable = true;
       return { paths: ["app.py"] };
     });
     api.undoAgentChanges.mockImplementation(async () => {
-      saved = false;
+      agentUndoAvailable = false;
       return { paths: ["app.py"] };
     });
 
     page(api);
     const recovery = screen.getByRole("region", { name: "Saved recovery checkpoints" });
-    expect(await within(recovery).findByText("No saved recovery checkpoints.")).toBeVisible();
+    expect(await within(recovery).findByText(legacyCheckpoint.root)).toBeVisible();
     expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(1);
     await prepare(user);
     await user.click(screen.getByRole("button", { name: "Start Agent" }));
@@ -231,14 +233,16 @@ describe("AgentPage", () => {
     await user.click(within(review).getByRole("button", { name: "Accept selected to project" }));
     await user.click(within(review).getByRole("button", { name: "Confirm accept" }));
     expect(await screen.findByText("Accepted to the project: app.py")).toBeVisible();
-    expect(await within(recovery).findByText(checkpoint.root)).toBeVisible();
-    expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(2));
+    expect(within(recovery).getByText(legacyCheckpoint.root)).toBeVisible();
+    expect(within(recovery).queryByText(run.project_root)).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await user.click(screen.getByRole("button", { name: "Confirm undo" }));
     expect(await screen.findByText("Restored original project files: app.py")).toBeVisible();
-    expect(await within(recovery).findByText("No saved recovery checkpoints.")).toBeVisible();
-    expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(3));
+    expect(within(recovery).getByText(legacyCheckpoint.root)).toBeVisible();
+    expect(within(recovery).queryByText("No saved recovery checkpoints.")).not.toBeInTheDocument();
   });
 
   it("requires a fresh confirmation before undo, then shows restored paths", async () => {
