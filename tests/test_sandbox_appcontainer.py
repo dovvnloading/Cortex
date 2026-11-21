@@ -295,32 +295,42 @@ try:
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     step = "configure token bindings"
-    kernel.GetCurrentProcessToken.argtypes = []
-    kernel.GetCurrentProcessToken.restype = wintypes.HANDLE
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.OpenProcessToken.restype = wintypes.BOOL
     advapi.GetTokenInformation.argtypes = [
         wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID,
         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
     ]
     advapi.GetTokenInformation.restype = wintypes.BOOL
 
-    # Windows 8+ token pseudo-handle supplies TOKEN_QUERY without an
-    # additional OpenProcessToken access check in the AppContainer.
-    step = "GetCurrentProcessToken"
-    token = kernel.GetCurrentProcessToken()
-    if not token:
-        raise OSError("GetCurrentProcessToken returned NULL")
-    step = "GetTokenInformation(TokenIsAppContainer)"
-    is_appcontainer = wintypes.DWORD()
-    returned = wintypes.DWORD()
-    if not advapi.GetTokenInformation(
-        token, 29, ctypes.byref(is_appcontainer),
-        ctypes.sizeof(is_appcontainer), ctypes.byref(returned),
+    # Open a query-only handle to our own process token and always close it.
+    step = "OpenProcessToken"
+    token = wintypes.HANDLE()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token),  # TOKEN_QUERY
     ):
         raise ctypes.WinError(ctypes.get_last_error())
-    if returned.value != ctypes.sizeof(is_appcontainer):
-        raise ValueError(f"TokenIsAppContainer returned {returned.value} bytes")
-    if is_appcontainer.value != 1:
-        raise ValueError(f"TokenIsAppContainer returned {is_appcontainer.value}")
+    try:
+        step = "GetTokenInformation(TokenIsAppContainer)"
+        is_appcontainer = wintypes.DWORD()
+        returned = wintypes.DWORD()
+        if not advapi.GetTokenInformation(
+            token, 29, ctypes.byref(is_appcontainer),
+            ctypes.sizeof(is_appcontainer), ctypes.byref(returned),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if returned.value != ctypes.sizeof(is_appcontainer):
+            raise ValueError(f"TokenIsAppContainer returned {returned.value} bytes")
+        if is_appcontainer.value != 1:
+            raise ValueError(f"TokenIsAppContainer returned {is_appcontainer.value}")
+    finally:
+        kernel.CloseHandle(token)
 
     def connect(host, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
