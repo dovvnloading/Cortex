@@ -240,4 +240,42 @@ describe("AgentPage", () => {
     ));
   });
 
+  it("offers separately confirmed recovery when a past work copy is gone", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.agentRuns.mockResolvedValue({ runs: [{ ...run, id: "discarded-run" }] });
+    api.agentRun.mockResolvedValue({ ...run, id: "discarded-run" });
+    api.agentChangeset.mockRejectedValue(new Error("copy unavailable"));
+    page(api);
+
+    await user.click(await screen.findByRole("button", { name: "Open run: Goal unavailable" }));
+    expect(await screen.findByRole("alert", { name: "" })).toHaveTextContent("Could not load the staged changes");
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    expect(api.undoAgentChanges).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(api.undoAgentChanges).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
+    await waitFor(() => expect(api.undoAgentChanges).toHaveBeenCalledWith("discarded-run", { confirmed: true }));
+    expect(await screen.findByText("Restored original project files: app.py")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Undo previously accepted changes" })).not.toBeInTheDocument();
+  });
+
+  it("offers confirmed recovery without asserting prior acceptance for an empty changeset", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.agentChangeset.mockResolvedValue({ run_id: "run-1", changes: [] });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("No files to review.")).toBeVisible();
+    expect(within(dialog).queryByText("Changes accepted to the project.")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Undo previously accepted changes" }));
+    expect(api.undoAgentChanges).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Confirm undo" }));
+    await waitFor(() => expect(api.undoAgentChanges).toHaveBeenCalledWith("run-1", { confirmed: true }));
+    expect(await screen.findByText("Restored original project files: app.py")).toBeVisible();
+  });
+
 });

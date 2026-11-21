@@ -394,4 +394,18 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
     expect(onUndo).not.toHaveBeenCalled();
   });
+  it("requires confirmation for journal recovery when an old run has no staged diff", async () => {
+    const user = userEvent.setup();
+    const { onUndo, onAccept } = renderReview({ changes: [], allowRecovery: true });
+    expect(screen.getByText("No files to review.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
+    expect(onUndo).toHaveBeenCalledOnce();
+    expect(onAccept).not.toHaveBeenCalled();
+  });
+
 });
