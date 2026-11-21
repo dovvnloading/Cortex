@@ -14,6 +14,9 @@ import struct
 from typing import Literal
 import zlib
 
+from cortex_backend.agent.sandbox.base import Launcher, ProcessHandle, SandboxLevel
+from cortex_backend.core.win_jobs import JobLimits
+
 _GIT_FILE = "release.txt"
 _OBJECT_LIMIT = 1024 * 1024
 
@@ -129,7 +132,7 @@ def verify_git_fixture(root: Path, baseline: str, expected: Mapping[str, bytes])
 
 
 class ReplayProcess:
-    level: Literal["appcontainer"] = "appcontainer"
+    level: SandboxLevel = "appcontainer"
     pid = 0
 
     def __init__(self, exit_code: int, output: bytes) -> None:
@@ -147,7 +150,7 @@ class ReplayProcess:
         self.exit_code = 1
 
 
-class ReplayCheckLauncher:
+class ReplayCheckLauncher(Launcher):
     """Only report pytest success when the copied one-line bug is fixed."""
     level: Literal["appcontainer"] = "appcontainer"
 
@@ -158,8 +161,8 @@ class ReplayCheckLauncher:
 
     def start(
         self, argv: Sequence[str], cwd: str | Path, env: Mapping[str, str] | None = None,
-        network: bool = False, limits: object = None,
-    ) -> ReplayProcess:
+        network: bool = False, limits: JobLimits | None = None,
+    ) -> ProcessHandle:
         if env is not None or network or limits is not None or Path(cwd).resolve() != self.root:
             raise RuntimeError("unsafe_eval_launch")
         command = argv[-1] if argv else ""
