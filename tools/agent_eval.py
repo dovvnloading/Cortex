@@ -227,6 +227,11 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return result
 
 
+def _normalize_line_endings(files: dict[str, bytes]) -> dict[str, bytes]:
+    # Text fixtures may have CRLF in Windows checkouts or after file edits.
+    return {path: data.replace(b"\r\n", b"\n") for path, data in files.items()}
+
+
 def _load_task(directory: Path) -> _Task:
     info = directory.lstat()
     if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
@@ -302,7 +307,10 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
             )
             checks = {
                 "completed": outcome.status == "completed",
-                "end_state": _snapshot(workcopy) == expected,
+                "end_state": (
+                    _normalize_line_endings(_snapshot(workcopy))
+                    == _normalize_line_endings(expected)
+                ),
                 "answer": task.answer_contains is None or task.answer_contains in answer,
                 "read_observed": not task.require_read or any(
                     step.tool in {"read_file", "grep"} and step.result.get("success") is True
