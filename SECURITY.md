@@ -100,15 +100,28 @@ The fallback cannot enforce a network-off request. It requires fresh,
 explicit approval before use; automatic approval does not apply. Dangerous
 operations are refused.
 
+The live registry grants different tools in each mode. All three expose
+work-copy \`list_dir\`, \`glob\`, \`grep\`, \`read_file\`, plus \`update_plan\`
+and \`web_fetch\`. **Plan only** exposes only these six; it has no file
+mutation, Git, shell or project-check tools. **Ask before every command**
+and **Auto-approve safe commands in the sandbox** also expose
+\`write_file\`, \`edit_file\`, \`delete_file\`, \`move_file\`;
+\`git_status\`, \`git_diff\`, \`git_log\`, \`git_show\`, \`git_commit\`;
+\`run_command\`, \`start_background\`, \`read_background\`,
+\`stop_background\`; and \`run_checks\`. Each file mutation and
+\`git_commit\` requires its own one-time approval even in auto mode.
+File operations validate work-copy-relative paths and enforce size and
+read limits; they do not write to the original project.
+
 The shell policy classifies PowerShell and cmd commands as inspection,
 build/test, work-copy edits, network operations, dangerous actions or
 unknown commands. A command chain uses its most restrictive class.
-**Plan only** does not run shell commands. **Ask before every command**
-requires one-time approval for every non-dangerous command that starts
-a process. **Auto-approve safe commands in the sandbox** skips prompts
-only for recognized inspection and build/test commands in AppContainer.
-Edits, network operations and unknown commands need explicit approval.
-Dangerous commands are blocked in every mode.
+**Ask before every command** requires one-time approval for every
+non-dangerous command that starts a process. **Auto-approve safe commands
+in the sandbox** skips command prompts only for recognized inspection
+and build/test commands in a verified AppContainer. Edits, network
+operations and unknown commands need explicit approval. Dangerous
+commands are blocked in both shell-enabled modes.
 
 `run_command` and `start_background` run in the work copy with an
 allowlisted environment. The model cannot choose another working
@@ -135,10 +148,25 @@ declined approvals and exhausted run budgets.
 
 Git tools allow only local status, diff, log, show and commit operations
 against the copy. They disable hooks, filters and external diff drivers.
-They do not run network Git commands. A separate web-fetch helper requires
-explicit approval for each public HTTP(S) GET. It rejects private addresses
-and checks every redirect. This helper is not wired into current Agent runs.
-Returned web content is untrusted reference data, not instructions.
+They do not run network Git commands. Live \`web_fetch\` requires an
+explicit, one-time **Allow once** for the exact requested URL (including
+its query) on **every call in every mode**; it never auto-approves, not
+even in auto-sandboxed mode. A denied or expired request fetches nothing.
+The helper permits public HTTP(S) GETs only, rejects private addresses,
+revalidates each redirect, and limits responses to supported text types,
+1 MiB, five redirects and ten seconds total. Returned web content is
+untrusted reference data, not instructions. Requested URLs and raw tool
+arguments are not saved in the run ledger.
+
+\`update_plan\` records a bounded visible plan, but does not execute it.
+When the latest recorded plan is unfinished, the live-loop final-answer
+guard nudges the model once before completion, within the run budget.
+Only a recommended per-model capability profile that passes single-call,
+ordered-call and prompt-injection-resistance probes can select the
+supported native-tools, constrained-JSON or plain-JSON path and narrow
+the context budget. Missing, failing or corrupt profiles fall back
+to conservative plain-JSON and context defaults. Probes use synthetic
+tool responses, not real file or network access.
 
 Tool calls are checked against registered names and argument schemas.
 Model output, project text and tool results are data, not permission to
