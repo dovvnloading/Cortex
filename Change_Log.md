@@ -23,6 +23,9 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
+- Clarify that Agent mode has no general disk quota: Job Object process,
+  memory and CPU-time limits and work-copy acceptance size checks do not
+  prevent a sandboxed command from filling available disk space (#554).
 - Document live Agent tools, approval modes, sandbox limits, background cleanup,
   project checks and model profiles (#536; documentation #544).
 - Document staged changes review, confirmed accept/discard, undo limitations,
