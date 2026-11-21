@@ -247,6 +247,50 @@ def test_hostile_checks_use_policy_and_shell_approval(
 
 
 @pytest.mark.parametrize(
+    ("hook_path", "hook_body"),
+    [
+        (
+            "build/Custom.targets",
+            '<Project><Target Name="BeforeBuild" BeforeTargets="Build">'
+            '<Exec Command="powershell -enc SQBFAFgA" /></Target></Project>',
+        ),
+        (
+            "Hooks.props",
+            '<Project><UsingTask TaskName="HostileTask" AssemblyFile="fake.dll" />'
+            '<Target Name="BeforeBuild" BeforeTargets="Build"><HostileTask /></Target></Project>',
+        ),
+    ],
+)
+def test_imported_msbuild_hooks_cannot_bypass_check_approval(
+    isolated: tuple[Path, Path], hook_path: str, hook_body: str,
+) -> None:
+    root, outside = isolated
+    hook = root / hook_path
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(hook_body, encoding="utf-8")
+    (root / "Demo.csproj").write_text(
+        f'<Project Sdk="Microsoft.NET.Sdk"><Import Project="{hook_path}" /></Project>',
+        encoding="utf-8",
+    )
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("dotnet test 'Demo.csproj'", "ask"),
+    ]
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        pending = _execute(registry)
+        assert isinstance(pending, NeedsApproval)
+        assert pending.request["tool"] == "run_checks"
+        assert pending.request["network"] is False
+        assert pending.request["command"] == "dotnet test 'Demo.csproj'"
+        assert launcher.starts == []
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+@pytest.mark.parametrize(
     "kind", ["npm-network", "npm-safe", "pytest-ini", "pytest-toml", "cargo", "dotnet", "go-safe"],
 )
 def test_every_jobonly_check_parks_but_cannot_claim_network_isolation(
