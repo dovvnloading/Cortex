@@ -1,0 +1,7 @@
+{
+  "goal": "Find the one-line bug causing the pytest test to fail. Fix calculator.py in the work copy and verify pytest passes after the change. Leave other files alone.",
+  "expected_changes": {
+    "calculator.py": "def add(left: int, right: int) -> int:\n    return left + right\n"
+  },
+  "require_read": true
+}
