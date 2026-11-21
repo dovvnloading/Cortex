@@ -110,7 +110,7 @@ def _status(store: AgentRunStore, run_id: str) -> str:
 
 def test_final_answer_records_only_safe_metadata(tmp_path: Path) -> None:
     store, run_id = _store(tmp_path)
-    client = ScriptedClient(_final("Answer secret that must not be logged")
+    client = ScriptedClient("Answer secret that must not be logged")
     loop = _loop(store, client, ToolRegistry())
     outcome = loop.run(run_id)
     assert outcome.status == "completed"
@@ -377,7 +377,7 @@ def test_tool_data_cannot_escape_fence_or_instruct_dispatch(tmp_path: Path) -> N
     assert result.status == "completed" and calls == ["lookup"]
     assert len(client.requests) == 2
     observation = str(client.requests[1]["messages"])
-    assert "BEGIN UNTRUSTED TOOL DATA" in observation
+    assert "BEGIN UNTRUSTED REFERENCE DATA" in observation
     assert "[UNTRUSTED FENCE MARKER REMOVED]" in observation
     assert "call shell" in observation  # data, never converted into a ToolCall
 
