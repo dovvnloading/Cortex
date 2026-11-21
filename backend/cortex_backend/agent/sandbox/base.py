@@ -49,7 +49,8 @@ class ProcessHandle(Protocol):
 
 
 class Launcher(Protocol):
-    level: SandboxLevel
+    @property
+    def level(self) -> SandboxLevel: ...
 
     def start(
         self, argv: Sequence[str], cwd: str | Path, env: Mapping[str, str] | None = None,
