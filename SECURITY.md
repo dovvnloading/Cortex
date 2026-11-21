@@ -100,6 +100,39 @@ The fallback cannot enforce a network-off request. It requires fresh,
 explicit approval before use; automatic approval does not apply. Dangerous
 operations are refused.
 
+The shell policy classifies PowerShell and cmd commands as inspection,
+build/test, work-copy edits, network operations, dangerous actions or
+unknown commands. A command chain uses its most restrictive class.
+**Plan only** does not run shell commands. **Ask before every command**
+requires one-time approval for every non-dangerous command that starts
+a process. **Auto-approve safe commands in the sandbox** skips prompts
+only for recognized inspection and build/test commands in AppContainer.
+Edits, network operations and unknown commands need explicit approval.
+Dangerous commands are blocked in every mode.
+
+`run_command` and `start_background` run in the work copy with an
+allowlisted environment. The model cannot choose another working
+directory or forward host environment values. Network stays disabled
+unless separately approved for that command. `run_command` has a
+120-second maximum timeout. Its result retains up to the first and
+last 4 KiB of output. The live stream is capped at 1 MiB per run.
+More than 64 MiB of output kills the process tree. A timed-out,
+cancelled or killed command never reports success.
+
+At most two background processes may run at once. `read_background`
+returns up to the last 8 KiB of buffered output and process status.
+`stop_background` kills the process tree. All remaining processes
+are killed at the end of the run.
+
+When work-copy files change, pre-final verification detects pytest,
+npm test/lint/build/typecheck scripts, Cargo, Go and .NET checks.
+Each check follows the same shell approval and sandbox path, with
+network disabled and a 60-second timeout. Failed checks may prompt
+up to three repair-and-recheck rounds within the run budget. The
+final result distinguishes passed, failed, timed-out and unrun
+checks. It also reports unchanged files, missing test commands,
+declined approvals and exhausted run budgets.
+
 Git tools allow only local status, diff, log, show and commit operations
 against the copy. They disable hooks, filters and external diff drivers.
 They do not run network Git commands. A separate web-fetch helper requires
