@@ -175,7 +175,7 @@ def _parent_for(root: Path, relative: str) -> Path:
     return cursor
 
 
-def _write(root: Path, relative: str, contents: bytes, mode: int) -> None:
+def _write(root: Path, relative: str, contents: bytes, mode: int | None) -> None:
     parent = _parent_for(root, relative)
     name: str | None = None
     try:
@@ -184,7 +184,13 @@ def _write(root: Path, relative: str, contents: bytes, mode: int) -> None:
             output.write(contents)
             output.flush()
             os.fsync(output.fileno())
-        os.chmod(name, stat.S_IMODE(mode) or 0o600)
+        # File contents are written in binary mode, without newline translation.
+        # Journal deletion flags (or a missing mode) are not filesystem modes.
+        saved_mode = 0 if mode is None else mode & ~_DELETE_FLAG
+        if saved_mode > 0:
+            permissions = stat.S_IMODE(saved_mode)
+            if permissions:
+                os.chmod(name, permissions)
         os.replace(name, parent / relative.split("/")[-1])
     finally:
         if name is not None:
@@ -591,7 +597,7 @@ class WorkCopy:
                 proposed[relative] = (
                     actual.contents if actual is not None else b"",
                     new.contents if new is not None else b"",
-                    (actual.mode if actual is not None else 0) | (_DELETE_FLAG if new is None else 0),
+                    (actual.mode | (_DELETE_FLAG if new is None else 0)) if actual is not None else 0,
                 )
             store = self._checkpoint_store()
             try:
@@ -678,7 +684,7 @@ class WorkCopy:
                 if entry.pending_sha is not None:
                     acceptable.add(entry.pending_sha)
                 if actual is None:
-                    if not (entry.mode == 0 or (
+                    if not ((entry.mode & ~_DELETE_FLAG) == 0 or (
                         entry.mode & _DELETE_FLAG and _EMPTY_SHA in acceptable
                     )):
                         raise WorkCopyError("stale_source")
@@ -695,11 +701,12 @@ class WorkCopy:
                     now = _file_at(self.project_root, relative)
                     if now != verified[relative]:
                         raise WorkCopyError("stale_source")
-                    if entry.mode == 0:
+                    original_mode = entry.mode & ~_DELETE_FLAG
+                    if original_mode == 0:
                         if now is not None:
                             _remove(self.project_root, relative)
                     elif now is None or now.contents != entry.original:
-                        _write(self.project_root, relative, entry.original, entry.mode)
+                        _write(self.project_root, relative, entry.original, original_mode)
                 except (OSError, WorkCopyError) as exc:
                     # Keep the durable checkpoint for retry after interruption.
                     raise WorkCopyError("restore_failed") from exc
