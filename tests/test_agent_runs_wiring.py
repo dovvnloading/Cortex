@@ -235,6 +235,31 @@ def test_web_fetch_needs_approval_for_each_exact_url_even_in_auto_mode(
         manager.close()
 
 
+def test_live_file_write_stages_only_after_its_own_approval(tmp_path: Path) -> None:
+    client = _JsonClient(
+        _tool("write_file", {"path": "app.py", "content": "value = 2\n"}),
+        _final(),
+    )
+    manager = AgentRuns(data_dir=tmp_path / "data", chat_client=client)
+    project = _project(tmp_path)
+    try:
+        run = _start(manager, project, mode="auto_sandboxed")
+        _await_status(manager, run.id, "waiting_approval")
+        seq, request = _approval(manager, run.id)
+        assert request["tool"] == "write_file"
+        assert request["path"] == "app.py"
+        assert (Path(run.workcopy) / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+        assert (project / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+
+        manager.approval(run.id, owner=OWNER, seq=seq, decision="allow_once")
+        manager.resume(run.id, owner=OWNER)
+        _await_status(manager, run.id, "completed")
+        assert (Path(run.workcopy) / "app.py").read_text(encoding="utf-8") == "value = 2\n"
+        assert (project / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+    finally:
+        manager.close()
+
+
 def test_web_denial_and_model_supplied_approval_cannot_fetch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
