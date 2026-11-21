@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowRight, Bot, FolderCode, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { ArrowRight, Bot, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
@@ -62,12 +62,9 @@ export function AppShell({
   const previousPathnameRef = useRef(pathname);
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
-  const isWorkspace = parseAppRoute(pathname).kind === "workspace";
   const isAgent = parseAppRoute(pathname).kind === "agent";
-  const activeTitle = isWorkspace
-    ? "Project workspace"
-    : isAgent
-      ? "Agent mode"
+  const activeTitle = isAgent
+    ? "Agent mode"
     : isSettings
       ? "Settings"
     : activeChatId
@@ -138,12 +135,6 @@ export function AppShell({
           </div>
         </div>
         <div className="window-actions">
-          <NavigationLink to="/workspace"
-            className={"window-control" + (isWorkspace ? " window-control-active" : "")}
-            aria-label="Project workspace" aria-current={isWorkspace ? "page" : undefined}
-            title="Local coding workspace">
-            <FolderCode aria-hidden="true" size={17} />
-          </NavigationLink>
           <NavigationLink to="/agent"
             className={"window-control" + (isAgent ? " window-control-active" : "")}
             aria-label="Agent mode" aria-current={isAgent ? "page" : undefined}
@@ -209,7 +200,7 @@ export function AppShell({
               chats={chats}
               groups={groups}
               activeChatId={activeChatId}
-              activeRowVisible={!isSettings && !isWorkspace && !isAgent}
+              activeRowVisible={!isSettings && !isAgent}
               query={chatQuery}
               onSelectChat={selectChat}
               onRenameChat={setRenameTarget}
@@ -222,11 +213,6 @@ export function AppShell({
             />
           </InlineBoundary>
           <footer className="archive-footer">
-            <NavigationLink to="/workspace" className="archive-workspace" aria-current={isWorkspace ? "page" : undefined}>
-              <span className="archive-workspace-icon"><FolderCode aria-hidden="true" size={17} /></span>
-              Project workspace
-              <ArrowRight aria-hidden="true" size={15} />
-            </NavigationLink>
             <NavigationLink to="/agent" className="archive-workspace" aria-current={isAgent ? "page" : undefined}>
               <span className="archive-workspace-icon"><Bot aria-hidden="true" size={17} /></span>
               Agent mode
@@ -235,7 +221,7 @@ export function AppShell({
           </footer>
         </aside>
 
-        <main className={`main-content ${isSettings ? "settings-content" : isWorkspace || isAgent ? "workspace-content" : "chat-content"}`}>{children}</main>
+        <main className={`main-content ${isSettings ? "settings-content" : isAgent ? "workspace-content" : "chat-content"}`}>{children}</main>
       </div>
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}
