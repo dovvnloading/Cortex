@@ -15,6 +15,11 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Changed
 
+- The Agent task benchmark reports elapsed minutes and provider-reported prompt
+  and completion tokens per task; unavailable model usage is unknown, while
+  deterministic `--check` explicitly reports zero. Read-and-answer now
+  requires a citation to a file line or Markdown section containing the
+  reported fact (#552).
 - Fold the separate Project workspace page into Agent mode (#549), removing its
   page and navigation links. The **Saved recovery checkpoints** panel now lives
   in Agent mode even when Agent execution is disabled. It lists legacy,
@@ -34,6 +39,9 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
+- Clarify that Agent mode has no general disk quota: Job Object process,
+  memory and CPU-time limits and work-copy acceptance size checks do not
+  prevent a sandboxed command from filling available disk space (#554).
 - Document live Agent tools, approval modes, sandbox limits, background cleanup,
   project checks and model profiles (#536; documentation #544).
 - Document staged changes review, confirmed accept/discard, undo limitations,

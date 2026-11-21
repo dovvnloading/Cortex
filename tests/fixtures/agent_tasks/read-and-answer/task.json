@@ -1,6 +1,7 @@
 {
-  "goal": "Read notes.md and answer with the release codename. Do not change any files.",
+  "goal": "Read notes.md and answer with the release codename. Cite the source as notes.md:L3 or notes.md#release. Do not change any files.",
   "expected_changes": {},
   "answer_contains": "ASTER-42",
-  "require_read": true
+  "require_read": true,
+  "require_citation": true
 }

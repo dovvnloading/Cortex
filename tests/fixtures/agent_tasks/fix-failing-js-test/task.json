@@ -1,0 +1,8 @@
+{
+  "goal": "Fix the failing JavaScript addition test in math.test.js by editing math.js. Verify with npm run test (its only script invokes plain node --test; never npm install or access the network). Leave all other files unchanged.",
+  "expected_changes": {
+    "math.js": "function add(left, right) {\n  return left + right;\n}\n\nmodule.exports = { add };\n"
+  },
+  "answer_contains": "node --test",
+  "require_read": true
+}
