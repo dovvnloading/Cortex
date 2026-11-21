@@ -163,6 +163,11 @@ def test_all_file_mutations_require_separate_approval_even_in_auto_mode(
             assert outcome.request["tool"] == name
             assert (Path(run.workcopy) / "app.py").read_text(encoding="utf-8") == "value = 1\n"
         assert not (Path(run.workcopy) / "moved.py").exists()
+        git = registry.execute(
+            ToolCall("commit", "git_commit", {"message": "Model suggested commit"}),
+            ToolContext(Event(), float("inf")),
+        )
+        assert isinstance(git, NeedsApproval) and git.request["tool"] == "git_commit"
     finally:
         manager.close()
 
