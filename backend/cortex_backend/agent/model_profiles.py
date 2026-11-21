@@ -296,13 +296,18 @@ class ProfileStore:
     """Versioned, atomic JSON store inside the caller's existing data directory."""
 
     def __init__(self, data_dir: Path | str) -> None:
-        self.path = Path(data_dir) / "agent" / "model_profiles.json"
+        self._data_dir = Path(data_dir)
+        self.path = self._data_dir / "agent" / "model_profiles.json"
 
     def _reject_links(self) -> None:
-        # Neither read arbitrary symlink targets nor write through a redirected
-        # agent subdirectory. Destination filenames are never model-controlled.
-        if self.path.parent.is_symlink() or self.path.is_symlink():
-            raise ProfileSchemaError("Profile store path cannot be a symlink.")
+        # Resolve the agent directory to reject junctions as well as symlinks
+        # on Windows. The given data directory itself may be a trusted link.
+        if (
+            self.path.parent.is_symlink()
+            or self.path.is_symlink()
+            or not self.path.parent.resolve().is_relative_to(self._data_dir.resolve())
+        ):
+            raise ProfileSchemaError("Profile store path cannot be redirected.")
 
     def load(self) -> list[ModelProfile]:
         self._reject_links()
