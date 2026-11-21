@@ -125,12 +125,22 @@ capability is off by default. A Windows Job Object limits memory, CPU time
 and child processes. Closing the job kills the process tree. AppContainer
 is not a VM or a complete boundary against every host resource.
 
-The Agent sandbox has **no general disk quota**. The Job Object limits
-process count, committed memory and CPU time, but not disk writes. Work-copy
-review and acceptance enforce source-file size limits, so oversized files
-cannot be accepted into the original project. Those checks do not cap disk
-usage during execution: a sandboxed command can fill the available disk
-space by writing inside its disposable work copy until it is stopped.
+The Agent sandbox has **no general disk quota**. The default Job Object
+limits the job to **16 active processes**, **1 GiB of committed memory
+per process and 1 GiB across the job**, and **120 seconds of user-mode
+CPU time per process**. It also restricts UI access and kills remaining
+processes when the job closes; none of these limits caps disk writes.
+Work-copy capture and changeset review consider eligible source files
+only up to **256 KiB each** (at most 2,048 files and 16 MiB total).
+Oversized files written by a command can remain in its disposable work
+copy, but are excluded from reviewed changes and cannot be selected for
+acceptance into the original project. These checks do not run as a
+live disk-use quota: a command can exhaust available disk space.
+
+The Windows resource tests exercise process and committed-memory caps,
+timeout-driven termination of a CPU spin and its descendant, and
+rejection of an oversized staged file. They do not directly exercise the
+configured Job Object CPU-time allowance or establish any disk-write cap.
 
 If AppContainer profile creation fails, the job-only fallback is marked
 **unsandboxed**. A Job Object does not isolate files or network access.
