@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from threading import Event
@@ -36,7 +37,6 @@ from cortex_backend.core.win_jobs import JobLimits
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "agent_hostile"
 _WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="requires a real Windows AppContainer and Job Object")
-_POSIX_SYMLINK = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink fixture avoids Windows symlink privilege")
 
 
 def _call(registry: ToolRegistry, name: str, **kwargs: Any) -> tuple[ToolResult, dict[str, Any]]:
@@ -212,8 +212,9 @@ def _assert_link_not_followed(root: Path, outside: Path, link: str) -> None:
     assert (root / "safe.txt").read_text() == "safe"
 
 
-@_POSIX_SYMLINK
-def test_directory_symlink_cannot_be_followed_by_any_file_tool(tmp_path: Path, private_home: Path) -> None:
+def test_directory_symlink_or_junction_cannot_be_followed_by_any_file_tool(
+    tmp_path: Path, private_home: Path,
+) -> None:
     project = tmp_path / "real-project"
     project.mkdir()
     (project / "safe.txt").write_text("safe")
@@ -222,7 +223,23 @@ def test_directory_symlink_cannot_be_followed_by_any_file_tool(tmp_path: Path, p
     (outside / "secret.txt").write_text("outside-sentinel")
     work = WorkCopy.create(project, uuid4().hex, data_dir=tmp_path / "cortex-data")
     try:
-        (work.path / "portal").symlink_to(outside, target_is_directory=True)
+        portal = work.path / "portal"
+        try:
+            portal.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            # Windows CI may lack symlink privilege. Exercise the real
+            # reparse-point boundary with a junction instead of skipping.
+            if sys.platform != "win32" or getattr(exc, "winerror", None) not in {5, 1314}:
+                raise
+            result = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(portal), str(outside)],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert result.returncode == 0, (
+                f"mklink /J failed ({result.returncode}): {result.stdout!r} {result.stderr!r}"
+            )
+            assert portal.is_dir()
+        assert portal.resolve(strict=True) == outside.resolve(strict=True)
         _assert_link_not_followed(work.path, outside, "portal")
     finally:
         work.discard()
@@ -429,23 +446,40 @@ def _python_output(output: bytes, staged: Path) -> str:
 def test_appcontainer_network_off_child_socket_connect_fails(
     tmp_path: Path, _isolated_windows_launcher: Path, _staged_python: Path,
 ) -> None:
-    script = (
-        "import json,socket; "
-        "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); "
-        "s.settimeout(1); "
-        "result=s.connect_ex(('203.0.113.1',443)); "
-        "s.close(); print(json.dumps({'connect_ex':result}))"
-    )
-    launcher = AppContainerLauncher(_isolated_windows_launcher, uuid4().hex)
-    before = set(win_appcontainer.list_profiles())
-    process = launcher.start(["python", "-c", script], _isolated_windows_launcher, network=False)
-    try:
-        output = b"".join(process.stdout_chunks())
-        assert process.wait(timeout=15) == 0, output
-    finally:
-        process.kill_tree()
-    result = json.loads(_python_output(output, _staged_python))
-    assert result["connect_ex"] != 0
+    # A TEST-NET address would fail even if the network boundary were broken.
+    # Prove this loopback endpoint is reachable before the restricted child tries.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        port = listener.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            control, _ = listener.accept()
+            control.close()
+
+        script = (
+            "import json,socket,sys; "
+            "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); "
+            "s.settimeout(1); "
+            "result=s.connect_ex(('127.0.0.1',int(sys.argv[1]))); "
+            "s.close(); print(json.dumps({'connect_ex':result}))"
+        )
+        launcher = AppContainerLauncher(_isolated_windows_launcher, uuid4().hex)
+        before = set(win_appcontainer.list_profiles())
+        process = launcher.start(
+            ["python", "-c", script, str(port)], _isolated_windows_launcher, network=False,
+        )
+        try:
+            output = b"".join(process.stdout_chunks())
+            assert process.wait(timeout=15) == 0, output
+        finally:
+            process.kill_tree()
+        result = json.loads(_python_output(output, _staged_python))
+        assert isinstance(result["connect_ex"], int) and result["connect_ex"] != 0, result
+        # A dishonest error code cannot mask an actual accepted connection.
+        listener.settimeout(0.25)
+        with pytest.raises(TimeoutError):
+            unexpected, _ = listener.accept()
+            unexpected.close()
     assert set(win_appcontainer.list_profiles()) == before
     _assert_no_profile(launcher)
 
