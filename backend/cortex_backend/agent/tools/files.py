@@ -286,16 +286,17 @@ class _Files:
         relative, target, original = self._file(path, create_parents=True, required=False)
         staged: str | None = None
         try:
-            descriptor, staged = tempfile.mkstemp(prefix=".cortex-agent-", dir=target.parent)
+            descriptor, temporary = tempfile.mkstemp(prefix=".cortex-agent-", dir=target.parent)
+            staged = temporary
             with os.fdopen(descriptor, "wb") as output:
                 output.write(contents)
                 output.flush()
                 os.fsync(output.fileno())
             if original is not None:
-                os.chmod(staged, stat.S_IMODE(original.st_mode))
+                os.chmod(temporary, stat.S_IMODE(original.st_mode))
             # Revalidate every existing component immediately before replacing.
             self._file(path, required=False)
-            os.replace(staged, target)
+            os.replace(temporary, target)
         finally:
             if staged is not None:
                 try:
