@@ -230,87 +230,52 @@ What the capabilities reach today is deliberately narrow:
 
 The language itself is a restricted Python subset, so this suits calculations
 over data the model writes into the program -- not editing files or running
-your tests. The consent-gated desktop Project workspace now supports bounded
-repository research, reviewed edits, approved checks, and explicit recovery.
-Ordinary chat does not silently acquire those privileges.
+your tests. Agent mode supports consent-gated repository research, reviewed edits,
+approved project checks, and explicit recovery. Ordinary chat does not
+silently acquire those privileges.
 
-### Experimental local coding workspace (desktop)
+### Saved project recovery (Agent mode)
 
-**Project workspace** in the desktop sidebar is an opt-in coding mode, separate
-from ordinary chat. Choose a local project with the native folder picker or
-enter its absolute path, then explicitly approve indexing its eligible source
-files. Cortex creates an **in-memory, owner-scoped, expiring snapshot** (up to
-2048 small UTF-8 files and 16 MiB, valid for 15 minutes). Secret files,
-dependencies, symlinks and binary files are excluded. Search/read and the model
-research loop use that copy, not arbitrary paths from the model.
+The separate **Project workspace** desktop page has been retired. Use **Agent
+mode** for project questions, review of changes, explicit accept/apply,
+confirmed undo, run history and project checks. Existing bookmarks to
+`/workspace` take you to `/agent`. The former page's read/search/preview
+workflow is replaced in the desktop UI by Agent's consent-gated work-copy
+workflow; the read-only `tools/workspace_research.py` CLI remains available.
 
-The selected **Ollama** model can investigate a problem and optionally stage
-exact, hash-checked text replacements as a **review-only unified diff**. The
-model cannot apply the patch. Review the proposed changes, then choose **Review
-& apply patch** and confirm a separate write grant. Cortex checks every
-original source hash, file identity and linked directory before installing the
-edited contents with temporary sibling files. **Undo applied patch** restores
-the captured original bytes only if the edited files are unchanged. The undo
-checkpoint is retained through separately approved edits and a session refresh.
-Before ANY approved file edit, Cortex also writes a **durable local recovery
-checkpoint** to its private data directory, in
-`workspace_checkpoints.sqlite`. It records the first original file bytes and
-the expected before/after hashes before writing the checkout. If Cortex stops
-mid-edit, the checkpoint remains in the database (with a pending state) and can
-be restored manually after restarting the app. Checkpoints are separate from
-chat, model history and temporary workspace snapshots.
+The **Saved recovery checkpoints** panel is now in Agent mode, including
+when Agent execution is disabled in Settings. It lists installation-owned
+checkpoints from the former Project workspace, showing project roots,
+paths, timestamps and states without revealing backed-up source bytes or
+requiring a new Agent run. It does not list accepted Agent-run edits.
+Choose **Restore originals** or **Discard backup**, each requiring its own
+confirmation. Before changing any files, restoration checks the project
+root, file identity and current source hashes. An unexpected edit or
+corrupt checkpoint found during preflight prevents restoration from
+starting. A failure after restoration begins can leave some originals
+restored; the journal stays available for an explicit retry. Discard
+deletes the recovery copy without changing project files. Recovery never
+runs automatically.
 
-The desktop **Saved recovery checkpoints** panel lists only paths and status,
-never backed-up contents. Select **Restore originals** and explicitly confirm:
-Cortex first verifies the project root and every current file against its
-recorded original, pre-write or proposed hashes, and refuses the entire
-restore if any file has changed unexpectedly. An interrupted restore can be
-explicitly retried; it never restores files automatically. **Discard backup**
-deletes the saved originals without touching your checkout. These source
-copies are stored as **unencrypted SQLite blobs** in the existing
-per-user-protected Cortex data directory, so protect and back up that data
-directory appropriately. The bounded journal stores up to 32 files per
-checkpoint and 64 MiB of original data across all checkpoints. When full,
-edits fail closed until older checkpoints are explicitly restored or discarded.
-Nothing here replaces Git or a separate backup; Windows file permissions and
-metadata beyond the original source bytes are not guaranteed to be preserved.
+The former Project workspace saved original source bytes and expected
+hashes in the private `workspace_checkpoints.sqlite` journal before
+approved writes. Those installation-owned checkpoints survive crashes,
+app restarts, session expiry and closure of the former workspace. The
+journal stores up to 32 files per checkpoint and 64 MiB of original data
+across all checkpoints. Source bytes are protected by OS permissions but
+are not separately encrypted; keep independent Git/backups and protect
+Cortex's data directory. Checkpoints do not guarantee preservation of
+additional Windows metadata or ACLs.
 
-A multi-file write or restore failure may still require manual recovery,
-and Cortex refuses to overwrite intervening external changes. Saved recovery
-records remain available after a crash, reload, session expiry or normal
-workspace close, but only within the same installation's private data
-directory.
-
-The check controls offer only **Python pytest**, **npm test**, and **npm
-build**, and require another explicit confirmation each time. A project test
-or build script executes code with your Windows account privileges; Windows
-job objects bound its process lifetime, memory and number of descendants
-but **do not sandbox filesystem or network access**. Use this mode only on
-trusted repositories.
-
-**Continue after a failed check:** select *Refresh source & investigate
-failure* to explicitly recapture eligible files into the same temporary
-workspace, then review the test output loaded into the next model question.
-The refresh is a new consented read; it never runs the model, applies code or
-executes another check on its own. It extends that session's 15-minute lease,
-preserves its original-file undo checkpoint and invalidates any old unapplied
-preview. Cortex refuses refresh if any previously applied source file has
-changed outside the approved edit, preventing silent loss of undo. Several
-separately approved patches can now be applied to the same or different files,
-and **Undo applied patch** restores the pre-first-edit bytes across all of
-them, only when all current file hashes still match. The **temporary source snapshot** remains in memory, but the approved
-original-byte recovery checkpoint is persisted in the private SQLite journal
-until restored or explicitly discarded.
-
-Unattended edit/test/repair loops and arbitrary shell commands remain
-unsupported: each iteration requires a deliberate user-initiated refresh,
-model prompt, reviewed patch approval and separate command confirmation.
-
-The UI's native folder chooser is only a convenience: it never grants read,
-write or command authority by itself. The REST endpoints require Cortex's
-existing local bearer session. No project grant persists when Cortex closes.
-This is an **unreleased experimental feature** on the development branch, not
-a published desktop release.
+Accepting selected Agent-run edits also creates a checkpoint in the same
+journal, but it is scoped to the Agent run's bearer session rather than
+the installation-owned legacy list. Use the run's separately confirmed
+**Undo** action to restore accepted Agent edits, including after the
+disposable work copy has been discarded, while that session and checkpoint
+remain accessible. A new bearer session cannot access the earlier
+session's Agent runs or undo. The existing authenticated checkpoint HTTP
+endpoints and legacy workspace API remain for compatibility; the CLI
+and backend snapshot/checkpoint implementations have not been removed.
 
 ### Agent mode
 
@@ -405,7 +370,7 @@ that were already accepted.
 
 Before writing selected changes, Cortex verifies the original project's
 source hashes and saves the original bytes, file-existence state and
-expected hashes in an owner-bound recovery checkpoint. An unexpected
+expected hashes in a checkpoint scoped to the run's bearer session. An unexpected
 source change or unsafe path refuses acceptance instead of overwriting
 someone else's work.
 
@@ -423,24 +388,31 @@ checkpoints instead of overwriting them. An interrupted multi-file
 write or restore can still require manual recovery. Undo never runs
 automatically.
 
-Recovery checkpoints survive a discarded work copy or application
-restart, so confirmed undo remains possible if the checkpoint is intact
-and the original files still pass those checks. They are stored in
-`workspace_checkpoints.sqlite` in Cortex's private per-user data
-directory, separately from the disposable copy and run ledger.
-The journal stores original source bytes as **unencrypted SQLite blobs**,
-with a limit of 32 files per checkpoint and 64 MiB of originals across
-checkpoints; a full or unavailable journal blocks further acceptance.
-Protect and back up the per-user data directory.
+Agent-run checkpoints survive work-copy disposal and application restarts
+as saved bytes, but **Undo** is tied to the bearer session that owns the
+run. While that session remains accessible, confirmed undo can restore
+accepted edits after the disposable copy is gone, if the checkpoint is
+intact and the current files pass verification. A new bearer session
+cannot access the previous session's Agent runs or undo. The
+**Saved recovery checkpoints** panel above instead lists
+installation-owned checkpoints from the former Project workspace.
 
-**Agent run history** lists previous runs and lets you open one to replay
-its recorded activity. After restarting Cortex, that replay contains
-persisted step and status summaries, not a reconstruction of the full
-live process output or execution context. History's **Resume** and
-**Delete** actions require confirmation and server acknowledgement;
-resuming depends on a still-available in-memory run. Deleting/discarding
-a run's work copy does not undo accepted project changes or erase its
-recovery checkpoint.
+Both checkpoint types use `workspace_checkpoints.sqlite` in Cortex's
+private per-user data directory, separately from disposable copies and
+the run ledger. The journal stores original source bytes as
+**unencrypted SQLite blobs**, with a limit of 32 files per checkpoint
+and 64 MiB of originals across checkpoints; a full or unavailable
+journal blocks further acceptance. Protect and back up the data directory.
+
+**Agent run history** lists previous runs for the current bearer
+session and lets you open one to replay recorded activity. For an
+accessible run whose live worker context is gone, the replay contains
+persisted step and status summaries, not the full process output or
+execution context. Starting a new bearer session does not make earlier
+session runs accessible. History's **Resume** and **Delete** actions
+require confirmation and server acknowledgement; resuming depends on
+a still-available in-memory run. Deleting/discarding a run's work copy
+does not undo accepted project changes or erase its recovery checkpoint.
 
 Run metadata and step summaries are stored in `agent/runs.sqlite` under
 Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.
@@ -453,7 +425,7 @@ See [SECURITY.md](SECURITY.md) for the process and network limits.
 
 The first **read-only** slice of that workspace direction is available to
 developers through a separate terminal command, independent of ordinary chat
-and the desktop Project workspace. Pass an absolute local repository path and the explicit
+and Agent mode. Pass an absolute local repository path and the explicit
 `--allow-read-only` consent flag. Cortex copies eligible small UTF-8 source
 files into a bounded, short-lived **in-memory snapshot**, then searches and
 reads from the snapshot instead of returning to the working tree.
@@ -489,8 +461,8 @@ races, and code files themselves may contain sensitive text. Grant access
 only to a repository you trust to share with the chosen local model. Model
 answers and file citations remain unverified until checked against source.
 Applying changes, executing tests, persistent recovery and automatic repair
-are **not** part of the CLI command; the desktop workspace handles approved
-patches and recovery separately.
+are **not** part of the CLI command; Agent mode handles reviewed project
+changes and saved recovery separately.
 
 ## Architecture
 
@@ -587,7 +559,7 @@ in the composer or the **Chat model** setting. Cortex saves the provider and
 exact model ID across restarts. The selected provider receives the chat
 request, which can include earlier turns, attachments, instructions and enabled
 memories. It also handles chat titles. Provider access, quotas, billing and
-retention follow your provider account. Project workspace research and optional
+retention follow your provider account. CLI repository research and optional
 response translation use their existing local models.
 
 | Integration | Available configurations |

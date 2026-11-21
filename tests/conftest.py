@@ -30,6 +30,12 @@ from support import CoordinatorPool, FrozenClock, live_cortex_threads, parse_sse
 # The superset of the host tuples the suite used to spell out file by file.
 ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
 
+# The agent benchmark intentionally contains a failing test_calculator.py.
+# It is run only from its isolated work copy, never during repository tests.
+# Exclude it from normal pytest collection; CI's explicit shard inventory
+# must independently enforce the same boundary.
+collect_ignore = ["fixtures/agent_tasks"]
+
 # Hypothesis profiles for the property tests under tests/property/.
 #
 # ``ci`` is the default, so a plain run, the pre-push hook and CI all execute the

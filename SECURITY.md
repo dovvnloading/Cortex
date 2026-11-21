@@ -105,17 +105,29 @@ Cortex's private per-user data directory, separate from
 `agent/runs.sqlite` and `agent_workcopies/`. It holds **unencrypted
 original source bytes** in SQLite blobs (up to 32 files per checkpoint and
 64 MiB across checkpoints). Acceptance fails closed when the journal is
-full or unavailable. The owner-scoped checkpoint can still support
-confirmed undo after the work copy is discarded or Cortex restarts,
-provided it is intact and current-file checks pass. Protect and back up
+full or unavailable. The run's session-scoped checkpoint can still support confirmed undo
+after its work copy is discarded, while the same bearer session is
+accessible and the checkpoint and current files pass verification.
+The saved bytes persist after an app restart, but a new bearer session
+cannot access a previous session's run or undo. Protect and back up
 this data directory; the journal is not a general backup.
 
-The Agent page also exposes **Agent run history**. Selecting a past run
-replays retained events; after a restart, only persisted step/status
-summaries remain, not live worker context or full command output.
-History's confirmable **Resume** action works only when the backend still
-has the runnable in-memory context. Its **Delete** action discards the
-work copy, not previously accepted project changes or their checkpoint.
+The Agent page also exposes **Agent run history** for the current
+bearer session. Selecting an accessible past run replays retained
+events; without its live worker context, only persisted step/status
+summaries remain, not full command output. A new bearer session cannot
+reopen earlier sessions' runs. History's confirmable **Resume** action
+works only when the backend still has the runnable in-memory context.
+Its **Delete** action discards the work copy, not previously accepted
+project changes or their checkpoint.
+
+The separate Project workspace desktop page has been retired: old
+`/workspace` bookmarks redirect to Agent mode at `/agent`. The
+**Saved recovery checkpoints** panel in Agent mode remains available
+even when Agent execution is disabled. It lists installation-owned
+legacy Project workspace checkpoints, with separately confirmed restore
+and discard; it does not show Agent-run checkpoints. Those use their
+run's own confirmed, session-scoped **Undo** action.
 
 The Windows AppContainer launcher uses a fresh low-privilege profile. It
 grants write permission only to the work copy. Permitted toolchain folders
