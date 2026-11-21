@@ -407,7 +407,7 @@ def _junction_primitive(link: Path, target: Path) -> None:
         "<IHHHHHH", 0xA0000003, 8 + len(names), 0,
         0, len(substitute), len(substitute) + 2, len(display),
     ) + names
-    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = (
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
         wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
