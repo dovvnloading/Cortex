@@ -438,7 +438,7 @@ def test_windows_timed_out_run_command_has_no_success_exit_code(tmp_path: Path, 
 
     registry = ToolRegistry()
     shell = ShellTools(
-        tmp_path, f"timeout-exit-{uuid4().hex}", mode="ask",
+        tmp_path, f"timeout-{uuid4().hex[:16]}", mode="ask",
         launcher_factory=launcher_factory,
     )
     for spec in SHELL_TOOLS:
