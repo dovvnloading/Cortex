@@ -9,7 +9,7 @@ from __future__ import annotations
 import http.client
 from email.message import Message
 from html.parser import HTMLParser
-import socket
+
 import time
 from typing import Final
 from urllib.parse import urljoin, urlsplit
