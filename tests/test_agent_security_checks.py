@@ -290,6 +290,121 @@ def test_imported_msbuild_hooks_cannot_bypass_check_approval(
         shell.close()
 
 
+
+@pytest.mark.parametrize(
+    "project_xml",
+    [
+        '<Project><Import Project="missing/opaque.targets" /></Project>',
+        '<Project><Import Project="../../outside/Custom.targets" /></Project>',
+        '<Project><Import Project="$(ExternalBuildPath)/Custom.props" /></Project>',
+        '<Project xmlns="urn:msbuild"><Import Project="missing.targets" /></Project>',
+        '<Project><UsingTask TaskName="Custom" AssemblyFile="unreadable.dll" /></Project>',
+        '<Project><Target Name="Build"><CustomTask /></Target></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup /></Project>',
+        '<Project><Import Project="bad" ></Project>',  # Unclosed XML: fail closed.
+        '<Project><Import Project="missing.targets"',  # Truncated XML: fail closed.
+    ],
+)
+def test_msbuild_opaque_imports_custom_tasks_and_malformed_xml_always_ask(
+    isolated: tuple[Path, Path], project_xml: str,
+) -> None:
+    root, outside = isolated
+    (root / "Demo.csproj").write_text(project_xml, encoding="utf-8")
+    (outside / "Custom.targets").write_text(
+        '<Project><Exec Command="read secret" /></Project>', encoding="utf-8",
+    )
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("dotnet test 'Demo.csproj'", "ask"),
+    ]
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        pending = _execute(registry)
+        assert isinstance(pending, NeedsApproval)
+        assert pending.request["tool"] == "run_checks"
+        assert pending.request["network"] is False
+        assert pending.request["command"] == "dotnet test 'Demo.csproj'"
+        assert launcher.starts == []
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+@pytest.mark.parametrize("filename", ["Directory.Build.props", "Directory.Build.targets"])
+@pytest.mark.parametrize("directory", [".", "subproject"])
+def test_implicit_msbuild_imports_require_approval_even_when_not_snapshotted(
+    isolated: tuple[Path, Path], filename: str, directory: str,
+) -> None:
+    root, outside = isolated
+    project_dir = root if directory == "." else root / directory
+    project_dir.mkdir(exist_ok=True)
+    (project_dir / "Demo.csproj").write_text("<Project />", encoding="utf-8")
+    # Directory.Build.* is excluded from source snapshots. A deliberately
+    # malformed or unreadable implicit import still cannot auto-run a check.
+    (root / filename).write_bytes(b"\xffmalformed MSBuild file")
+    found = detect_checks(root)
+    assert len(found) == 1
+    assert found[0].risk == "ask"
+    expected = "dotnet test 'Demo.csproj'" if directory == "." else f"dotnet test '{directory}/Demo.csproj'"
+    assert found[0].command == expected
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        pending = _execute(registry)
+        assert isinstance(pending, NeedsApproval)
+        assert pending.request["tool"] == "run_checks"
+        assert launcher.starts == []
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+def test_external_msbuild_import_is_never_resolved_or_read(
+    isolated: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    root, outside = isolated
+    external = outside / "Custom.targets"
+    external.write_text('<Project><Exec Command="outside" /></Project>', encoding="utf-8")
+    (root / "Demo.csproj").write_text(
+        '<Project><Import Project="../outside/Custom.targets" /></Project>',
+        encoding="utf-8",
+    )
+    # The work-copy scanner may read the project but MUST NOT follow its
+    # import path, even when it refers to an existing outside file.
+    original_open = os.open
+    opened: list[Path] = []
+
+    def guarded_open(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> int:
+        resolved = Path(path).resolve(strict=False)
+        opened.append(resolved)
+        assert resolved.is_relative_to(root), "MSBuild import escaped the work copy"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    found = detect_checks(root)
+    assert len(found) == 1 and found[0].risk == "ask"
+    assert opened and all(path.is_relative_to(root) for path in opened)
+    _assert_unmodified(root, outside)
+
+
+def test_solution_with_unavailable_projects_is_opaque(
+    isolated: tuple[Path, Path],
+) -> None:
+    root, outside = isolated
+    (root / "Example.sln").write_text(
+        'Project("{EXAMPLE}") = "Outside", "../outside/Custom.csproj", "{OTHER}"\nEndProject\n',
+        encoding="utf-8",
+    )
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("dotnet test 'Example.sln'", "ask"),
+    ]
+    _assert_unmodified(root, outside)
+
+
 @pytest.mark.parametrize(
     "kind", ["npm-network", "npm-safe", "pytest-ini", "pytest-toml", "cargo", "dotnet", "go-safe"],
 )
