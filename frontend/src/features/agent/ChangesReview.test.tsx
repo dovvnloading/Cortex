@@ -197,6 +197,13 @@ describe("ChangesReview", () => {
     expect(screen.queryByRole("button", { name: "Discard all" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    const undoConfirmation = screen.getByRole("group", { name: "Undo confirmation" });
+    expect(within(undoConfirmation).getByText(/Restore the original project files/)).toBeVisible();
+    await user.click(within(undoConfirmation).getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
     expect(onUndo).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
     expect(screen.getByRole("checkbox", { name: "Select src/added.ts" })).toHaveFocus();
@@ -210,6 +217,9 @@ describe("ChangesReview", () => {
     await waitFor(() => expect(undo).toHaveFocus());
     expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).disabled)).toBe(true);
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Confirm undo" })).toHaveFocus();
+    expect(onUndo).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     expect(onUndo).toHaveBeenCalledOnce();
   });
