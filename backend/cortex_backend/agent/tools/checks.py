@@ -19,6 +19,7 @@ from ..protocol import ToolCall, ToolSpec
 from ..sandbox.base import canonical_workcopy
 from ..tool_registry import NeedsApproval, ToolContext, ToolRegistry, ToolResult
 from ..workcopy import _snapshot
+from cortex_backend.services.workspace_context import _safe_root
 from .shell import ShellTools
 
 _CHECK_TIMEOUT_S: Final = 60.0
@@ -38,7 +39,11 @@ def _quoted(value: str) -> str:
 
 def _files(root: str | os.PathLike[str]) -> dict[str, bytes]:
     """Only content in the verified, bounded disposable work copy is visible."""
-    source = _snapshot(canonical_workcopy(Path(root)))
+    # Refuse a swapped symlink/junction root before canonicalizing it. A
+    # resolved outside directory must never become the detection input.
+    requested = Path(root)
+    verified = _safe_root(str(requested))
+    source = _snapshot(canonical_workcopy(verified))
     return {name: item.contents for name, item in source.items()}
 
 
