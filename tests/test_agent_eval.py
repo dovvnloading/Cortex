@@ -14,6 +14,7 @@ from cortex_backend.agent.loop import AgentLoop
 from cortex_backend.agent.tools.checks import detect_checks
 from tools import agent_eval
 from tools import agent_eval_replay
+from tools import ci_backend_shards
 
 
 def test_check_passes_all_tasks_without_a_model(capsys: pytest.CaptureFixture[str]) -> None:
@@ -150,6 +151,9 @@ def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> 
     assert manifest["tool"]["pytest"]["ini_options"] == {"addopts": "-q -p no:cacheprovider"}
     outer = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
     assert "agent_tasks" in outer["tool"]["pytest"]["ini_options"]["norecursedirs"]
+    assert "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py" not in (
+        ci_backend_shards.discover_test_files(Path(__file__).resolve().parents[1])
+    )
     assert [test.name for test in repo.glob("test_*.py")] == ["test_calculator.py"]
     assert "assert add(2, 3) == 5" in (repo / "test_calculator.py").read_text(encoding="utf-8")
     assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
@@ -166,8 +170,19 @@ def test_fix_failing_test_fixture_has_only_inert_pytest_addopts() -> None:
 def test_generated_fixture_cache_is_never_copied_into_expected_end_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", tmp_path / "fix-failing-test")
+    # Simulate a prior pytest collection leaving caches in the fixture's
+    # source without modifying any checked-in fixture files.
+    source = tmp_path / "source-fixture"
+    ignore_generated = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc")
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", source, ignore=ignore_generated)
+    existing_cache = source / "repo" / "__pycache__"
+    existing_cache.mkdir()
+    (existing_cache / "preexisting.pyc").write_bytes(b"generated cache from prior collection")
+    # Only authored inputs should reach the test's copy. The new cache planted
+    # below must still be excluded from the evaluator's exact end-state check.
+    shutil.copytree(source, tmp_path / "fix-failing-test", ignore=ignore_generated)
     cache = tmp_path / "fix-failing-test" / "repo" / "__pycache__" / "calculator.cpython-311.pyc"
+    assert not cache.parent.exists()
     cache.parent.mkdir()
     cache.write_bytes(b"generated cache, not fixture source")
     monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)

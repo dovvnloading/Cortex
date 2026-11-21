@@ -34,6 +34,24 @@ def test_discovery_includes_nested_property_modules_but_not_helpers(tmp_path: Pa
     assert shards.discover_test_files(tmp_path) == ("tests/property/test_property.py", "tests/test_basic.py")
 
 
+def test_discovery_excludes_failing_eval_fixtures_but_keeps_other_nested_tests(tmp_path: Path) -> None:
+    modules = (
+        "tests/test_basic.py",
+        "tests/property/test_property.py",
+        "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py",
+        "tests/fixtures/other/test_real_module.py",
+    )
+    for name in modules:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_placeholder(): pass\n", encoding="utf-8")
+    assert shards.discover_test_files(tmp_path) == (
+        "tests/fixtures/other/test_real_module.py",
+        "tests/property/test_property.py",
+        "tests/test_basic.py",
+    )
+
+
 def _write_shard_artifact(tmp_path: Path, index: int, paths: tuple[str, ...], *, name: str) -> None:
     folder = tmp_path / "artifacts" / f"backend-shard-{index}"
     folder.mkdir(parents=True, exist_ok=True)
@@ -76,6 +94,11 @@ def test_run_shard_passes_only_assigned_modules_to_coverage(tmp_path: Path, monk
     (tmp_path / "tests").mkdir()
     for name in ("test_a.py", "test_b.py", "test_c.py", "test_d.py"):
         (tmp_path / "tests" / name).touch()
+    # File-level CI arguments must not reinclude a fixture that normal
+    # pytest recursion would ignore.
+    fixture_test = tmp_path / "tests" / "fixtures" / "agent_tasks" / "fix-failing-test" / "repo" / "test_calculator.py"
+    fixture_test.parent.mkdir(parents=True)
+    fixture_test.write_text("def test_intentionally_failing(): assert False\n", encoding="utf-8")
     captured: dict[str, object] = {}
 
     def fake_run(command: list[str], *, cwd: Path, check: bool) -> subprocess.CompletedProcess[str]:
