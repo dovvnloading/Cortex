@@ -68,6 +68,8 @@ def _uses_the_server(
 class LlamaCppChatClient:
     """``ChatClient`` implementation backed by a locally-managed llama-server."""
 
+    tool_protocol_runtime = "llamacpp"
+
     def __init__(
         self,
         provider: LlamaServerProvider,
@@ -164,6 +166,8 @@ class LlamaCppChatClient:
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
         think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> dict:
         self._ensure_open()
         model_path = resolve_gguf_path(self._models_directory(), model)
@@ -202,9 +206,16 @@ class LlamaCppChatClient:
                 cancellation_event=cancellation_event,
             )
         started = time.monotonic()
+        # Absent keywords never reach old test providers or alter ordinary chats.
+        tool_options: dict[str, Any] = {}
+        if tools is not None:
+            tool_options["tools"] = tools
+        if format is not None:
+            tool_options["format"] = format
         if cancellation_event is None and on_delta is None:
             return self._chat_blocking(
-                handle.base_url, messages, options, started, handle.api_key, think=think
+                handle.base_url, messages, options, started, handle.api_key, think=think,
+                **tool_options,
             )
         # Streaming serves both features: the abortable path is what reads the
         # response incrementally, which is also what makes live deltas
@@ -219,6 +230,7 @@ class LlamaCppChatClient:
             handle.api_key,
             on_delta=on_delta,
             think=think,
+            **tool_options,
         )
 
     @_uses_the_server
@@ -299,12 +311,14 @@ class LlamaCppChatClient:
         started: float,
         api_key: str | None,
         think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> dict:
         """Single request/response call, unchanged from before cancellation
         support existed. Used whenever the caller has no cancellation_event
         to honor (title and translation calls, and anything else that isn't
         the main chat turn)."""
-        body = _build_request_body(messages, options, stream=False, think=think)
+        body = _build_request_body(messages, options, stream=False, think=think, tools=tools, format=format)
         self._begin_http_request()
         try:
             response = self._http.post(
@@ -342,6 +356,8 @@ class LlamaCppChatClient:
         api_key: str | None,
         on_delta: Callable[[str, str], None] | None = None,
         think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> dict:
         """Streamed request that stops promptly when the caller asks to stop.
 
@@ -351,9 +367,10 @@ class LlamaCppChatClient:
         next chunk to arrive would make Stop as slow as the model. The watcher
         is shared with the Ollama client (``close_when_cancelled``).
         """
-        body = _build_request_body(messages, options, stream=True, think=think)
+        body = _build_request_body(messages, options, stream=True, think=think, tools=tools, format=format)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        streamed_calls: dict[int, dict[str, Any]] = {}
         usage: dict | None = None
         timings: dict | None = None
         finish_reason: str | None = None
@@ -420,6 +437,34 @@ class LlamaCppChatClient:
                                     reasoning_parts.append(reasoning_piece)
                                     if on_delta is not None:
                                         on_delta("thinking", reasoning_piece)
+                                # OpenAI/llama-server tool calls arrive in fragments
+                                # keyed by index; keep them inert until the
+                                # protocol layer validates the assembled reply.
+                                for position, fragment in enumerate(delta.get("tool_calls") or []):
+                                    if not isinstance(fragment, dict):
+                                        raise LlamaCppError("Malformed streamed tool call.")
+                                    index = fragment.get("index", position)
+                                    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                                        raise LlamaCppError("Malformed streamed tool call index.")
+                                    entry = streamed_calls.setdefault(index, {
+                                        "type": "function", "function": {"name": "", "arguments": ""},
+                                    })
+                                    if "id" in fragment:
+                                        entry["id"] = fragment["id"]
+                                    function = fragment.get("function") or {}
+                                    if not isinstance(function, dict):
+                                        raise LlamaCppError("Malformed streamed tool call function.")
+                                    for key in ("name", "arguments"):
+                                        piece = function.get(key)
+                                        if isinstance(piece, str):
+                                            previous = entry["function"][key]
+                                            if not isinstance(previous, str):
+                                                raise LlamaCppError("Malformed streamed tool call arguments.")
+                                            entry["function"][key] = previous + piece
+                                        elif key == "arguments" and isinstance(piece, dict):
+                                            entry["function"][key] = piece
+                                        elif piece is not None:
+                                            raise LlamaCppError("Malformed streamed tool call fragment.")
                             if chunk.get("usage"):
                                 usage = chunk["usage"]
                             if chunk.get("timings"):
@@ -456,6 +501,8 @@ class LlamaCppChatClient:
                 "message": {
                     "content": "".join(content_parts),
                     "reasoning_content": "".join(reasoning_parts) or None,
+                    **({"tool_calls": [streamed_calls[index] for index in sorted(streamed_calls)]}
+                       if streamed_calls else {}),
                 },
                 "finish_reason": finish_reason,
             }],
@@ -528,11 +575,15 @@ def _build_request_body(
     *,
     stream: bool,
     think: bool | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    format: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": _strip_unsupported_fields(messages),
         "stream": stream,
     }
+    if tools is not None:
+        body["tools"] = tools
     if think is not None:
         # llama-server's per-request switch for a chat template with a
         # reasoning mode (Qwen3 and its relatives read ``enable_thinking``). A
@@ -568,7 +619,22 @@ def _build_request_body(
     # forwarding (see services/chat_client.py).
     grammar = options.get("grammar")
     response_format = options.get("response_format")
-    if isinstance(grammar, str) and grammar:
+    if format is not None:
+        # Ollama accepts `format`; the OpenAI-compatible llama-server expects
+        # `response_format`. An explicit protocol format overrides older
+        # grammar controls, but an ordinary chat never supplies it.
+        if format == "json":
+            body["response_format"] = {"type": "json_object"}
+        elif isinstance(format, dict):
+            body["response_format"] = (
+                format if format.get("type") in ("json_schema", "json_object")
+                else {"type": "json_schema", "json_schema": {
+                    "name": "agent_turn", "schema": format, "strict": True,
+                }}
+            )
+        else:
+            raise ValueError("Unsupported llama.cpp response format.")
+    elif isinstance(grammar, str) and grammar:
         body["grammar"] = grammar
     elif isinstance(response_format, dict):
         body["response_format"] = response_format
@@ -626,6 +692,7 @@ def _adapt_to_ollama_shape(payload: dict, *, elapsed_seconds: float) -> dict:
         "message": {
             "content": message.get("content") or "",
             "thinking": message.get("reasoning_content"),
+            **({"tool_calls": message["tool_calls"]} if message.get("tool_calls") else {}),
         },
         "prompt_eval_count": prompt_n,
         "eval_count": predicted_n,

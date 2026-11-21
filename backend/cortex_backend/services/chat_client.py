@@ -228,6 +228,8 @@ class OllamaChatClient:
     chunks.
     """
 
+    tool_protocol_runtime = "ollama"
+
     def __init__(
         self,
         client: Any,
@@ -281,6 +283,8 @@ class OllamaChatClient:
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
         think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> dict:
         # Rebound once up front so both the streaming and non-streaming
         # branches below are guaranteed to send the filtered mapping.
@@ -291,6 +295,10 @@ class OllamaChatClient:
         # which asks nothing of a model that has no reasoning mode.
         extra: dict[str, Any] = {} if think is None else {"think": think}
         extra.update(keep_alive)
+        if tools is not None:
+            extra["tools"] = tools
+        if format is not None:
+            extra["format"] = format
         if cancellation_event is not None and cancellation_event.is_set():
             # Already cancelled, so do not open a request at all. Otherwise
             # this waits for the model's first token before noticing -- the
@@ -357,6 +365,7 @@ class OllamaChatClient:
         chunks = client.chat(model=model, messages=messages, options=options, stream=True, **extra)
         content_parts: list[str] = []
         thinking_parts: list[str] = []
+        tool_calls: list[Any] = []
         final: dict = {}
         watch: AbstractContextManager[None] = (
             close_when_cancelled(cancellation_event, abort, name="ollama-chat-cancel-watch")
@@ -368,19 +377,22 @@ class OllamaChatClient:
                 for chunk in chunks:
                     if cancellation_event is not None and cancellation_event.is_set():
                         break
-                    message = chunk.get("message") or {}
-                    content_piece = message.get("content")
+                    message = _field(chunk, "message") or {}
+                    content_piece = _field(message, "content")
                     if content_piece:
                         content_parts.append(content_piece)
                         if on_delta is not None:
                             on_delta("content", content_piece)
-                    thinking_piece = message.get("thinking")
+                    thinking_piece = _field(message, "thinking")
                     if thinking_piece:
                         thinking_parts.append(thinking_piece)
                         if on_delta is not None:
                             on_delta("thinking", thinking_piece)
-                    if chunk.get("done"):
-                        final = dict(chunk)
+                    chunk_calls = _field(message, "tool_calls")
+                    if chunk_calls:
+                        tool_calls.extend(chunk_calls)
+                    if _field(chunk, "done"):
+                        final = dict(chunk) if isinstance(chunk, Mapping) else chunk.model_dump()
             except Exception:
                 # Closing the client under a blocked read is how Stop reaches
                 # it, and the transport reports that however it chooses (a read
@@ -403,6 +415,8 @@ class OllamaChatClient:
             "content": "".join(content_parts),
             "thinking": "".join(thinking_parts) or None,
         }
+        if tool_calls:
+            final["message"]["tool_calls"] = tool_calls
         return final
 
 
@@ -415,6 +429,8 @@ class RoutingChatClient:
     turn (``_generation_snapshot()`` in ``api/routes.py`` resolves
     ``translation_model`` separately from the chat model).
     """
+
+    tool_protocol_runtime = "routing"
 
     def __init__(
         self, ollama_client: ChatClient, llamacpp_client: ChatClient, cloud_client: ChatClient | None = None,
@@ -432,6 +448,8 @@ class RoutingChatClient:
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
         think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> dict:
         target = self._llamacpp if model.startswith(GGUF_PREFIX) else self._ollama
         if is_cloud_model(model):
@@ -448,6 +466,10 @@ class RoutingChatClient:
             extra["on_delta"] = on_delta
         if think is not None:
             extra["think"] = think
+        if tools is not None:
+            extra["tools"] = tools
+        if format is not None:
+            extra["format"] = format
         return target.chat(model=model, messages=messages, options=options, **extra)
 
     def tokenize(
