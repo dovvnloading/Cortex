@@ -35,15 +35,14 @@ const commandStyle = {
  */
 export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: ApprovalCardProps) {
   const commandId = useId();
-  const [visibleCommandFor, setVisibleCommandFor] = useState<string | null>(null);
-  const [reviewingDangerousFor, setReviewingDangerousFor] = useState<string | null>(null);
-  const [acknowledgedDangerousFor, setAcknowledgedDangerousFor] = useState<string | null>(null);
-  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const [visibleCommandFor, setVisibleCommandFor] = useState<ApprovalRequest | null>(null);
+  const [reviewingDangerousFor, setReviewingDangerousFor] = useState<ApprovalRequest | null>(null);
+  const [acknowledgedDangerousFor, setAcknowledgedDangerousFor] = useState<ApprovalRequest | null>(null);
+  const [dismissedFor, setDismissedFor] = useState<ApprovalRequest | null>(null);
 
-  // A changed request must not inherit a prior command reveal or confirmation.
-  const requestKey = JSON.stringify([
-    request.command, request.cls, request.plain_text, request.sandbox_level, request.network,
-  ]);
+  // Bind review, acknowledgment, and dismissal to this request object.
+  // A later request with identical text must still obtain fresh consent.
+  const requestKey = request;
   const dangerous = request.cls === "dangerous";
   const commandVisible = visibleCommandFor === requestKey;
   const reviewingDangerous = reviewingDangerousFor === requestKey;
