@@ -101,6 +101,7 @@ def test_each_resource_module_registers_at_least_one_route() -> None:
         "/execution/tasks",
         "/generations",
         "/jobs/{job_id}",
+        "/agent/runs",
     ],
 )
 def test_a_representative_route_from_every_resource_is_present(path: str) -> None:

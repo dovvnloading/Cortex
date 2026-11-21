@@ -151,6 +151,12 @@ class ExecutionSettings(_SettingsModel):
     code_execution_enabled: bool = True
 
 
+class AgentSettings(_SettingsModel):
+    """Coding-agent access is opt-in and persisted with other settings."""
+
+    enabled: bool = False
+
+
 class MemorySettings(_SettingsModel):
     enabled: bool = True
 
@@ -171,5 +177,6 @@ class CortexSettings(_SettingsModel):
     llamacpp: LlamaCppSettings = Field(default_factory=LlamaCppSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     translation: TranslationSettings = Field(default_factory=TranslationSettings)

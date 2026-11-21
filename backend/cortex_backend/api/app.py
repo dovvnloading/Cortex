@@ -28,6 +28,8 @@ from cortex_backend.services.generation import GenerationService
 from cortex_backend.services.attachments import ChatAttachmentService
 from cortex_backend.services.models import ModelCatalog
 from cortex_backend.services.workspace_workflow import WorkspaceCodingSessions
+from cortex_backend.services.agent_runs import AgentRuns, LoopFactory
+from cortex_backend.agent.run_store import AgentRunStore
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 from cortex_backend.execution.cleanup import ExecutionCleanupSupervisor
 from cortex_backend.execution.lifecycle import ExecutionLifecycle, LifecycleCoordinator
@@ -227,6 +229,10 @@ def create_app(
     llamacpp_chat_client: object | None = None,
     workspace_chat_client: object | None = None,
     workspace_checkpoint_store: WorkspaceCheckpointStore | None = None,
+    agent_data_dir: Path | None = None,
+    agent_run_store: AgentRunStore | None = None,
+    agent_chat_client: object | None = None,
+    agent_loop_factory: LoopFactory | None = None,
     default_gguf_models_dir: Path | None = None,
     closeables: Iterable[object] = (),
 ) -> FastAPI:
@@ -321,6 +327,7 @@ def create_app(
                     "Cortex job registry shutdown raised; continuing with runtime teardown."
                 )
             app.state.workspace_workflow.close()
+            app.state.agent_workflow.close()
             if app.state.cleanup_supervisor is not None:
                 try:
                     app.state.cleanup_supervisor.stop()
@@ -391,6 +398,11 @@ def create_app(
         checkpoint_store=workspace_checkpoint_store
     )
     app.state.workspace_chat_client = workspace_chat_client
+    app.state.agent_workflow = AgentRuns(
+        data_dir=agent_data_dir, run_store=agent_run_store,
+        chat_client=agent_chat_client if agent_chat_client is not None else workspace_chat_client,
+        loop_factory=agent_loop_factory, checkpoint_store=workspace_checkpoint_store,
+    )
     app.state.execution_lifecycle = execution_lifecycle
     # The ordinary/demo API accepts protocol-compatible fakes in tests.  The
     # janitor is deliberately narrower: it relies on the durable tombstone
