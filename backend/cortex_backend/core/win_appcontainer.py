@@ -301,6 +301,43 @@ def _require_appcontainer_token(process: wintypes.HANDLE, advapi: Any, kernel: A
     finally:
         close(token)
 
+def _require_no_loopback_exemption(appcontainer_sid: str) -> None:
+    """Fail closed if a Windows debugging exemption would permit host loopback.
+
+    network=False grants no network capabilities. An explicit system-wide
+    loopback exemption can override the default AppContainer loopback block;
+    inspect it without modifying the machine's firewall configuration.
+    """
+    kernel = _dll("kernel32")
+    heap = _fn(kernel, "GetProcessHeap", [], wintypes.HANDLE)()
+    if not heap:
+        raise _failed("GetProcessHeap")
+    free_heap = _fn(kernel, "HeapFree", [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID,
+    ], wintypes.BOOL)
+    get_config = _fn(_dll("FirewallAPI"), "NetworkIsolationGetAppContainerConfig", [
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.POINTER(SidAndAttributes)),
+    ], wintypes.DWORD)
+    count = wintypes.DWORD()
+    entries = ctypes.POINTER(SidAndAttributes)()
+    status = get_config(ctypes.byref(count), ctypes.byref(entries))
+    try:
+        if status:
+            raise AppContainerError(f"Cannot verify AppContainer loopback isolation (Win32 error {status})")
+        if count.value and not entries:
+            raise AppContainerError("Invalid AppContainer loopback exemption list")
+        for index in range(count.value):
+            sid = entries[index].sid
+            if sid and _sid_string(int(sid)) == appcontainer_sid:
+                raise AppContainerError("AppContainer has a loopback exemption; network=False is not isolated")
+    finally:
+        if entries:
+            for index in range(count.value):
+                if entries[index].sid:
+                    free_heap(heap, 0, entries[index].sid)
+            free_heap(heap, 0, ctypes.cast(entries, wintypes.LPVOID))
+
+
 def spawn_suspended(
     argv: list[str], cwd: Path, environment: dict[str, str], appcontainer_sid: str, *, network: bool,
 ) -> NativeProcess:
@@ -405,6 +442,8 @@ def spawn_suspended(
                               ctypes.byref(startup.startup), ctypes.byref(info)):
             raise _failed("CreateProcessW(AppContainer)")
         _require_appcontainer_token(info.process, advapi, kernel)
+        if not network:
+            _require_no_loopback_exemption(appcontainer_sid)  # refuse exempted loopback before resuming
         fd = msvcrt.open_osfhandle(read_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         pipe_read = wintypes.HANDLE()  # CRT owns this handle now
         child = NativeProcess(info, fd, kernel)

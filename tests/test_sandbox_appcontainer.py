@@ -178,6 +178,50 @@ def test_suspended_child_token_is_checked_before_resume(
     assert closed == [123]
 
 
+def test_network_off_loopback_exemption_guard_fails_closed(monkeypatch: pytest.MonkeyPatch):
+    """A debugging exemption must never be mistaken for network isolation."""
+    import ctypes
+
+    sid = "S-1-15-2-1-2-3-4-5-6-7"
+    entries = (win_appcontainer.SidAndAttributes * 1)(
+        win_appcontainer.SidAndAttributes(ctypes.c_void_p(1234), 0),
+    )
+    free_calls: list[object] = []
+
+    def get_config(count, returned):
+        count._obj.value = 1
+        ctypes.cast(
+            returned, ctypes.POINTER(ctypes.POINTER(win_appcontainer.SidAndAttributes)),
+        )[0] = ctypes.cast(entries, ctypes.POINTER(win_appcontainer.SidAndAttributes))
+        return 0
+
+    def heap_free(_heap, _flags, address):
+        free_calls.append(address)
+        return 1
+
+    functions = {
+        "GetProcessHeap": lambda: 1,
+        "HeapFree": heap_free,
+        "NetworkIsolationGetAppContainerConfig": get_config,
+    }
+    monkeypatch.setattr(win_appcontainer, "_dll", lambda _name: object())
+    monkeypatch.setattr(win_appcontainer, "_fn", lambda _dll, name, *_a: functions[name])
+    monkeypatch.setattr(win_appcontainer, "_sid_string", lambda _sid: sid)
+    with pytest.raises(win_appcontainer.AppContainerError, match="loopback exemption"):
+        win_appcontainer._require_no_loopback_exemption(sid)
+    assert len(free_calls) == 2
+
+    # Without an exemption for this SID, the guard permits a network-off launch.
+    monkeypatch.setattr(win_appcontainer, "_sid_string", lambda _sid: "S-1-15-2-unrelated")
+    win_appcontainer._require_no_loopback_exemption(sid)
+    assert len(free_calls) == 4
+
+    # If the OS cannot confirm policy, do not launch at all.
+    functions["NetworkIsolationGetAppContainerConfig"] = lambda *_args: 5
+    with pytest.raises(win_appcontainer.AppContainerError, match="Cannot verify"):
+        win_appcontainer._require_no_loopback_exemption(sid)
+
+
 @windows_only
 def test_windows_python_and_cmd_and_profile_are_cleaned(
     tmp_path: Path, isolated_windows_toolchain: None,
@@ -236,7 +280,7 @@ def test_windows_network_off_denies_loopback_and_public_ip(
         listener.listen(1)
         port = listener.getsockname()[1]
         script = (
-            "import ctypes,json,socket\n"
+            "import ctypes,json,select,socket,time\n"
             "from ctypes import wintypes\n"
             "kernel=ctypes.WinDLL('kernel32',use_last_error=True)\n"
             "advapi=ctypes.WinDLL('advapi32',use_last_error=True)\n"
@@ -257,8 +301,18 @@ def test_windows_network_off_denies_loopback_and_public_ip(
             "    kernel.CloseHandle(token)\n"
             "def connect(host,port):\n"
             "    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:\n"
-            "        sock.settimeout(2)\n"
-            "        return sock.connect_ex((host,port))\n"
+            "        sock.setblocking(False)\n"
+            "        error=sock.connect_ex((host,port))\n"
+            "        deadline=time.monotonic()+2.0\n"
+            "        while error in (10035,10036,10037):\n"
+            "            remaining=deadline-time.monotonic()\n"
+            "            if remaining <= 0:\n"
+            "                raise TimeoutError(f'connect to {host}:{port} did not complete')\n"
+            "            _,writable,exceptional=select.select([],[sock],[sock],remaining)\n"
+            "            if not writable and not exceptional:\n"
+            "                raise TimeoutError(f'connect to {host}:{port} did not complete')\n"
+            "            error=sock.getsockopt(socket.SOL_SOCKET,socket.SO_ERROR)\n"
+            "        return error\n"
             f"print(json.dumps({{'appcontainer': is_appcontainer.value, 'errors': [connect('127.0.0.1',{port}),connect('1.1.1.1',443)]}}))\n"
         )
         launcher = AppContainerLauncher(tmp_path, uuid4().hex)
