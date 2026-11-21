@@ -9,10 +9,11 @@ type ReviewAction = "accept" | "discard" | "undo";
 export type AgentChangesPanelProps = {
   api: AgentApi;
   runId: string;
+  onRecoveryChanged?: () => void;
 };
 
 /** Server-owned review lifecycle. A callback alone is never a successful edit. */
-export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
+export function AgentChangesPanel({ api, runId, onRecoveryChanged }: AgentChangesPanelProps) {
   const [changes, setChanges] = useState<AgentChange[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +79,8 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
         const result = await api.accept(runId, paths, true);
         // This is set only after the server acknowledges exactly the selected paths.
         setNotice("Accepted to the project: " + result.paths.join(", "));
+        // A successful accept creates/updates a durable checkpoint.
+        onRecoveryChanged?.();
         // Re-read the remaining staged files and the backend checkpoint state.
         setChanges(null);
         setRetry((value) => value + 1);
@@ -98,6 +101,7 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
           setRetry((value) => value + 1);
         }
         setNotice("Restored original project files: " + result.paths.join(", "));
+        onRecoveryChanged?.();
       }
     } catch (cause) {
       const fallback = action === "accept"
