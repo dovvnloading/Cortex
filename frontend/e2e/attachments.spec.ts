@@ -91,24 +91,30 @@ test("a file dropped on the window is kept out of the navigation path, and one d
 test("pasting a screenshot attaches it and pasting text does not", async ({ page }) => {
   const { staged } = await stubWorkspace(page);
   await page.goto("/#bootstrap=launcher-token");
-  const composer = page.getByLabel("Message Cortex");
-  await composer.focus();
+  const composer = page.getByRole("textbox", { name: "Message Cortex" });
+  // A navigation can finish while the authenticated chat route is still loading.
+  // Paste into the actual, visible textarea rather than racing a focus action.
+  await expect(composer).toBeVisible();
 
-  await page.evaluate(() => {
+  const imagePastePrevented = await composer.evaluate((textarea) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" }));
-    const textarea = document.getElementById("chat-composer") as HTMLTextAreaElement;
-    textarea.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+    const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer });
+    textarea.dispatchEvent(event);
+    return event.defaultPrevented;
   });
+  expect(imagePastePrevented).toBe(true);
   await expect(page.getByRole("button", { name: "Remove image.png" })).toBeVisible();
   expect(staged).toEqual(["image.png"]);
 
-  await page.evaluate(() => {
+  const textPastePrevented = await composer.evaluate((textarea) => {
     const transfer = new DataTransfer();
     transfer.setData("text/plain", "only words");
-    const textarea = document.getElementById("chat-composer") as HTMLTextAreaElement;
-    textarea.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+    const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer });
+    textarea.dispatchEvent(event);
+    return event.defaultPrevented;
   });
+  expect(textPastePrevented).toBe(false);
   expect(staged).toEqual(["image.png"]);
 });
 
