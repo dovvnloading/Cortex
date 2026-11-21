@@ -8,7 +8,7 @@ and never intentionally traverses a link or a Windows reparse point.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from functools import lru_cache
+from functools import cache
 from hashlib import sha256
 import fnmatch
 import json
@@ -146,7 +146,7 @@ def _matches_glob(path: str, pattern: str) -> bool:
     parts = path.split("/")
     patterns = pattern.split("/")
 
-    @lru_cache(maxsize=None)
+    @cache
     def match(pattern_index: int, path_index: int) -> bool:
         if pattern_index == len(patterns):
             return path_index == len(parts)
