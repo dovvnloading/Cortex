@@ -134,6 +134,32 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
     work.discard()
 
 
+def test_undo_never_rebases_unrelated_external_files_into_staged_deletions(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    work = _copy(tmp_path, root)
+    (work.path / "src" / "app.py").write_bytes(b"agent change\\n")
+    (work.path / "delete.py").write_bytes(b"unaccepted staged change\\n")
+    work.accept(["src/app.py"], confirmed=True)
+
+    # These edits happened in the real project, outside the agent work copy.
+    external = root / "external.py"
+    external.write_bytes(b"keep this independent file\\n")
+    (root / "empty.py").write_bytes(b"independent source edit\\n")
+
+    assert work.undo(confirmed=True) == ("src/app.py",)
+    changes = work.changeset()
+    assert {path: change.kind for path, change in changes.items()} == {
+        "delete.py": "modify", "src/app.py": "modify",
+    }
+    assert "external.py" not in changes and "empty.py" not in changes
+    with pytest.raises(WorkCopyError) as invalid:
+        work.accept(["external.py"], confirmed=True)
+    assert invalid.value.code == "invalid_selection"
+    assert external.read_bytes() == b"keep this independent file\\n"
+    assert (root / "empty.py").read_bytes() == b"independent source edit\\n"
+    work.discard()
+
+
 def test_external_edit_refuses_whole_accept_before_any_write(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)

@@ -34,9 +34,11 @@ from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
 from cortex_backend.agent.tools.web import WebFetchError, fetch_url
-from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
+from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError, restore
 from cortex_backend.core.paths import AppPathError, AppPaths
-from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
+from cortex_backend.services.workspace_checkpoint import (
+    WorkspaceCheckpointError, WorkspaceCheckpointStore,
+)
 from cortex_backend.services.chat_client import is_cloud_model
 
 
@@ -453,6 +455,28 @@ class AgentRuns:
         self._expire_active()
         return self._owned(run_id, owner)
 
+    def undo_available(self, run_id: str, *, owner: str) -> bool:
+        """Report an owner-bound checkpoint, never local acceptance UI state.
+
+        Existence is an availability hint; confirmed undo still preflights
+        the source hashes and refuses unexpected changes.
+        """
+        with self._lock:
+            run = self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            if run.status not in _TERMINAL or (managed is not None and managed.driving):
+                return False
+            try:
+                database = self._directory() / "workspace_checkpoints.sqlite"
+                if self._checkpoint_store is None and not database.is_file():
+                    return False
+                store = self._checkpoint_store or WorkspaceCheckpointStore(database)
+                checkpoint = store.get(owner=owner, checkpoint_id=f"agent-workcopy-{run_id}")
+                return checkpoint.state in {"active", "pending"} and bool(checkpoint.files)
+            except Exception:
+                # Missing, unreadable or corrupt checkpoints must fail closed.
+                return False
+
     def events(
         self, run_id: str, *, owner: str, after_id: int,
     ) -> tuple[list[AgentEvent], bool]:
@@ -550,6 +574,32 @@ class AgentRuns:
             if self._owned(run_id, owner).status not in _TERMINAL or managed.driving:
                 raise AgentWorkflowError("busy")
             return managed.copy.accept(paths, confirmed=confirmed)
+
+    def undo(self, run_id: str, *, owner: str, confirmed: bool) -> tuple[str, ...]:
+        """Restore only journaled originals after explicit, owner-scoped consent.
+
+        The recovery journal validates all current source hashes before writing.
+        After a discard or process restart the live work copy is gone, but the
+        owner-scoped checkpoint remains recoverable.
+        """
+        if confirmed is not True:
+            raise AgentWorkflowError("consent_required")
+        with self._lock:
+            run = self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            if run.status not in _TERMINAL or (managed is not None and managed.driving):
+                raise AgentWorkflowError("busy")
+            if managed is not None and managed.owner != owner:
+                raise AgentWorkflowError("not_found")
+            try:
+                if managed is not None:
+                    return managed.copy.undo(confirmed=True)
+                return restore(
+                    run.project_root, run_id, confirmed=True,
+                    data_dir=self._directory(), owner=owner,
+                )
+            except WorkspaceCheckpointError as exc:
+                raise AgentWorkflowError(exc.code) from exc
 
     def discard(self, run_id: str, *, owner: str) -> None:
         with self._lock:

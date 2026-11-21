@@ -197,6 +197,13 @@ describe("ChangesReview", () => {
     expect(screen.queryByRole("button", { name: "Discard all" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    const undoConfirmation = screen.getByRole("group", { name: "Undo confirmation" });
+    expect(within(undoConfirmation).getByText(/Restore the original project files/)).toBeVisible();
+    await user.click(within(undoConfirmation).getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
     expect(onUndo).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
     expect(screen.getByRole("checkbox", { name: "Select src/added.ts" })).toHaveFocus();
@@ -210,6 +217,9 @@ describe("ChangesReview", () => {
     await waitFor(() => expect(undo).toHaveFocus());
     expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).disabled)).toBe(true);
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Confirm undo" })).toHaveFocus();
+    expect(onUndo).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     expect(onUndo).toHaveBeenCalledOnce();
   });
@@ -384,4 +394,34 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
     expect(onUndo).not.toHaveBeenCalled();
   });
+  it("offers Undo alongside staged changes when the backend says a checkpoint exists", async () => {
+    const user = userEvent.setup();
+    const { onUndo, onAccept, onDiscard } = renderReview({ allowRecovery: true });
+    expect(screen.getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard all" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
+    expect(onUndo).toHaveBeenCalledOnce();
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(onDiscard).not.toHaveBeenCalled();
+  });
+
+  it("requires confirmation for journal recovery when an old run has no staged diff", async () => {
+    const user = userEvent.setup();
+    const { onUndo, onAccept } = renderReview({ changes: [], allowRecovery: true });
+    expect(screen.getByText("No files to review.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onUndo).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Undo previously accepted changes" }));
+    await user.click(screen.getByRole("button", { name: "Confirm undo" }));
+    expect(onUndo).toHaveBeenCalledOnce();
+    expect(onAccept).not.toHaveBeenCalled();
+  });
+
 });

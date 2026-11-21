@@ -1,0 +1,7 @@
+{
+  "goal": "Update release.txt from status: draft to status: ready, then make exactly one local git_commit in the disposable work copy. Do not change any other tracked file.",
+  "expected_changes": {
+    "release.txt": "Release channel\nstatus: ready\n"
+  },
+  "require_read": true
+}
