@@ -475,10 +475,12 @@ class WorkCopy:
             if destination.exists() or destination.is_symlink():
                 raise WorkCopyError("run_exists")
             git = head is not None
-            if git:
-                _git(root, "worktree", "add", "--detach", "--no-checkout", str(destination), head)
-            else:
+            if head is None:
+                if os.path.lexists(root / ".git"):
+                    raise WorkCopyError("git_unavailable")
                 destination.mkdir(mode=0o700)
+            else:
+                _git(root, "worktree", "add", "--detach", "--no-checkout", str(destination), head)
             try:
                 secure_private_path(destination, directory=True)
                 if git:
