@@ -79,13 +79,43 @@ separate consent to send the goal and eligible project context to its
 provider. Ordinary chat gets no project grant from this setting.
 
 File changes and local Git tools operate in a disposable work copy, not
-the original project. The backend requires a separately confirmed selection
-to accept changed files. It verifies source hashes and saves the original
-bytes in `workspace_checkpoints.sqlite` before writing. Explicit undo or
-restore checks current hashes and refuses unexpected changes. It never
-runs automatically. The Agent page exposes reviewed changes, separately
-confirmed acceptance and discard, and confirmed journal-backed undo.
-Historical runs can be reopened and their events replayed.
+the original project. On completed, failed, stopped or interrupted runs,
+the Agent page retrieves the server-owned changeset and shows per-file
+add/modify/delete diffs. Users select files, then separately confirm
+**Accept selected to project**. The backend checks the original source
+hashes and persists an owner-bound checkpoint *before* writing those
+selected files. Unselected edits are not applied automatically.
+**Discard all** requires confirmation, removes only the disposable copy,
+and prevents accepting remaining staged edits. It does not reverse
+previously accepted project writes.
+
+**Undo** also requires separate confirmation; the authenticated backend
+checks the run's owner, original project identity, checkpoint and current
+source hashes before restoring the first original bytes and existence of
+files accepted from that run. It can remove newly accepted files or recreate
+accepted deletions. It cannot recover unaccepted work-copy edits, unrelated
+or later independently changed files, command side effects, or arbitrary
+file permissions/metadata. Linked paths, intervening source changes and
+missing or damaged checkpoints cause refusal rather than overwriting
+unrelated work. A partial multi-file failure can require manual recovery;
+no rollback is automatic.
+
+The durable recovery journal is `workspace_checkpoints.sqlite` in
+Cortex's private per-user data directory, separate from
+`agent/runs.sqlite` and `agent_workcopies/`. It holds **unencrypted
+original source bytes** in SQLite blobs (up to 32 files per checkpoint and
+64 MiB across checkpoints). Acceptance fails closed when the journal is
+full or unavailable. The owner-scoped checkpoint can still support
+confirmed undo after the work copy is discarded or Cortex restarts,
+provided it is intact and current-file checks pass. Protect and back up
+this data directory; the journal is not a general backup.
+
+The Agent page also exposes **Agent run history**. Selecting a past run
+replays retained events; after a restart, only persisted step/status
+summaries remain, not live worker context or full command output.
+History's confirmable **Resume** action works only when the backend still
+has the runnable in-memory context. Its **Delete** action discards the
+work copy, not previously accepted project changes or their checkpoint.
 
 The Windows AppContainer launcher uses a fresh low-privilege profile. It
 grants write permission only to the work copy. Permitted toolchain folders

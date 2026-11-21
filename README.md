@@ -384,21 +384,56 @@ The final answer reports passed, failed, timed-out or unrun checks.
 It also says when no files changed, no test command was found, approval
 was declined or the run budget was exhausted.
 
-Agent edits stay in a disposable work copy, not the original project. After
-a run, the backend can show a diff, discard the copy, or accept selected
-files with separate confirmation. It checks the original file hashes before
-writing. The Agent page now shows server-backed changes review after completed,
-failed, stopped and interrupted runs. Accepting selected files requires separate
-confirmation; discard and journal-backed undo require confirmation too.
-A completed run does not mean its changes were applied.
+Agent edits stay in a disposable work copy, not the original project.
+When a run completes, fails, is stopped or is interrupted, the Agent page
+shows a server-backed **Review staged changes** panel. Expand the diff for
+each added, modified or deleted file, choose which paths to accept, then
+select **Accept selected to project** and separately **Confirm accept**.
+Only the selected changes are applied to the original project; other staged
+edits remain in the copy. Finishing a run or passing its checks does not
+accept anything automatically. **Discard all** requires confirmation and
+removes the disposable copy without changing the project. You cannot
+accept its remaining edits after discard. Discard does not reverse edits
+that were already accepted.
 
-Before an accepted write, Cortex saves the original bytes in a durable
-checkpoint. Explicit undo or restore checks the project and current file
-hashes before putting those bytes back. It refuses unexpected changes and
-never runs on its own. The Agent page exposes confirmed recovery through
-the owner-scoped journal, even after a disposable copy has been discarded.
-Past runs can be opened to replay their stored event history; resume and
-delete actions retain explicit confirmation and server feedback.
+Before writing selected changes, Cortex verifies the original project's
+source hashes and saves the original bytes, file-existence state and
+expected hashes in an owner-bound recovery checkpoint. An unexpected
+source change or unsafe path refuses acceptance instead of overwriting
+someone else's work.
+
+**Undo** (or **Undo previously accepted changes**) is a separate,
+explicitly confirmed action. It restores the *pre-first-accept* originals
+of files accepted from that run, including removing files that acceptance
+created and recreating files it deleted. It does **not** restore unaccepted
+work-copy edits, unrelated project files, later independent edits, or
+side effects from commands/tests. It is not a general rollback or a
+substitute for Git and backups; filesystem metadata beyond the original
+source bytes is not guaranteed to be restored. The backend checks the
+owner, project identity and current file hashes before restoring; it
+refuses unexpected later modifications, unsafe paths or missing/invalid
+checkpoints instead of overwriting them. An interrupted multi-file
+write or restore can still require manual recovery. Undo never runs
+automatically.
+
+Recovery checkpoints survive a discarded work copy or application
+restart, so confirmed undo remains possible if the checkpoint is intact
+and the original files still pass those checks. They are stored in
+`workspace_checkpoints.sqlite` in Cortex's private per-user data
+directory, separately from the disposable copy and run ledger.
+The journal stores original source bytes as **unencrypted SQLite blobs**,
+with a limit of 32 files per checkpoint and 64 MiB of originals across
+checkpoints; a full or unavailable journal blocks further acceptance.
+Protect and back up the per-user data directory.
+
+**Agent run history** lists previous runs and lets you open one to replay
+its recorded activity. After restarting Cortex, that replay contains
+persisted step and status summaries, not a reconstruction of the full
+live process output or execution context. History's **Resume** and
+**Delete** actions require confirmation and server acknowledgement;
+resuming depends on a still-available in-memory run. Deleting/discarding
+a run's work copy does not undo accepted project changes or erase its
+recovery checkpoint.
 
 Run metadata and step summaries are stored in `agent/runs.sqlite` under
 Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.
