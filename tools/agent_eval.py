@@ -450,7 +450,7 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                     replay_checks.commands == ["python -m pytest"] if replay_checks is not None
                     else bool(pytest_passes)
                 )
-                checks["verify_completed"] = bool(final_hooks) and auto_pytest_passes == [True]
+                checks["verify_completed"] = bool(final_hooks) and bool(auto_pytest_passes) and all(auto_pytest_passes)
             elif name == "commit-the-change":
                 assert baseline is not None
                 one_commit, committed_contents = verify_git_fixture(workcopy, baseline, expected)
