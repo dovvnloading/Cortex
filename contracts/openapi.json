@@ -284,23 +284,23 @@
         "type": "object"
       },
       "AgentUndoneResponse": {
-      "additionalProperties": false,
-      "properties": {
-        "paths": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Paths",
-          "type": "array"
-        }
+        "additionalProperties": false,
+        "properties": {
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "title": "AgentUndoneResponse",
+        "type": "object"
       },
-      "required": [
-        "paths"
-      ],
-      "title": "AgentUndoneResponse",
-      "type": "object"
-    },
-    "AppearanceSettings": {
+      "AppearanceSettings": {
         "additionalProperties": false,
         "properties": {
           "theme": {
@@ -4093,18 +4093,18 @@
         "type": "object"
       },
       "UndoAgentChanges": {
-      "additionalProperties": false,
-      "properties": {
-        "confirmed": {
-          "default": false,
-          "title": "Confirmed",
-          "type": "boolean"
-        }
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          }
+        },
+        "title": "UndoAgentChanges",
+        "type": "object"
       },
-      "title": "UndoAgentChanges",
-      "type": "object"
-    },
-    "UpdateChatGroupRequest": {
+      "UpdateChatGroupRequest": {
         "additionalProperties": false,
         "description": "Both fields optional: renaming and collapsing use the same endpoint.",
         "properties": {
