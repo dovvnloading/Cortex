@@ -517,7 +517,7 @@ def test_windows_jobonly_smoke_is_confined_to_temp_and_leaves_no_appcontainer_pr
     )
     for spec in SHELL_TOOLS:
         registry.register(spec, shell.handle)
-    command = ToolCall("windows", "run_command", _command("dir", network=True)[1])
+    command = ToolCall("windows", "run_command", {**_command("dir", network=True)[1], "timeout_s": 60})
     try:
         assert isinstance(registry.execute(command, ToolContext(Event(), monotonic() + 30)), NeedsApproval)
         result = _payload(registry.execute(
