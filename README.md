@@ -321,12 +321,41 @@ select an approval mode. Each run asks for consent to read and copy eligible
 files from that folder. A cloud model asks separately before sending the
 goal and project context to the named provider.
 
-**Plan only** can read and plan but not edit files. **Ask before every
-command** pauses for actions the backend gates. **Auto-approve safe commands
-in the sandbox** can skip prompts only for recognized inspection or
-build/test actions in a verified AppContainer. Other actions ask; dangerous
-ones are refused. A file replacement needs **Allow once** even in auto mode.
+**Plan only** can read and plan but cannot run shell commands or edit files.
+Shell commands are classified as inspection, build/test, work-copy edits,
+network or package operations, dangerous actions, or unknown commands.
+A command chain uses its most restrictive class. **Ask before every
+command** requires **Allow once** for each non-dangerous command that
+starts a process. **Auto-approve safe commands in the sandbox** skips
+approval only for recognized inspection or build/test commands in a
+verified AppContainer. Edits, network operations and unknown commands
+still need approval. Dangerous commands are refused in all modes.
+File replacements also need **Allow once**, even in auto mode.
 Approvals are one-time and expire. You can deny an action or stop the run.
+
+`run_command` starts PowerShell or cmd in the disposable work copy.
+The AppContainer gets an allowlisted environment, not inherited host
+secrets. Network stays off unless explicitly approved for that command.
+If AppContainer is unavailable, the unsandboxed Job Object fallback
+requires fresh approval and cannot enforce network-off execution.
+A foreground command can run for at most 120 seconds. Its result keeps
+at most the first and last 4 KiB of output. Live shell output is capped
+at 1 MiB per run. More than 64 MiB of process output kills the process
+tree. A timed-out, cancelled or killed command never reports success.
+
+`start_background` runs up to two background processes at once.
+`read_background` returns buffered output and status; `stop_background`
+kills the process tree. Unread background output retains its last 8 KiB.
+All remaining processes are killed when the run ends.
+
+Before the final answer, if work-copy files changed, Agent mode detects
+pytest, npm test/lint/build/typecheck scripts, Cargo, Go and .NET checks.
+It runs them through the same shell policy, approval and sandbox path,
+with network disabled and a 60-second timeout. Failures can prompt
+at most three repair-and-recheck rounds, subject to run budgets.
+The final answer reports passed, failed, timed-out or unrun checks.
+It also says when no files changed, no test command was found, approval
+was declined or the run budget was exhausted.
 
 Agent edits stay in a disposable work copy, not the original project. After
 a run, the backend can show a diff, discard the copy, or accept selected
