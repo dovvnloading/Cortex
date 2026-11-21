@@ -110,6 +110,7 @@ def _originals(project: Path) -> dict[str, bytes]:
 
 
 def _assert_project(project: Path, expected: dict[str, str]) -> None:
+    assert {entry.name for entry in project.iterdir()} == set(expected)
     assert _originals(project) == {name: contents.encode() for name, contents in expected.items()}
 
 
@@ -166,7 +167,11 @@ def test_approval_is_one_shot_even_before_resume(tmp_path: Path, monkeypatch: py
         manager.close()
 
 
-def test_foreign_owner_and_other_run_sequences_never_transfer_approval(tmp_path: Path) -> None:
+def test_foreign_owner_and_other_run_sequences_never_transfer_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched: list[str] = []
+    monkeypatch.setattr(agent_runs, "fetch_url", lambda url, *, approved: fetched.append(url))
     model = _Replies(
         _tool("read_file", {"path": "one.py"}),
         _tool("web_fetch", {"url": "https://example.invalid/first"}),
@@ -198,6 +203,9 @@ def test_foreign_owner_and_other_run_sequences_never_transfer_approval(tmp_path:
         manager.cancel(second.id, owner=_OWNER)
         _await(manager, second.id, "cancelled")
         _assert_project(project, _OLD)
+        _assert_project(Path(first.workcopy), _OLD)
+        _assert_project(Path(second.workcopy), _OLD)
+        assert fetched == []
         assert model.calls == 3
     finally:
         manager.close()
@@ -245,6 +253,7 @@ class _HeldProcess:
     def __init__(self) -> None:
         self.launched = Event()
         self.pump_entered = Event()
+        self.pump_drained = Event()
         self.killed = Event()
         self.kill_calls = 0
 
@@ -252,6 +261,7 @@ class _HeldProcess:
         self.pump_entered.set()
         assert self.killed.wait(10), f"held stdout: killed={self.killed.is_set()}"
         yield b"synthetic output after kill\n"
+        self.pump_drained.set()
 
     def wait(self, timeout: float | None = None) -> int:
         assert self.killed.wait(10 if timeout is None else timeout), f"held process: killed={self.killed.is_set()}"
@@ -316,6 +326,7 @@ def test_cancel_running_sandbox_command_kills_the_tree_and_never_passes(
         manager.cancel(run.id, owner=_OWNER)
         _await(manager, run.id, "cancelled")
         assert process.killed.is_set() and process.kill_calls >= 1
+        assert process.pump_drained.is_set(), "cancelled shell left its output pump running"
         assert launcher.starts == 1
         step = next(step for step in manager._ledger().list_steps(run.id, owner=_OWNER)
                     if step.seq == seq)
@@ -355,6 +366,16 @@ def _joined(worker: Thread, result: _Outcome, *, context: str) -> object | None:
     if result.error is not None:
         raise AssertionError(f"{context}: {type(result.error).__name__}: {result.error}") from result.error
     return result.value
+
+
+def _cancel_while_locked(manager: AgentRuns, run_id: str, started: Event) -> AgentRun:
+    # A failed nonblocking probe proves the real coordinator lock is held.
+    acquired = manager._lock.acquire(blocking=False)
+    if acquired:
+        manager._lock.release()
+    started.set()
+    assert not acquired, "cancellation was not interleaved with the gated review"
+    return manager.cancel(run_id, owner=_OWNER)
 
 
 def _staged(tmp_path: Path) -> tuple[AgentRuns, AgentRun, WorkCopy, Path]:
@@ -404,14 +425,16 @@ def test_cancel_during_accept_keeps_batch_and_recovery_journal_consistent(
             lambda: manager.accept(run.id, owner=_OWNER, paths=list(_NEW), confirmed=True), "race-accept",
         )
         assert entered.wait(10), f"accept gate entered={entered.is_set()}, checkpoint={_journal(copy).list(owner=_OWNER)}"
+        assert _originals(project) == {
+            "one.py": _NEW["one.py"].encode(),
+            "two.py": _OLD["two.py"].encode(),
+        }
         pending = _journal(copy).get(owner=_OWNER, checkpoint_id=copy.checkpoint_id)
         assert pending.state == "pending" and all(entry.pending_sha for entry in pending.files)
 
-        def cancel() -> object:
-            cancel_started.set()
-            return manager.cancel(run.id, owner=_OWNER)
-
-        cancel_thread, cancelled = _thread(cancel, "race-cancel-accept")
+        cancel_thread, cancelled = _thread(
+            lambda: _cancel_while_locked(manager, run.id, cancel_started), "race-cancel-accept",
+        )
         assert cancel_started.wait(10), f"cancel submitted={cancel_started.is_set()}, accept_gate={entered.is_set()}"
         release.set()
         assert _joined(accept_thread, accepted, context="accept") == tuple(sorted(_NEW))
@@ -445,12 +468,11 @@ def test_cancel_during_discard_preserves_accepted_source_and_recovery(
             lambda: manager.discard(run.id, owner=_OWNER), "race-discard",
         )
         assert entered.wait(10), f"discard gate entered={entered.is_set()}, copy_exists={copy.path.exists()}"
+        _assert_project(project, _NEW)
 
-        def cancel() -> object:
-            cancel_started.set()
-            return manager.cancel(run.id, owner=_OWNER)
-
-        cancel_thread, cancelled = _thread(cancel, "race-cancel-discard")
+        cancel_thread, cancelled = _thread(
+            lambda: _cancel_while_locked(manager, run.id, cancel_started), "race-cancel-discard",
+        )
         assert cancel_started.wait(10), f"cancel submitted={cancel_started.is_set()}, copy_exists={copy.path.exists()}"
         release.set()
         _joined(discard_thread, discarded, context="discard")
@@ -491,6 +513,11 @@ def test_cancel_during_undo_restores_all_files_and_deletes_journal(
     try:
         undo_thread, undone = _thread(lambda: copy.undo(confirmed=True), "race-undo")
         assert entered.wait(10), f"undo gate entered={entered.is_set()}, journal={_journal(copy).list(owner=_OWNER)}"
+        assert _originals(project) == {
+            "one.py": _OLD["one.py"].encode(),
+            "two.py": _NEW["two.py"].encode(),
+        }
+        _active_checkpoint(copy)
         cancelled = manager.cancel(run.id, owner=_OWNER)
         assert cancelled.status == "completed"  # terminal source review is not an active model run
         release.set()
