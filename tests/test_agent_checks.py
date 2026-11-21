@@ -63,6 +63,19 @@ def test_unsafe_manifest_symlink_never_contributes_commands(tmp_path: Path) -> N
     assert detect_checks(tmp_path) == ()
 
 
+def test_redirected_workcopy_root_is_refused(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "pyproject.toml").write_text("[tool.pytest.ini_options]\\n")
+    redirected = tmp_path / "redirected"
+    try:
+        redirected.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises((RuntimeError, ValueError)):
+        detect_checks(redirected)
+
+
 class FakeProcess:
     level = "appcontainer"
     pid = 4242
@@ -179,6 +192,23 @@ def test_no_manifest_gives_honest_not_run_summary(tmp_path: Path) -> None:
         shell.close()
 
 
+def test_all_detected_checks_run_separately(tmp_path: Path) -> None:
+    _, run_id, loop, launcher, _, shell = _fixture(tmp_path, _edit(), _final())
+    (tmp_path / "copy" / "package.json").write_text(
+        '{"scripts":{"test":"vitest","lint":"eslint .","build":"vite build"}}'
+    )
+    try:
+        result = loop.run(run_id)
+        assert result.status == "completed"
+        assert result.answer is not None and "3 checks passed" in result.answer
+        assert [call[0] for call in launcher.starts] == [
+            "npm run test", "npm run lint", "npm run build",
+        ]
+        assert all(not network for _command, _path, network in launcher.starts)
+    finally:
+        shell.close()
+
+
 def test_before_final_runs_once_after_edit_and_not_without_new_edit(tmp_path: Path) -> None:
     _, run_id, loop, launcher, client, shell = _fixture(tmp_path, _edit(), _final(), _final(), exit_code=1)
     (tmp_path / "copy" / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
@@ -255,6 +285,24 @@ def test_run_checks_uses_shell_approval_and_network_disabled(tmp_path: Path) -> 
         assert result.status == "completed" and result.answer is not None
         assert "1 check passed" in result.answer
         assert launcher.starts == [("python -m pytest", tmp_path / "copy", False)]
+    finally:
+        shell.close()
+
+
+def test_denied_check_approval_reports_not_run(tmp_path: Path) -> None:
+    store, run_id, loop, launcher, _, shell = _fixture(tmp_path, _edit(), _final(), mode="ask")
+    (tmp_path / "copy" / "pyproject.toml").write_text("[tool.pytest.ini_options]\\n")
+    try:
+        parked = loop.run(run_id)
+        assert parked.status == "waiting_approval"
+        step = next(s for s in store.list_steps(run_id, owner="local")
+                    if s.kind == "tool" and s.tool == "run_checks")
+        store.decide_approval(run_id, owner="local", step_seq=step.seq, decision="rejected")
+        result = loop.resume(run_id)
+        assert result.status == "completed"
+        assert result.answer is not None and "not run (approval declined)" in result.answer
+        assert "passed" not in result.answer
+        assert launcher.starts == []
     finally:
         shell.close()
 
