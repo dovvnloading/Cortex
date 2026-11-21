@@ -19,7 +19,7 @@ from typing import Any
 
 from cortex_backend.services.llm import _fence_untrusted, _load_asset
 
-from .protocol import ModelTurn, ProtocolError, ToolCall, call_model
+from .protocol import ModelTurn, ProtocolError, ToolCall, _instructions, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
 from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
 
@@ -307,8 +307,17 @@ class AgentLoop:
                 raise TypeError("context provider must return a string")
             if supplied:
                 extra.append({"role": "user", "content": _fence_untrusted("REFERENCE", "Context provider data:\n" + supplied)})
+        # call_model prepends another system envelope for JSON-only adapters.
+        # Reserve it even for native adapters so the same limit is conservative.
+        protocol_overhead = len(_instructions(self.registry.specs())) if specs else 0
+
         def size() -> int:
-            return sum(len(item["content"]) for item in fixed + extra) + sum(len(item.content) for item in state.history)
+            total_messages = len(fixed) + len(extra) + len(state.history)
+            return (
+                protocol_overhead + 32 * (total_messages + 1)
+                + sum(len(item["content"]) for item in fixed + extra)
+                + sum(len(item.content) for item in state.history)
+            )
         # Compact the oldest observations, not the policy or the goal. Keep the
         # guard band for the model's reply and serialisation overhead.
         threshold = int(state.limits.max_context_chars * 0.85)
