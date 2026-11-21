@@ -1,4 +1,9 @@
 import type {
+  AgentRunListResponse,
+  AgentRunResponse,
+  AgentSSEEvent,
+  DecideAgentApproval,
+  StartAgentRun,
   AddMemoryRequest,
   ChatAttachment,
   ChatAttachmentStageRequest,
@@ -552,7 +557,8 @@ export class CortexApi {
       try {
         event = JSON.parse(data) as T;
       } catch {
-        console.warn("Cortex: skipping a malformed SSE frame", data.slice(0, 200));
+        // Never log model output or source text from a malformed frame.
+        console.warn("Cortex: skipping a malformed SSE frame");
         return;
       }
       onEvent(event);
@@ -623,6 +629,50 @@ export class CortexApi {
     await this.request<void>(`/chats/${encodeURIComponent(threadId)}`, {
       method: "DELETE",
     });
+  }
+
+  /** The backend gates all agent endpoints behind the persisted setting. */
+  startAgentRun(payload: StartAgentRun): Promise<AgentRunResponse> {
+    return this.request<AgentRunResponse>("/agent/runs", {
+      method: "POST", body: JSON.stringify(payload),
+    });
+  }
+
+  agentRuns(): Promise<AgentRunListResponse> {
+    return this.request<AgentRunListResponse>("/agent/runs");
+  }
+
+  agentRun(runId: string): Promise<AgentRunResponse> {
+    return this.request<AgentRunResponse>("/agent/runs/" + encodeURIComponent(runId));
+  }
+
+  streamAgentRun(
+    runId: string,
+    onEvent: (event: AgentSSEEvent) => void,
+    options: { signal?: AbortSignal; afterEventId?: number } = {},
+  ): Promise<void> {
+    return this.streamEvents<AgentSSEEvent>(
+      "/agent/runs/" + encodeURIComponent(runId) + "/events", onEvent, options,
+    ).then(() => undefined);
+  }
+
+  decideAgentApproval(runId: string, seq: number, decision: DecideAgentApproval["decision"]): Promise<AgentRunResponse> {
+    return this.request<AgentRunResponse>(
+      "/agent/runs/" + encodeURIComponent(runId) + "/approvals/" + encodeURIComponent(String(seq)),
+      { method: "POST", body: JSON.stringify({ decision }) },
+    );
+  }
+
+  resumeAgentRun(runId: string): Promise<AgentRunResponse> {
+    return this.request<AgentRunResponse>(
+      "/agent/runs/" + encodeURIComponent(runId) + "/resume", { method: "POST" },
+    );
+  }
+
+  cancelAgentRun(runId: string): Promise<AgentRunResponse> {
+    return this.request<AgentRunResponse>(
+      "/agent/runs/" + encodeURIComponent(runId) + "/cancel", { method: "POST" },
+    );
   }
 
   settings(): Promise<SettingsResponse> {

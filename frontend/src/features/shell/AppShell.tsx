@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowRight, FolderCode, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { ArrowRight, Bot, FolderCode, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
@@ -63,8 +63,11 @@ export function AppShell({
 
   const isSettings = parseAppRoute(pathname).kind === "settings";
   const isWorkspace = parseAppRoute(pathname).kind === "workspace";
+  const isAgent = parseAppRoute(pathname).kind === "agent";
   const activeTitle = isWorkspace
     ? "Project workspace"
+    : isAgent
+      ? "Agent mode"
     : isSettings
       ? "Settings"
     : activeChatId
@@ -141,6 +144,12 @@ export function AppShell({
             title="Local coding workspace">
             <FolderCode aria-hidden="true" size={17} />
           </NavigationLink>
+          <NavigationLink to="/agent"
+            className={"window-control" + (isAgent ? " window-control-active" : "")}
+            aria-label="Agent mode" aria-current={isAgent ? "page" : undefined}
+            title="Opt-in coding agent">
+            <Bot aria-hidden="true" size={17} />
+          </NavigationLink>
           <NavigationLink
             to="/settings"
             className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}
@@ -200,7 +209,7 @@ export function AppShell({
               chats={chats}
               groups={groups}
               activeChatId={activeChatId}
-              activeRowVisible={!isSettings && !isWorkspace}
+              activeRowVisible={!isSettings && !isWorkspace && !isAgent}
               query={chatQuery}
               onSelectChat={selectChat}
               onRenameChat={setRenameTarget}
@@ -218,10 +227,15 @@ export function AppShell({
               Project workspace
               <ArrowRight aria-hidden="true" size={15} />
             </NavigationLink>
+            <NavigationLink to="/agent" className="archive-workspace" aria-current={isAgent ? "page" : undefined}>
+              <span className="archive-workspace-icon"><Bot aria-hidden="true" size={17} /></span>
+              Agent mode
+              <ArrowRight aria-hidden="true" size={15} />
+            </NavigationLink>
           </footer>
         </aside>
 
-        <main className={`main-content ${isSettings ? "settings-content" : isWorkspace ? "workspace-content" : "chat-content"}`}>{children}</main>
+        <main className={`main-content ${isSettings ? "settings-content" : isWorkspace || isAgent ? "workspace-content" : "chat-content"}`}>{children}</main>
       </div>
 
       {renameTarget && <RenameDialog chat={renameTarget} onClose={() => setRenameTarget(null)} onSave={onRenameChat} />}

@@ -14,6 +14,8 @@ export type ApprovalCardProps = {
   request: ApprovalRequest;
   onAllowOnce: () => void;
   onAlwaysAllow: () => void;
+  /** Hide project-wide permission when the API only supports a single decision. */
+  allowAlways?: boolean;
   onDeny: () => void;
 };
 
@@ -33,7 +35,7 @@ const commandStyle = {
  * Future Agent mode's approval surface. This component only asks for consent;
  * it never runs a command or persists a project rule.
  */
-export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: ApprovalCardProps) {
+export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, allowAlways = true, onDeny }: ApprovalCardProps) {
   const commandId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const commandToggleRef = useRef<HTMLButtonElement>(null);
@@ -50,7 +52,7 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
   const commandVisible = visibleCommandFor === requestKey;
   const reviewingDangerous = reviewingDangerousFor === requestKey;
   const dangerousConfirmed = reviewingDangerous && acknowledgedDangerousFor === requestKey;
-  const canAlwaysAllow = request.sandbox_level === "appcontainer"
+  const canAlwaysAllow = allowAlways && request.sandbox_level === "appcontainer"
     && !request.network
     && (request.cls === "inspect" || request.cls === "build_test");
 
