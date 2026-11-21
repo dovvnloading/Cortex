@@ -54,4 +54,39 @@ describe("Agent API transport", () => {
       .rejects.toThrow("Confirm the cloud provider warning");
     expect(startAgentRun).not.toHaveBeenCalled();
   });
+  it("requires consent and validates accepted, discarded, undone, and changeset responses", async () => {
+    const client = {
+      agentChangeset: vi.fn().mockResolvedValue({ run_id: "r 1", changes: [] }),
+      acceptAgentChanges: vi.fn().mockResolvedValue({ paths: ["app.py"] }),
+      discardAgentRun: vi.fn().mockResolvedValue({ discarded: true }),
+      undoAgentChanges: vi.fn().mockResolvedValue({ paths: ["app.py"] }),
+    };
+    const agent = createAgentApi(client as unknown as CortexApi);
+    await expect(agent.accept("r 1", ["app.py"], false)).rejects.toThrow(/confirm acceptance/i);
+    await expect(agent.accept("r 1", [], true)).rejects.toThrow(/Select changed files/i);
+    await expect(agent.discard("r 1", false)).rejects.toThrow(/Confirm discard/i);
+    await expect(agent.undo("r 1", false)).rejects.toThrow(/Confirm undo/i);
+    expect(client.acceptAgentChanges).not.toHaveBeenCalled();
+    expect(client.discardAgentRun).not.toHaveBeenCalled();
+    expect(client.undoAgentChanges).not.toHaveBeenCalled();
+
+    await expect(agent.changeset("r 1")).resolves.toEqual({ run_id: "r 1", changes: [] });
+    await expect(agent.accept("r 1", ["app.py"], true)).resolves.toEqual({ paths: ["app.py"] });
+    await expect(agent.discard("r 1", true)).resolves.toEqual({ discarded: true });
+    await expect(agent.undo("r 1", true)).resolves.toEqual({ paths: ["app.py"] });
+    expect(client.acceptAgentChanges).toHaveBeenCalledWith("r 1", {
+      paths: ["app.py"], confirmed: true,
+    });
+    expect(client.undoAgentChanges).toHaveBeenCalledWith("r 1", { confirmed: true });
+
+    client.agentChangeset.mockResolvedValueOnce({ run_id: "other", changes: [] });
+    client.acceptAgentChanges.mockResolvedValueOnce({ paths: [] });
+    client.discardAgentRun.mockResolvedValueOnce({ discarded: false });
+    client.undoAgentChanges.mockResolvedValueOnce({ paths: [] });
+    await expect(agent.changeset("r 1")).rejects.toThrow(/changeset response is invalid/i);
+    await expect(agent.accept("r 1", ["app.py"], true)).rejects.toThrow(/did not confirm the accepted paths/i);
+    await expect(agent.discard("r 1", true)).rejects.toThrow(/did not confirm discard/i);
+    await expect(agent.undo("r 1", true)).rejects.toThrow(/did not confirm restored paths/i);
+  });
+
 });

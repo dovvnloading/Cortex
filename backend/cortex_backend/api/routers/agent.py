@@ -42,6 +42,10 @@ class AcceptAgentChanges(AgentModel):
     confirmed: bool = Field(default=False, strict=True)
 
 
+class UndoAgentChanges(AgentModel):
+    confirmed: bool = Field(default=False, strict=True)
+
+
 class AgentRunResponse(AgentModel):
     id: str
     project_root: str
@@ -52,6 +56,7 @@ class AgentRunResponse(AgentModel):
     created: str
     updated: str
     stop_reason: str | None = None
+    undo_available: bool = False
 
 
 class AgentRunListResponse(AgentModel):
@@ -77,6 +82,10 @@ class AgentAcceptedResponse(AgentModel):
 
 class AgentDiscardedResponse(AgentModel):
     discarded: bool
+
+
+class AgentUndoneResponse(AgentModel):
+    paths: list[str]
 
 
 class AgentSSEEvent(AgentModel):
@@ -130,6 +139,8 @@ _ERRORS: dict[str, tuple[int, str]] = {
     "checkpoint_pending": (409, "A write requires checkpoint recovery."),
     "checkpoint_limit": (409, "The checkpoint storage limit was reached."),
     "checkpoint_corrupt": (409, "The recovery checkpoint is invalid."),
+    "checkpoint_missing": (409, "There are no accepted changes to undo."),
+    "restore_failed": (409, "The accepted changes could not be restored safely."),
     "recovery_required": (409, "An unfinished recovery checkpoint must be resolved."),
     "storage_unavailable": (503, "Local recovery storage is unavailable."),
     "storage_version": (503, "Local recovery storage uses an unsupported format."),
@@ -155,11 +166,12 @@ def _call(function: Callable[..., Any], **kwargs: Any) -> Any:
         raise _error("agent_unavailable") from None
 
 
-def _response(run: AgentRun) -> AgentRunResponse:
+def _response(run: AgentRun, workflow: AgentRuns, owner: str) -> AgentRunResponse:
     return AgentRunResponse(
         id=run.id, project_root=run.project_root, mode=run.mode, model=run.model,
         status=run.status, budgets=run.budgets, created=run.created,
         updated=run.updated, stop_reason=run.stop_reason,
+        undo_available=workflow.undo_available(run.id, owner=owner),
     )
 
 
@@ -207,7 +219,7 @@ def register(
             goal=payload.goal, mode=payload.mode, model=payload.model, budgets=payload.budgets,
             confirmed_project=payload.confirmed_project, confirmed_cloud=payload.confirmed_cloud,
         )
-        return _response(run)
+        return _response(run, workflow, principal.session_id)
 
     @router.get("/agent/runs", response_model=AgentRunListResponse)
     def list_runs(
@@ -216,7 +228,8 @@ def register(
     ) -> AgentRunListResponse:
         workflow: AgentRuns = request.app.state.agent_workflow
         return AgentRunListResponse(runs=[
-            _response(run) for run in _call(workflow.list_runs, owner=principal.session_id)
+            _response(run, workflow, principal.session_id)
+            for run in _call(workflow.list_runs, owner=principal.session_id)
         ])
 
     @router.get("/agent/runs/{run_id}", response_model=AgentRunResponse)
@@ -225,7 +238,8 @@ def register(
         principal: SessionPrincipal = Depends(enabled),
     ) -> AgentRunResponse:
         workflow: AgentRuns = request.app.state.agent_workflow
-        return _response(_call(workflow.get, run_id=run_id, owner=principal.session_id))
+        return _response(_call(workflow.get, run_id=run_id, owner=principal.session_id),
+                         workflow, principal.session_id)
 
     @router.get(
         "/agent/runs/{run_id}/events",
@@ -297,7 +311,7 @@ def register(
         return _response(_call(
             workflow.approval, run_id=run_id, owner=principal.session_id,
             seq=seq, decision=payload.decision,
-        ))
+        ), workflow, principal.session_id)
 
     @router.post("/agent/runs/{run_id}/cancel", response_model=AgentRunResponse)
     def cancel(
@@ -305,7 +319,8 @@ def register(
         principal: SessionPrincipal = Depends(enabled),
     ) -> AgentRunResponse:
         workflow: AgentRuns = request.app.state.agent_workflow
-        return _response(_call(workflow.cancel, run_id=run_id, owner=principal.session_id))
+        return _response(_call(workflow.cancel, run_id=run_id, owner=principal.session_id),
+                         workflow, principal.session_id)
 
     @router.get("/agent/runs/{run_id}/changeset", response_model=AgentChangesetResponse)
     def changeset(
@@ -339,6 +354,19 @@ def register(
         )
         return AgentAcceptedResponse(paths=list(paths))
 
+    @router.post("/agent/runs/{run_id}/undo", response_model=AgentUndoneResponse)
+    def undo(
+        run_id: str, payload: UndoAgentChanges, request: Request,
+        principal: SessionPrincipal = Depends(enabled),
+    ) -> AgentUndoneResponse:
+        if not payload.confirmed:
+            raise _error("consent_required")
+        workflow: AgentRuns = request.app.state.agent_workflow
+        paths: tuple[str, ...] = _call(
+            workflow.undo, run_id=run_id, owner=principal.session_id, confirmed=True,
+        )
+        return AgentUndoneResponse(paths=list(paths))
+
     @router.post("/agent/runs/{run_id}/discard", response_model=AgentDiscardedResponse)
     def discard(
         run_id: str, request: Request,
@@ -354,4 +382,5 @@ def register(
         principal: SessionPrincipal = Depends(enabled),
     ) -> AgentRunResponse:
         workflow: AgentRuns = request.app.state.agent_workflow
-        return _response(_call(workflow.resume, run_id=run_id, owner=principal.session_id))
+        return _response(_call(workflow.resume, run_id=run_id, owner=principal.session_id),
+                         workflow, principal.session_id)

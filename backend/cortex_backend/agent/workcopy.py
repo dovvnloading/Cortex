@@ -822,7 +822,16 @@ class WorkCopy:
                     raise WorkCopyError("restore_failed") from exc
             store.delete(owner=self._owner, checkpoint_id=self.checkpoint_id)
             if not self._discarded:
-                self._baseline = _snapshot(self.project_root, self._ignores)
+                # Restore only the journaled paths in our comparison baseline.
+                # Re-snapshotting the *entire* project would treat unrelated
+                # files created or edited outside this run as staged changes
+                # in the old work copy (possibly offering to delete them).
+                for entry in record.files:
+                    original_mode = entry.mode & ~_DELETE_FLAG
+                    if original_mode == 0:
+                        self._baseline.pop(entry.path, None)
+                    else:
+                        self._baseline[entry.path] = _File(entry.original, original_mode)
             return tuple(sorted(verified))
 
     def discard(self) -> None:
