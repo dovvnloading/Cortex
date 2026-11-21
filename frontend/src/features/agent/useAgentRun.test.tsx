@@ -29,6 +29,10 @@ function fakeApi(): AgentApi {
     decide: vi.fn().mockResolvedValue({ ...run, status: "running" }),
     resume: vi.fn().mockResolvedValue({ ...run, status: "completed" }),
     stop: vi.fn().mockResolvedValue({ ...run, status: "cancelled" }),
+    changeset: vi.fn(),
+    accept: vi.fn(),
+    discard: vi.fn(),
+    undo: vi.fn(),
   };
 }
 

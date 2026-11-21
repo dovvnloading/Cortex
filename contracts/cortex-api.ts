@@ -45,6 +45,7 @@ export interface AgentRunResponse {
   created: string;
   updated: string;
   stop_reason?: string | null;
+  undo_available?: boolean;
 }
 
 export interface AgentSSEEvent {
@@ -56,6 +57,10 @@ export interface AgentSSEEvent {
 
 export interface AgentSettings {
   enabled?: boolean;
+}
+
+export interface AgentUndoneResponse {
+  paths: Array<string>;
 }
 
 export interface AppearanceSettings {
@@ -692,6 +697,10 @@ export interface SystemResponse {
 export interface TranslationSettings {
   enabled?: boolean;
   target_language?: string;
+}
+
+export interface UndoAgentChanges {
+  confirmed?: boolean;
 }
 
 export interface UpdateChatGroupRequest {
