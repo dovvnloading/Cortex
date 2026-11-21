@@ -481,18 +481,21 @@ def test_cancel_during_discard_preserves_accepted_source_and_recovery(
         # Discard owns the manager lock and removes its live-copy entry first.
         assert isinstance(cancelled.error, AgentWorkflowError)
         assert cancelled.error.code == "copy_unavailable"
+        _assert_project(project, _NEW)
+        assert not copy.path.exists()
+        _active_checkpoint(copy)
+        assert manager.undo_available(run.id, owner=_OWNER) is True
+        # No live copy remains: exercise the merged owner-scoped journal
+        # recovery through AgentRuns.undo, not the discarded copy object.
+        assert manager.undo(run.id, owner=_OWNER, confirmed=True) == tuple(sorted(_OLD))
+        _assert_project(project, _OLD)
+        assert manager.undo_available(run.id, owner=_OWNER) is False
+        with pytest.raises(WorkspaceCheckpointError) as missing:
+            _journal(copy).get(owner=_OWNER, checkpoint_id=copy.checkpoint_id)
+        assert missing.value.code == "checkpoint_missing"
     finally:
         release.set()
         manager.close()
-    _assert_project(project, _NEW)
-    assert not copy.path.exists()
-    _active_checkpoint(copy)
-    # The durable first-original journal remains usable after discarding the copy.
-    assert copy.undo(confirmed=True) == tuple(sorted(_OLD))
-    _assert_project(project, _OLD)
-    with pytest.raises(WorkspaceCheckpointError) as missing:
-        _journal(copy).get(owner=_OWNER, checkpoint_id=copy.checkpoint_id)
-    assert missing.value.code == "checkpoint_missing"
 
 
 def test_cancel_during_undo_restores_all_files_and_deletes_journal(
@@ -501,7 +504,7 @@ def test_cancel_during_undo_restores_all_files_and_deletes_journal(
     manager, run, copy, project = _staged(tmp_path)
     assert manager.accept(run.id, owner=_OWNER, paths=list(_NEW), confirmed=True) == tuple(sorted(_NEW))
     original_write = workcopy_module._write
-    entered, release = Event(), Event()
+    entered, release, cancel_started = Event(), Event(), Event()
 
     def gated_write(root: Path, relative: str, data: bytes, mode: int) -> None:
         if root == project and relative == "two.py":
@@ -511,18 +514,29 @@ def test_cancel_during_undo_restores_all_files_and_deletes_journal(
 
     monkeypatch.setattr(workcopy_module, "_write", gated_write)
     try:
-        undo_thread, undone = _thread(lambda: copy.undo(confirmed=True), "race-undo")
+        undo_thread, undone = _thread(
+            lambda: manager.undo(run.id, owner=_OWNER, confirmed=True), "race-undo",
+        )
         assert entered.wait(10), f"undo gate entered={entered.is_set()}, journal={_journal(copy).list(owner=_OWNER)}"
         assert _originals(project) == {
             "one.py": _OLD["one.py"].encode(),
             "two.py": _NEW["two.py"].encode(),
         }
         _active_checkpoint(copy)
-        cancelled = manager.cancel(run.id, owner=_OWNER)
-        assert cancelled.status == "completed"  # terminal source review is not an active model run
+
+        # The merged AgentRuns.undo holds the coordinator lock throughout
+        # journal-backed restore. Cancellation must wait rather than observe
+        # or authorize a partially restored terminal run.
+        cancel_thread, cancelled = _thread(
+            lambda: _cancel_while_locked(manager, run.id, cancel_started), "race-cancel-undo",
+        )
+        assert cancel_started.wait(10), f"cancel submitted={cancel_started.is_set()}, undo_gate={entered.is_set()}"
         release.set()
         assert _joined(undo_thread, undone, context="undo") == tuple(sorted(_OLD))
+        cancelled_run = _joined(cancel_thread, cancelled, context="cancel during undo")
+        assert isinstance(cancelled_run, AgentRun) and cancelled_run.status == "completed"
         _assert_project(project, _OLD)
+        assert manager.undo_available(run.id, owner=_OWNER) is False
         with pytest.raises(WorkspaceCheckpointError) as missing:
             _journal(copy).get(owner=_OWNER, checkpoint_id=copy.checkpoint_id)
         assert missing.value.code == "checkpoint_missing"
