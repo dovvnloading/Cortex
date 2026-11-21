@@ -34,10 +34,10 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
-- Document Agent shell approvals, sandbox limits, background cleanup and automatic project-check verification.
-- Describe the current Agent mode consent, approval choices, disposable work
-  copies, recovery and Windows sandbox limits. At the time of this
-  documentation-only change, the Agent review UI was still a placeholder.
+- Document live Agent tools, approval modes, sandbox limits, background cleanup,
+  project checks and model profiles (#536; documentation #544).
+- Document staged changes review, confirmed accept/discard, undo limitations,
+  durable recovery and run history (#535; documentation #544).
 
 ### Added (unreleased coding workspace)
 
