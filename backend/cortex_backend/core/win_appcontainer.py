@@ -110,7 +110,10 @@ def derive_profile_sid(name: str) -> str:
     if not _hresult_ok(status):
         raise AppContainerError(f"DeriveAppContainerSidFromAppContainerName failed (0x{status & 0xffffffff:08x})")
     try:
-        return _sid_string(sid.value)
+        sid_value = sid.value
+        if sid_value is None:
+            raise AppContainerError("DeriveAppContainerSidFromAppContainerName returned a null SID")
+        return _sid_string(sid_value)
     finally:
         _free(sid.value)
 
@@ -220,6 +223,8 @@ class NativeProcess:
         milliseconds = INFINITE if timeout is None else min(0xFFFFFFFE, max(0, int(timeout * 1000)))
         status = wait(self._info.process, milliseconds)
         if status == WAIT_TIMEOUT:
+            if timeout is None:
+                raise AppContainerError("WaitForSingleObject timed out during an indefinite wait")
             raise subprocess.TimeoutExpired(str(self.pid), timeout)
         if status != 0:
             raise _failed("WaitForSingleObject")
@@ -287,6 +292,9 @@ def spawn_suspended(
         ], wintypes.BOOL)
         if not create_pipe(ctypes.byref(pipe_read), ctypes.byref(pipe_write), ctypes.byref(sa), 0):
             raise _failed("CreatePipe")
+        read_handle = pipe_read.value
+        if read_handle is None or pipe_write.value is None:
+            raise AppContainerError("CreatePipe returned a null pipe handle")
         set_flags = _fn(
             kernel, "SetHandleInformation", [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD], wintypes.BOOL,
         )
@@ -340,7 +348,7 @@ def spawn_suspended(
                               | CREATE_UNICODE_ENVIRONMENT,
                               envblock, str(cwd), ctypes.byref(startup), ctypes.byref(info)):
             raise _failed("CreateProcessW(AppContainer)")
-        fd = msvcrt.open_osfhandle(int(pipe_read.value), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        fd = msvcrt.open_osfhandle(read_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         pipe_read = wintypes.HANDLE()  # CRT owns this handle now
         child = NativeProcess(info, fd, kernel)
         fd = None

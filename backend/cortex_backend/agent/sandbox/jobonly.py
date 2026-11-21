@@ -15,11 +15,33 @@ import subprocess
 import sys
 
 from cortex_backend.agent.sandbox.base import (
-    ProcessHandle, RunningProcess, SandboxLevel, canonical_workcopy,
+    Process, ProcessHandle, RunningProcess, SandboxLevel, canonical_workcopy,
     child_environment, command_argv, job_limits, toolchain, working_directory,
 )
 from cortex_backend.core.win_jobs import JobLimits, KillOnCloseJob
 from cortex_backend.core.win_appcontainer import CREATE_NO_WINDOW, CREATE_SUSPENDED
+
+
+class _PipedProcess:
+    """Adapt Popen to the Process protocol with a guaranteed stdout pipe."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        stdout = process.stdout
+        if stdout is None:
+            raise OSError("job-only process has no stdout pipe")
+        self._process = process
+        self._stdout = stdout
+        self.pid = process.pid
+        self.stdout: object = stdout
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def close(self) -> None:
+        self._stdout.close()
 
 
 class JobOnlyLauncher:
@@ -48,6 +70,7 @@ class JobOnlyLauncher:
         )
         job: KillOnCloseJob | None = None
         try:
+            piped_process: Process = _PipedProcess(process)
             job = KillOnCloseJob(job_limits(limits))
             job.assign(process.pid)
             # subprocess closes its initial thread handle; the NT resume API
@@ -59,7 +82,7 @@ class JobOnlyLauncher:
             handle = getattr(process, "_handle", None)
             if not handle or resume(wintypes.HANDLE(int(handle))) < 0:
                 raise OSError("NtResumeProcess failed")
-            return RunningProcess(process, job, self.level, lambda: None)
+            return RunningProcess(piped_process, job, self.level, lambda: None)
         except BaseException:
             if job is not None:
                 job.close()
