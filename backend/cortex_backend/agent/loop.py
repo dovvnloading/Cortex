@@ -21,7 +21,7 @@ from cortex_backend.services.llm import _fence_untrusted, _load_asset
 
 from .protocol import ModelTurn, ProtocolError, ToolCall, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
-from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult
+from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,8 +286,8 @@ class AgentLoop:
     def _observe(self, state: _State, tool: str, content: str, success: bool) -> None:
         note = f"{tool}: {'completed' if success else 'unsuccessful'} (earlier observation compacted)."
         state.history.append(_History(
-            "user", _fence_untrusted("TOOL", content),
-            compact=_fence_untrusted("TOOL", note), is_observation=True,
+            "user", _fence_untrusted("REFERENCE", "Tool observation:\n" + content),
+            compact=_fence_untrusted("REFERENCE", "Tool observation summary:\n" + note), is_observation=True,
         ))
 
     def _prompt(self, run: AgentRun, state: _State) -> list[dict[str, str]] | None:
@@ -306,7 +306,7 @@ class AgentLoop:
             if not isinstance(supplied, str):
                 raise TypeError("context provider must return a string")
             if supplied:
-                extra.append({"role": "user", "content": _fence_untrusted("CONTEXT", supplied)})
+                extra.append({"role": "user", "content": _fence_untrusted("REFERENCE", "Context provider data:\n" + supplied)})
         def size() -> int:
             return sum(len(item["content"]) for item in fixed + extra) + sum(len(item.content) for item in state.history)
         # Compact the oldest observations, not the policy or the goal. Keep the
