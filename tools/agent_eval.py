@@ -257,6 +257,37 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return result
 
 
+def _workcopy_snapshot(root: Path) -> dict[str, bytes]:
+    """Compare authored files, excluding only known process/Git bookkeeping.
+
+    Every other regular file still contributes to the exact end-state verdict.
+    The original fixture is always snapshotted separately without exclusions.
+    """
+    ignored = {
+        ".git", ".pytest_cache", "__pycache__", ".cortex-agent-tmp",
+        ".cortex-agent-git-home", ".cortex-agent-localappdata",
+    }
+    result: dict[str, bytes] = {}
+    total = 0
+    for path in sorted(root.rglob("*")):
+        relative = _relative(path.relative_to(root).as_posix())
+        if any(part in ignored for part in relative.split("/")):
+            continue
+        info = path.lstat()
+        if _is_reparse(info):
+            raise ValueError("unsafe_workcopy_entry")
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode) or len(result) >= MAX_FILES:
+            raise ValueError("invalid_workcopy_entry")
+        data = _regular_bytes(path)
+        total += len(data)
+        if total > MAX_TOTAL_BYTES:
+            raise ValueError("workcopy_too_large")
+        result[relative] = data
+    return result
+
+
 def _normalize_line_endings(files: dict[str, bytes]) -> dict[str, bytes]:
     # Text fixtures may have CRLF in Windows checkouts or after file edits.
     return {path: data.replace(b"\r\n", b"\n") for path, data in files.items()}
