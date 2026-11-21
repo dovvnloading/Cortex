@@ -488,7 +488,7 @@ def test_appcontainer_output_bomb_is_capped_and_process_killed(
 
 @_WINDOWS_ONLY
 def test_appcontainer_spawn_loop_is_job_limited_and_descendants_killed(
-    tmp_path: Path, _isolated_windows_launcher: Path,
+    tmp_path: Path, _isolated_windows_launcher: Path, _staged_python: Path,
 ) -> None:
     ready = _isolated_windows_launcher / "spawn-report.json"
     release = _isolated_windows_launcher / "release.txt"
@@ -499,15 +499,23 @@ def test_appcontainer_spawn_loop_is_job_limited_and_descendants_killed(
         "\nwhile not release.exists(): time.sleep(0.02)\n"
         f"pathlib.Path({str(escaped)!r}).write_text('escaped')"
     )
+    # This is the RX-granted toolchain executable that launched the parent.
+    # In an AppContainer, sys.executable may resolve to an ungranted host path.
+    worker_executable = _staged_python / "python.exe"
     parent = (
-        "import json,pathlib,subprocess,sys,time; spawned=0; denied=0; "
+        "import json,pathlib,subprocess,sys,time; spawned=0; denials=[]; "
         f"worker={worker!r}; "
+        f"worker_executable={str(worker_executable)!r}; "
         "\nfor _ in range(20):\n"
-        " try: subprocess.Popen([sys.executable,'-c',worker],"
+        " try: subprocess.Popen([worker_executable,'-c',worker],"
         " stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
-        " except OSError: denied+=1\n"
+        " except OSError as exc:\n"
+        "  denials.append({'type':type(exc).__name__,'winerror':getattr(exc,'winerror',None),"
+        " 'errno':exc.errno})\n"
         " else: spawned+=1\n"
-        f"pathlib.Path({str(ready)!r}).write_text(json.dumps({{'spawned':spawned,'denied':denied}})); "
+        f"pathlib.Path({str(ready)!r}).write_text(json.dumps("
+        "{'spawned':spawned,'denied':len(denials),'denials':denials,"
+        "'sys_executable':sys.executable,'worker_executable':worker_executable})); "
         "time.sleep(30)"
     )
     limits = JobLimits(
@@ -523,8 +531,13 @@ def test_appcontainer_spawn_loop_is_job_limited_and_descendants_killed(
             sleep(0.05)
         assert ready.exists(), "spawn loop never reported; job or child failed"
         report = json.loads(ready.read_text())
+        assert report["worker_executable"] == str(worker_executable), report
         assert 1 <= report["spawned"] <= 3, report
-        assert report["denied"] >= 1, report
+        assert report["denied"] == 20 - report["spawned"], report
+        assert len(report["denials"]) == report["denied"], report
+        # The Job Object active-process limit returns ERROR_NOT_ENOUGH_QUOTA.
+        # A different launch error is not proof of a working process limit.
+        assert all(denial["winerror"] == 1816 for denial in report["denials"]), report
     finally:
         process.kill_tree()
     release.write_text("continue")
