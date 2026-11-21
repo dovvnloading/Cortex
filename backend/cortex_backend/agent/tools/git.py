@@ -75,7 +75,7 @@ def _string(args: Mapping[str, Any], name: str) -> str:
 
 class _Git:
     def __init__(self, root: str | os.PathLike[str], run_id: str) -> None:
-        self.root = canonical_workcopy(root)
+        self.root = canonical_workcopy(Path(root))
         info = self.root.lstat()
         self.identity = (info.st_dev, info.st_ino)
         if not isinstance(run_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id) is None:

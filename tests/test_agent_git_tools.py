@@ -47,7 +47,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
 def _git(repo: Path, *args: str, env: dict[str, str]) -> str:
     result = subprocess.run(
         ["git", *args], cwd=repo, env=env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True,
+        capture_output=True, text=True, check=True,
     )
     return result.stdout.strip()
 
