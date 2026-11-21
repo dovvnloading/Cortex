@@ -415,16 +415,17 @@ def test_page_cannot_execute_process_push_code_or_exfiltrate_an_outside_file(
             assert rejected.result == {"outcome": "rejected", "success": False}
             assert rejected.ended is not None
         else:
-            steps = _tool_steps(manager, run_id)
-            denied_tool = any(
-                step.tool == name and step.result and step.result.get("success") is False
-                for step in steps[1:]
-            )
-            invalid_reply = any(
-                step.kind == "model" and step.result.get("outcome") == "invalid"
-                for step in manager._ledger().list_steps(run_id, owner=_OWNER)
-            )
-            assert denied_tool or invalid_reply, "hostile call was neither rejected nor denied"
+            hostile_steps = _tool_steps(manager, run_id)[1:]
+            if hostile_steps:
+                assert all(
+                    step.tool == name and step.result and step.result.get("success") is False
+                    for step in hostile_steps
+                ), "a hostile tool was not denied"
+            else:
+                assert any(
+                    step.kind == "model" and step.result.get("outcome") == "invalid"
+                    for step in manager._ledger().list_steps(run_id, owner=_OWNER)
+                ), "hostile call was not rejected by the protocol"
         assert [url for url, _, _ in transport.dials] == [_FIRST]
         assert canary.read_text(encoding="utf-8") == "LOCAL_PRIVATE_CANARY"
         assert all("LOCAL_PRIVATE_CANARY" not in observation for observation in model.observations)
