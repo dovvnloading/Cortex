@@ -1,0 +1,6 @@
+{
+  "goal": "Edit config.toml to set the service state to ready instead of draft. Keep the rest unchanged.",
+  "expected_changes": {
+    "config.toml": "[service]\nstate = ready\n"
+  }
+}

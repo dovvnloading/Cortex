@@ -1,0 +1,7 @@
+{
+  "goal": "Update pkg/formatting.py to return 'Hi ' rather than 'Hello ', and update checks/greeting_spec.py to expect the new greeting.",
+  "expected_changes": {
+    "pkg/formatting.py": "def welcome(name: str) -> str:\n    return 'Hi ' + name\n",
+    "checks/greeting_spec.py": "from pkg.formatting import welcome\n\n\ndef test_welcome():\n    assert welcome('Ada') == 'Hi Ada'\n"
+  }
+}
