@@ -346,18 +346,62 @@ def _snapshot(root: Path, ignores: tuple[_IgnoreRule, ...] = ()) -> dict[str, _F
     return files
 
 
+_GIT_CONFIG_LIMIT = 1024 * 1024
+_GIT_INCLUDE_SECTION = re.compile(r"^\s*\[\s*include(?:if)?(?=\s|\])", re.IGNORECASE)
+
+
+def _refuse_external_git_includes(root: Path) -> None:
+    """Reject local include/includeIf sections before Git can read their targets."""
+    metadata = root / ".git"
+    try:
+        info = metadata.lstat()
+    except FileNotFoundError:
+        return
+    if _is_reparse(info) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        raise WorkCopyError("git_unavailable")
+    # Git-linked source worktrees have a .git pointer file rather than local config.
+    if stat.S_ISREG(info.st_mode):
+        return
+    for name in ("config", "config.worktree"):
+        config = metadata / name
+        try:
+            info = config.lstat()
+        except FileNotFoundError:
+            continue
+        if _is_reparse(info) or not stat.S_ISREG(info.st_mode) or info.st_size > _GIT_CONFIG_LIMIT:
+            raise WorkCopyError("git_unavailable")
+        try:
+            contents = config.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise WorkCopyError("git_unavailable") from None
+        if any(_GIT_INCLUDE_SECTION.match(line) for line in contents.splitlines()):
+            raise WorkCopyError("git_unavailable")
+
+
 def _git(root: Path, *arguments: str, max_bytes: int = MAX_GIT_TREE_BYTES) -> bytes:
-    # No checkout is performed; local filter definitions cannot receive blobs.
-    # Git's hook dispatcher is disabled for both worktree add and removal.
-    env = dict(os.environ)
-    env.update({
+    # Work-copy creation invokes local-only Git verbs. Do not let repository
+    # include directives or inherited GIT_* variables expand their authority.
+    _refuse_external_git_includes(root)
+    env = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": str(root), "XDG_CONFIG_HOME": str(root),
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1",
         "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
-    })
+        "GIT_NO_LAZY_FETCH": "1",
+    }
+    # Git for Windows needs these OS paths to start. Never inherit arbitrary
+    # environment entries such as GIT_CONFIG_COUNT or GIT_EXEC_PATH.
+    for name in ("SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TMP", "TEMP"):
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
     try:
         result = subprocess.run(
-            ["git", "-c", f"core.hooksPath={os.devnull}", *arguments],
+            ["git", "-c", f"core.hooksPath={os.devnull}",
+             "-c", "core.fsmonitor=false", "-c", "credential.helper=",
+             "-c", "core.sshCommand=", *arguments],
             cwd=root, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             check=False, timeout=30,
