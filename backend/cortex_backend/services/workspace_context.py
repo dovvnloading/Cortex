@@ -58,7 +58,7 @@ _SOURCE_SUFFIXES = frozenset({
     ".jsonl", ".md", ".mdx", ".rst", ".txt", ".toml", ".yaml", ".yml",
     ".xml", ".html", ".css", ".scss", ".sql", ".sh", ".ps1", ".bat",
     ".cmd", ".go", ".rs", ".java", ".kt", ".c", ".cc", ".cpp", ".h",
-    ".hpp", ".cs", ".csproj", ".sln", ".rb", ".php", ".swift", ".dart", ".proto", ".vue",
+    ".hpp", ".cs", ".csproj", ".fsproj", ".vbproj", ".sln", ".slnx", ".rb", ".php", ".swift", ".dart", ".proto", ".vue",
     ".svelte", ".gradle", ".dockerfile", ".gitignore",
 })
 _WINDOWS_REPARSE_POINT = 0x0400
@@ -172,7 +172,7 @@ def _permitted_name(name: str, *, directory: bool) -> bool:
         return False
     return Path(lowered).suffix in _SOURCE_SUFFIXES or lowered in {
         "dockerfile", "makefile", "justfile", "license", "agents.md",
-        "pytest.ini", "setup.cfg", "go.mod",
+        "pytest.ini", "tox.ini", "setup.cfg", "go.mod",
     }
 
 

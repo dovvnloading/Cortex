@@ -42,6 +42,98 @@ def test_detects_only_fixed_commands_from_workcopy(
     assert [check.command for check in detect_checks(tmp_path)] == expected
 
 
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q -p no:cacheprovider\n"),
+        ("tox.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\n'),
+        ("pyproject.toml", '[tool.pytest]\naddopts = "-q"\n'),
+        ("pyproject.toml", '[project]\nname = "unrelated"\n'),
+    ],
+)
+def test_benign_pytest_addopts_stay_auto_approvable(
+    tmp_path: Path, filename: str, contents: str,
+) -> None:
+    (tmp_path / filename).write_text(contents, encoding="utf-8")
+    assert [(check.command, check.risk) for check in detect_checks(tmp_path)] == [
+        ("python -m pytest", "safe"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p hostile_plugin"\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider --override-ini x=y"\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = ["-q", "-p", "no:cacheprovider"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\naddopts = "-p hostile_plugin"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n    -p hostile_plugin\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q -p no:cacheprovider -p hostile_plugin\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider\naddopts = -p hostile_plugin\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q --rootdir=../outside\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q -p no:cacheprovider -p hostile_plugin\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q\npython_files = hostile_plugin.py\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q\nPYTEST_PLUGINS = hostile_plugin\n"),
+        ("tox.ini", "[pytest]\naddopts = -q\npython_files = hostile_plugin.py\n"),
+        ("tox.ini", "[pytest]\naddopts = -q -p hostile_plugin\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q\nrequired_plugins = hostile_plugin\n"),
+        ("pyproject.toml", '[tool.pytest]\naddopts = "-q"\npython_files = ["hostile_plugin.py"]\n'),
+        ("pyproject.toml", '[tool.pytest]\naddopts = "-q"\nplugins = ["hostile_plugin"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\npython_files = ["hostile_plugin.py"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\nplugins = ["hostile_plugin"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\nPYTEST_PLUGINS = "hostile_plugin"\n'),
+        ("pyproject.toml", '[tool.pytest]\naddopts = "-q"\n[tool.pytest.ini_options]\naddopts = "-q"\n'),
+    ],
+)
+def test_untrusted_pytest_options_cannot_hide_behind_safe_flags(
+    tmp_path: Path, filename: str, contents: str,
+) -> None:
+    (tmp_path / filename).write_text(contents, encoding="utf-8")
+    assert [check.risk for check in detect_checks(tmp_path)] == ["ask"]
+
+
+
+@pytest.mark.parametrize(
+    ("filename", "configuration", "approved"),
+    [
+        ("pytest.ini", "[pytest]\naddopts = -q\n", True),
+        ("pytest.ini", "[pytest]\naddopts = -q --rootdir=../outside\n", False),
+        ("tox.ini", "[pytest]\naddopts = -q -p no:cacheprovider\n", True),
+        ("tox.ini", "[pytest]\naddopts = -q\nplugins = hostile_plugin\n", False),
+    ],
+)
+def test_project_pytest_invocation_honors_opaque_config_approval(
+    tmp_path: Path, filename: str, configuration: str, approved: bool,
+) -> None:
+    _, run_id, loop, launcher, _, shell = _fixture(tmp_path, _edit(), _final())
+    (tmp_path / "copy" / filename).write_text(configuration, encoding="utf-8")
+    try:
+        result = loop.run(run_id)
+        if approved:
+            assert result.status == "completed"
+            assert result.answer is not None and "1 check passed" in result.answer
+            assert launcher.starts == [("python -m pytest", tmp_path / "copy", False)]
+        else:
+            assert result.status == "waiting_approval"
+            assert result.approval_request is not None
+            assert result.approval_request["tool"] == "run_checks"
+            assert result.approval_request["network"] is False
+            assert launcher.starts == []
+    finally:
+        shell.close()
+
+
+def test_conftest_still_requires_approval_even_with_safe_addopts(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "-q -p no:cacheprovider"\n', encoding="utf-8",
+    )
+    (tmp_path / "conftest.py").write_text("def pytest_sessionstart(session): pass\n", encoding="utf-8")
+    assert [check.risk for check in detect_checks(tmp_path)] == ["ask"]
+
+
 def test_nested_manifests_and_solution_preference(tmp_path: Path) -> None:
     frontend = tmp_path / "frontend"
     frontend.mkdir()

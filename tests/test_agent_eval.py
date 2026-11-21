@@ -11,8 +11,10 @@ import tomllib
 import pytest
 
 from cortex_backend.agent.loop import AgentLoop
+from cortex_backend.agent.tools.checks import detect_checks
 from tools import agent_eval
 from tools import agent_eval_replay
+from tools import ci_backend_shards
 
 
 def test_check_passes_all_tasks_without_a_model(capsys: pytest.CaptureFixture[str]) -> None:
@@ -292,19 +294,49 @@ def test_new_tasks_pass_in_check_mode(name: str) -> None:
 def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> None:
     repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
     manifest = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
-    # The repository suite discovers test_*.py files. The isolated work copy
-    # explicitly discovers this differently named, still-failing pytest case.
-    assert manifest["tool"]["pytest"]["ini_options"]["python_files"] == ["calculator_cases.py"]
-    assert not list(repo.glob("test_*.py"))
-    assert "assert add(2, 3) == 5" in (repo / "calculator_cases.py").read_text(encoding="utf-8")
+    # Use pytest's default test_*.py collection in the isolated project.
+    # The outer repository suite explicitly excludes its failing fixtures.
+    assert manifest["tool"]["pytest"]["ini_options"] == {"addopts": "-q -p no:cacheprovider"}
+    root = Path(__file__).resolve().parents[1]
+    outer = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    # Broad norecursedirs globs also hide real tests in unrelated agent_tasks
+    # directories. Only the specific fixture subtree may be ignored.
+    assert "norecursedirs" not in outer["tool"]["pytest"]["ini_options"]
+    assert 'collect_ignore = ["fixtures/agent_tasks"]' in (
+        root / "tests" / "conftest.py"
+    ).read_text(encoding="utf-8")
+    assert "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py" not in (
+        ci_backend_shards.discover_test_files(root)
+    )
+    assert [test.name for test in repo.glob("test_*.py")] == ["test_calculator.py"]
+    assert "assert add(2, 3) == 5" in (repo / "test_calculator.py").read_text(encoding="utf-8")
     assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
+
+
+def test_fix_failing_test_fixture_has_only_inert_pytest_addopts() -> None:
+    repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
+    assert [(item.key, item.command, item.risk) for item in detect_checks(repo)] == [
+        ("pytest", "python -m pytest", "safe"),
+    ]
+    assert not (repo / "conftest.py").exists()
 
 
 def test_generated_fixture_cache_is_never_copied_into_expected_end_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", tmp_path / "fix-failing-test")
+    # Simulate a prior pytest collection leaving caches in the fixture's
+    # source without modifying any checked-in fixture files.
+    source = tmp_path / "source-fixture"
+    ignore_generated = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc")
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", source, ignore=ignore_generated)
+    existing_cache = source / "repo" / "__pycache__"
+    existing_cache.mkdir()
+    (existing_cache / "preexisting.pyc").write_bytes(b"generated cache from prior collection")
+    # Only authored inputs should reach the test's copy. The new cache planted
+    # below must still be excluded from the evaluator's exact end-state check.
+    shutil.copytree(source, tmp_path / "fix-failing-test", ignore=ignore_generated)
     cache = tmp_path / "fix-failing-test" / "repo" / "__pycache__" / "calculator.cpython-311.pyc"
+    assert not cache.parent.exists()
     cache.parent.mkdir()
     cache.write_bytes(b"generated cache, not fixture source")
     monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)
