@@ -39,10 +39,11 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
 
   const act = async (action: ReviewAction, paths: string[] = []): Promise<void> => {
     const recoveringWithoutCopy = action === "undo" && changes === null && loadError !== null;
+    const recoveringEmptyChangeset = action === "undo" && changes?.length === 0 && !accepted;
     if (inFlight.current || discarded || (changes === null && !recoveringWithoutCopy)
       || (action === "accept" && (accepted || paths.length === 0))
       || (action === "discard" && accepted)
-      || (action === "undo" && !accepted && !recoveringWithoutCopy)
+      || (action === "undo" && !accepted && !recoveringWithoutCopy && !recoveringEmptyChangeset)
       || recoveredWithoutCopy) return;
 
     inFlight.current = true;
@@ -62,7 +63,7 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
       } else {
         const result = await api.undo(runId, true);
         setAccepted(false);
-        if (recoveringWithoutCopy) setRecoveredWithoutCopy(true);
+        if (recoveringWithoutCopy || recoveringEmptyChangeset) setRecoveredWithoutCopy(true);
         setNotice("Restored original project files: " + result.paths.join(", "));
       }
     } catch (cause) {
@@ -111,11 +112,12 @@ export function AgentChangesPanel({ api, runId }: AgentChangesPanelProps) {
         </>
       )}
       {recoveredWithoutCopy && <p role="status">{notice}</p>}
-      {discarded ? <p role="status">{notice}</p> : changes !== null && (
+      {discarded ? <p role="status">{notice}</p> : changes !== null && !recoveredWithoutCopy && (
         <ChangesReview
           summary="Review each proposed file change. Only your selected paths can be accepted, after a separate confirmation."
           changes={changes}
           accepted={accepted}
+          allowRecovery={changes.length === 0}
           busy={busy !== null}
           error={error}
           notice={notice}

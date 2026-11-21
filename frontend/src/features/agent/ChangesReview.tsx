@@ -15,6 +15,8 @@ export type ChangesReviewProps = {
   onDiscard: () => void;
   onUndo: () => void;
   accepted: boolean;
+  /** Offer explicit journal recovery when an old run has no remaining staged diff. */
+  allowRecovery?: boolean;
   busy?: boolean;
   error?: string | null;
   notice?: string | null;
@@ -76,7 +78,7 @@ function DiffText({ diff }: { diff: string }) {
  * a deliberate selection and a second confirmation in this dialog.
  */
 export function ChangesReview({
-  summary, changes, onAccept, onDiscard, onUndo, accepted, busy = false, error, notice,
+  summary, changes, onAccept, onDiscard, onUndo, accepted, allowRecovery = false, busy = false, error, notice,
 }: ChangesReviewProps) {
   const diffId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -186,7 +188,7 @@ export function ChangesReview({
     } else if (confirmation.action === "discard" && !accepted) {
       setConfirmation(null);
       onDiscard();
-    } else if (confirmation.action === "undo" && accepted) {
+    } else if (confirmation.action === "undo" && (accepted || (allowRecovery && changes.length === 0))) {
       setConfirmation(null);
       onUndo();
     }
@@ -318,6 +320,19 @@ export function ChangesReview({
               disabled={busy}
               onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
               Undo
+            </button>
+          </div>
+        ) : changes.length === 0 && allowRecovery ? (
+          <div className="dialog-actions" style={{ marginTop: 20, flexWrap: "wrap" }}>
+            <p>Previously accepted edits may be recoverable from this run's journal. The server will refuse undo if no checkpoint exists or the files have changed unexpectedly.</p>
+            <button ref={undoButtonRef} type="button" className="button button-secondary"
+              disabled={busy}
+              onClick={() => setConfirmation({ action: "undo", signature, paths: [] })}>
+              Undo previously accepted changes
+            </button>
+            <button ref={discardButtonRef} type="button" className="button button-secondary"
+              disabled={busy} onClick={() => setConfirmation({ action: "discard", signature, paths: [] })}>
+              Discard all
             </button>
           </div>
         ) : (
