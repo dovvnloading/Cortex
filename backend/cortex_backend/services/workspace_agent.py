@@ -325,7 +325,12 @@ class WorkspaceReadAgent:
             model_calls += 1
             if cancellation_event is not None and cancellation_event.is_set():
                 return outcome("cancelled")
-            raw = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
+            if isinstance(response, Mapping):
+                message = response.get("message")
+                content = message.get("content") if isinstance(message, Mapping) else None
+            else:
+                content = getattr(getattr(response, "message", None), "content", None)
+            raw = content if isinstance(content, str) else ""
             try:
                 action, payload = _action(raw, allow_preview=self._allow_patch_preview)
             except _InvalidAction:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import UserDict
 import json
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,6 +78,66 @@ def test_agent_searches_reads_and_answers_with_grounded_context(tmp_path):
     assert "return 42" in read_context["content"]
     assert "sha256" in read_context["content"]
     assert "LOCAL CODE EXECUTION" not in client.calls[0]["messages"][0]["content"]
+
+
+def test_ollama_chat_response_shape_executes_search(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+
+    class OllamaShapedClient(ScriptedClient):
+        def chat(self, **kwargs):
+            reply = super().chat(**kwargs)
+            return SimpleNamespace(
+                message=SimpleNamespace(content=reply["message"]["content"])
+            )
+
+    client = OllamaShapedClient(
+        {"action": "search", "query": "answer", "limit": 4},
+        {"action": "final", "answer": "Found solution.py:1."},
+    )
+    result = _run(registry, snapshot, client)
+
+    assert result.status == "completed"
+    assert result.tool_calls == 1
+    assert result.model_calls == 2
+    assert result.observed_paths == ("solution.py",)
+    assert '"kind": "search"' in client.calls[1]["messages"][-1]["content"]
+
+
+def test_mapping_chat_response_shape_executes_search(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+
+    class MappingClient(ScriptedClient):
+        def chat(self, **kwargs):
+            return UserDict(super().chat(**kwargs))
+
+    client = MappingClient(
+        {"action": "search", "query": "answer"},
+        {"action": "final", "answer": "Found solution.py:1."},
+    )
+    result = _run(registry, snapshot, client)
+
+    assert result.status == "completed"
+    assert result.tool_calls == 1
+    assert result.observed_paths == ("solution.py",)
+
+
+def test_unrecognized_message_shape_stays_invalid(tmp_path):
+    registry, snapshot = _snapshot(tmp_path)
+
+    class WrongShapeClient(ScriptedClient):
+        def chat(self, **kwargs):
+            super().chat(**kwargs)
+            return SimpleNamespace(message={"content": '{"action":"search","query":"answer"}'})
+
+    client = WrongShapeClient(
+        {"action": "search", "query": "answer"},
+        {"action": "search", "query": "answer"},
+    )
+    result = _run(registry, snapshot, client)
+
+    assert result.status == "invalid_response"
+    assert result.model_calls == 2
+    assert result.tool_calls == 0
 
 
 def test_hostile_file_content_remains_fenced_lower_trust(tmp_path):
