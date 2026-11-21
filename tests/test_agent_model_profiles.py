@@ -265,7 +265,7 @@ def test_store_does_not_replace_previous_file_when_atomic_swap_fails(
     assert sorted(path.name for path in store.path.parent.iterdir()) == ["model_profiles.json"]
 
 
-def test_store_rejects_duplicate_models_and_symlinked_path(tmp_path: Path) -> None:
+def test_store_rejects_duplicate_models(tmp_path: Path) -> None:
     store = ProfileStore(tmp_path)
     profile = _profile()
     with pytest.raises(ProfileSchemaError, match="Duplicate"):
