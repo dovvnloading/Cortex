@@ -419,16 +419,26 @@ class AgentRuns:
                         "status": current.status, "stop_reason": current.stop_reason,
                     })
                     if current.status in _TERMINAL:
-                        managed.terminal = True
-                        if managed.shell is not None:
-                            managed.shell.close()
                         self._active_id = None
                 except Exception as exc:
                     logger.warning("Agent event publishing failed (%s).", type(exc).__name__)
                     # A failure to read status is NOT proof that a worker has
                     # finished. Retain the slot, even if this blocks new work,
                     # rather than accidentally admit two active runs.
-                managed.driving = False
+                finally:
+                    # Cleanup must run even when event publishing fails. A
+                    # parked approval keeps its dev servers; terminal runs do not.
+                    try:
+                        final_run = self._owned(managed.run_id, managed.owner)
+                        terminal = final_run.status in _TERMINAL
+                    except AgentWorkflowError:
+                        terminal = result is None or result.status in _TERMINAL
+                    if terminal:
+                        managed.terminal = True
+                        if managed.shell is not None:
+                            managed.shell.close()
+                        self._active_id = None
+                    managed.driving = False
 
     def list_runs(self, *, owner: str) -> list[AgentRun]:
         self._expire_active()
@@ -484,6 +494,9 @@ class AgentRuns:
                 self._emit(managed, "status", {
                     "status": "failed", "stop_reason": "approval_expired",
                 })
+                managed.terminal = True
+                if managed.shell is not None:
+                    managed.shell.close()
                 self._active_id = None
                 raise AgentWorkflowError("approval_expired") from exc
             except (ApprovalUnavailableError, InvalidRunTransitionError) as exc:
@@ -507,6 +520,10 @@ class AgentRuns:
             managed = self._copy_for(run_id, owner)
             current = self._owned(run_id, owner)
             if current.status in _TERMINAL:
+                if not managed.driving:
+                    managed.terminal = True
+                    if managed.shell is not None:
+                        managed.shell.close()
                 return current
             managed.loop.cancel(run_id)
             current = self._owned(run_id, owner)
