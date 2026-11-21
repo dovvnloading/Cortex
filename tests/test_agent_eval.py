@@ -145,11 +145,13 @@ def test_new_tasks_pass_in_check_mode(name: str) -> None:
 def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> None:
     repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
     manifest = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
-    # The repository suite discovers test_*.py files. The isolated work copy
-    # explicitly discovers this differently named, still-failing pytest case.
-    assert manifest["tool"]["pytest"]["ini_options"]["python_files"] == ["calculator_cases.py"]
-    assert not list(repo.glob("test_*.py"))
-    assert "assert add(2, 3) == 5" in (repo / "calculator_cases.py").read_text(encoding="utf-8")
+    # Use pytest's default test_*.py collection in the isolated project.
+    # The outer repository suite explicitly excludes its failing fixtures.
+    assert manifest["tool"]["pytest"]["ini_options"] == {"addopts": "-q -p no:cacheprovider"}
+    outer = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "agent_tasks" in outer["tool"]["pytest"]["ini_options"]["norecursedirs"]
+    assert [test.name for test in repo.glob("test_*.py")] == ["test_calculator.py"]
+    assert "assert add(2, 3) == 5" in (repo / "test_calculator.py").read_text(encoding="utf-8")
     assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
 
 

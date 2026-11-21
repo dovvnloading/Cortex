@@ -247,6 +247,101 @@ def test_hostile_checks_use_policy_and_shell_approval(
 
 
 @pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("pyproject.toml", '[tool.pytest]\naddopts = "-q"\nplugins = ["hostile_plugin"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\n'
+         'python_files = ["hostile_plugin.py"]\n'),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\n'
+         'PYTEST_PLUGINS = "hostile_plugin"\n'),
+        ("pytest.ini", "[pytest]\naddopts = -q\npython_files = hostile_plugin.py\n"),
+        ("pytest.ini", "[pytest]\naddopts = -q --rootdir=../outside\n"),
+        ("tox.ini", "[pytest]\naddopts = -q\nrequired_plugins = hostile_plugin\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = -q\nplugins = hostile_plugin\n"),
+    ],
+)
+def test_hostile_pytest_config_invocation_still_requires_approval(
+    isolated: tuple[Path, Path], filename: str, content: str,
+) -> None:
+    root, outside = isolated
+    (root / filename).write_text(content, encoding="utf-8")
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("python -m pytest", "ask"),
+    ]
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        pending = _execute(registry)
+        assert isinstance(pending, NeedsApproval)
+        assert pending.request["tool"] == "run_checks"
+        assert pending.request["network"] is False
+        assert pending.request["command"] == "python -m pytest"
+        assert launcher.starts == []
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+def test_linked_pytest_conftest_is_not_a_safe_omission(
+    isolated: tuple[Path, Path],
+) -> None:
+    root, outside = isolated
+    (root / "pytest.ini").write_text("[pytest]\naddopts = -q\n", encoding="utf-8")
+    target = outside / "hostile_conftest.py"
+    target.write_text("def pytest_sessionstart(session): pass\n", encoding="utf-8")
+    try:
+        (root / "conftest.py").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creating test symlinks is not permitted on this host")
+    assert [check.risk for check in detect_checks(root)] == ["ask"]
+    _assert_unmodified(root, outside)
+
+
+@pytest.mark.parametrize("name", ["pytest.ini", "tox.ini"])
+def test_linked_root_pytest_config_is_not_silently_skipped(
+    isolated: tuple[Path, Path], name: str,
+) -> None:
+    root, outside = isolated
+    target = outside / "opaque-pytest-settings"
+    target.write_text("[pytest]\naddopts = -p hostile_plugin\n", encoding="utf-8")
+    try:
+        (root / name).symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creating test symlinks is not permitted on this host")
+    # Even if the bounded source snapshot omits a linked config, the check
+    # must be offered with approval rather than silently auto-approving.
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("python -m pytest", "ask"),
+    ]
+    _assert_unmodified(root, outside)
+
+
+def test_oversized_pytest_ini_is_not_treated_as_missing_and_safe(
+    isolated: tuple[Path, Path],
+) -> None:
+    root, outside = isolated
+    (root / "pytest.ini").write_bytes(b"[pytest]\naddopts = -q\n" + b"#" * (256 * 1024))
+    assert [check.risk for check in detect_checks(root)] == ["ask"]
+    _assert_unmodified(root, outside)
+
+
+def test_parent_pytest_plugins_variable_not_forwarded_to_sandbox(
+    isolated: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cortex_backend.agent.sandbox.base import child_environment
+
+    root, outside = isolated
+    monkeypatch.setenv("PYTEST_PLUGINS", "hostile_plugin")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p hostile_plugin")
+    child_env = child_environment(root, ())
+    assert "PYTEST_PLUGINS" not in child_env
+    assert "PYTEST_ADDOPTS" not in child_env
+    _assert_unmodified(root, outside)
+
+
+@pytest.mark.parametrize(
     ("hook_path", "hook_body"),
     [
         (

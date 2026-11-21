@@ -207,39 +207,83 @@ def _msbuild_generated_import(root: Path, project_path: str) -> bool:
         return True
 
 
-# Only these options alter pytest presentation/caching, not plugin discovery
-# or test execution. In particular, -p no:cacheprovider *disables* pytest's
-# built-in cache plugin; no other -p option is safe to auto-approve.
+# Only these options change pytest presentation/caching, not plugin discovery.
+# -p no:cacheprovider disables the built-in cache plugin; other -p flags,
+# --rootdir, and --override-ini must not gain approval by prefix matching.
+_PYTEST_CONFIG_NAMES: Final = frozenset({"pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"})
 _SAFE_PYTEST_ADDOPTS: Final = frozenset({"", "-q", "-q -p no:cacheprovider"})
 
 
 def _pytest_options_need_approval(path: str, content: bytes) -> bool:
-    """Fail closed on malformed configs and any unrecognized pytest addopts.
+    """Allow only exact inert addopts, with no other pytest configuration.
 
-    Pytest accepts the same option from TOML and INI, including multiline
-    values. Parse the configured value rather than trusting a single regex
-    line: a continuation, duplicate option or plugin-loading flag must not
-    hide behind a harmless first line.
+    A second key can load plugins or change which Python modules pytest
+    imports (python_files, pythonpath, testpaths, required_plugins, etc.).
+    Both native [tool.pytest] and legacy [tool.pytest.ini_options] are
+    meaningful; malformed or ambiguous configuration must fail closed.
     """
-    name = PurePosixPath(path).name
+    name = PurePosixPath(path).name.casefold()
     try:
         text = content.decode("utf-8-sig")
         if name == "pyproject.toml":
             parsed = tomllib.loads(text)
             tool = parsed.get("tool", {})
-            pytest_config = tool.get("pytest", {}) if isinstance(tool, dict) else None
-            options = pytest_config.get("ini_options", {}) if isinstance(pytest_config, dict) else None
+            if not isinstance(tool, dict):
+                return True
+            pytest_config = tool.get("pytest", {})
+            if not isinstance(pytest_config, dict):
+                return True
+            if "ini_options" in pytest_config:
+                # Mixed native and legacy pytest settings cannot be trusted.
+                if set(pytest_config) != {"ini_options"}:
+                    return True
+                options = pytest_config["ini_options"]
+            else:
+                options = pytest_config
             if not isinstance(options, dict):
                 return True
-            addopts = options.get("addopts", "")
         else:
             parsed_ini = configparser.ConfigParser(interpolation=None, strict=True)
             parsed_ini.read_string(text)
-            section = "pytest" if name == "pytest.ini" else "tool:pytest"
-            addopts = parsed_ini.get(section, "addopts", fallback="")
-    except (configparser.Error, UnicodeError, ValueError):
+            section = "tool:pytest" if name == "setup.cfg" else "pytest"
+            options = dict(parsed_ini.items(section)) if parsed_ini.has_section(section) else {}
+        if set(options) - {"addopts"}:
+            return True
+        addopts = options.get("addopts", "")
+    except (configparser.Error, UnicodeError, ValueError, TypeError):
         return True
     return not (isinstance(addopts, str) and addopts.strip() in _SAFE_PYTEST_ADDOPTS)
+
+
+def _unscanned_pytest_inputs(root: Path, files: dict[str, bytes]) -> bool:
+    """Links/unreadable pytest configs or conftests are not harmless omissions.
+
+    The source snapshot excludes linked/unsafe files. Check only metadata at
+    known in-work-copy directories; never open or follow those entries.
+    """
+    directories = {PurePosixPath(".")}
+    directories.update(PurePosixPath(path).parent for path in files)
+    captured = {path.casefold() for path in files}
+    for directory in directories:
+        parent = root.joinpath(*directory.parts)
+        try:
+            info = parent.lstat()
+        except OSError:
+            return True
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return True
+        for name in (*_PYTEST_CONFIG_NAMES, "conftest.py"):
+            relative = name if str(directory) == "." else f"{directory}/{name}"
+            candidate = parent / name
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+            if _is_reparse(info) or not stat.S_ISREG(info.st_mode) or relative.casefold() not in captured:
+                return True
+    return False
 
 
 def workcopy_fingerprint(root: str | os.PathLike[str]) -> str:
@@ -260,15 +304,24 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     """
     files = _files(root)
     checks: list[DetectedCheck] = []
-    if any(PurePosixPath(p).name in {"pyproject.toml", "pytest.ini", "setup.cfg"} for p in files):
-        # Pytest addopts can load arbitrary plugins; conftest is itself executable.
-        hooks = any(PurePosixPath(p).name == "conftest.py" for p in files)
-        options = any(
-            PurePosixPath(p).name in {"pyproject.toml", "pytest.ini", "setup.cfg"}
+    # The source snapshot intentionally skips linked or unreadable files.
+    # A root-level pytest config/conftest that was skipped still needs to
+    # produce an approval-gated check rather than silently disappearing.
+    root_path = canonical_workcopy(_safe_root(str(Path(root))))
+    has_pytest_files = any(
+        PurePosixPath(p).name.casefold() in _PYTEST_CONFIG_NAMES | {"conftest.py"} for p in files
+    ) or any(
+        _msbuild_file_present(root_path / filename)
+        for filename in _PYTEST_CONFIG_NAMES | {"conftest.py"}
+    )
+    if has_pytest_files:
+        hooks = any(PurePosixPath(p).name.casefold() == "conftest.py" for p in files)
+        opaque = _unscanned_pytest_inputs(root_path, files) or any(
+            PurePosixPath(p).name.casefold() in _PYTEST_CONFIG_NAMES
             and _pytest_options_need_approval(p, body)
             for p, body in files.items()
         )
-        checks.append(DetectedCheck("pytest", "python -m pytest", "ask" if hooks or options else "safe"))
+        checks.append(DetectedCheck("pytest", "python -m pytest", "ask" if hooks or opaque else "safe"))
 
     for path in sorted(files):
         item = PurePosixPath(path)

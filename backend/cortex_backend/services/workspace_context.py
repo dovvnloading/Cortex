@@ -172,7 +172,7 @@ def _permitted_name(name: str, *, directory: bool) -> bool:
         return False
     return Path(lowered).suffix in _SOURCE_SUFFIXES or lowered in {
         "dockerfile", "makefile", "justfile", "license", "agents.md",
-        "pytest.ini", "setup.cfg", "go.mod",
+        "pytest.ini", "tox.ini", "setup.cfg", "go.mod",
     }
 
 
