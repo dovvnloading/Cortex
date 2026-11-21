@@ -300,7 +300,7 @@ def test_imported_msbuild_hooks_cannot_bypass_check_approval(
         '<Project xmlns="urn:msbuild"><Import Project="missing.targets" /></Project>',
         '<Project><UsingTask TaskName="Custom" AssemblyFile="unreadable.dll" /></Project>',
         '<Project><Target Name="Build"><CustomTask /></Target></Project>',
-        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup /></Project>',
+        '<Project Sdk="Untrusted.Custom.Sdk"><PropertyGroup /></Project>',
         '<Project><Import Project="bad" ></Project>',  # Unclosed XML: fail closed.
         '<Project><Import Project="missing.targets"',  # Truncated XML: fail closed.
     ],
@@ -358,6 +358,213 @@ def test_implicit_msbuild_imports_require_approval_even_when_not_snapshotted(
         _assert_unmodified(root, outside)
     finally:
         shell.close()
+
+
+
+@pytest.mark.parametrize("sdk_syntax", [
+    '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+    '<TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
+    '<Project><Sdk Name="Microsoft.NET.Sdk" /><PropertyGroup>'
+    '<TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
+])
+def test_plain_bundled_sdk_check_runs_without_spurious_approval(
+    isolated: tuple[Path, Path], sdk_syntax: str,
+) -> None:
+    root, outside = isolated
+    (root / "Demo.csproj").write_text(sdk_syntax, encoding="utf-8")
+    obj = root / "obj"
+    obj.mkdir()
+    (obj / "unrelated.props").write_text("<Project />", encoding="utf-8")
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("dotnet test 'Demo.csproj'", "safe"),
+    ]
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        result = _execute(registry)
+        assert isinstance(result, ToolResult) and result.success
+        assert json.loads(result.content)["status"] == "passed"
+        assert len(launcher.starts) == 1
+        assert launcher.starts[0][1:] == (root.resolve(), False)
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+@pytest.mark.parametrize(
+    "project_xml",
+    [
+        '<Project Sdk="Untrusted.Custom.Sdk" />',
+        '<Project Sdk="Microsoft.NET.Sdk/1.2.3" />',
+        '<Project><Sdk Name="Untrusted.Custom.Sdk" /></Project>',
+        '<Project><Sdk Name="Microsoft.NET.Sdk" Version="1.0.0" /></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><Import Project="build/*.targets" /></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><Import Project="..\\outside\\hostile.targets" /></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><Import Project="$(Ext)/unsafe.props" /></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+        '<ProjectReference Include="../outside/Hostile.csproj" /></ItemGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+        '<PackageReference Include="Untrusted.Package" Version="1.0" /></ItemGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<PreBuildEvent>powershell -enc SQBFAFgA</PreBuildEvent></PropertyGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<PostBuildEvent>echo hostile</PostBuildEvent></PropertyGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<CustomAfterMicrosoftCommonTargets>../outside/hook.targets</CustomAfterMicrosoftCommonTargets>'
+        '</PropertyGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<DirectoryBuildTargetsPath>../outside/hook.targets</DirectoryBuildTargetsPath>'
+        '</PropertyGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<BuildDependsOn>Exec;$(BuildDependsOn)</BuildDependsOn></PropertyGroup></Project>',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        '<Temp>$([System.IO.File]::ReadAllText("hostile.txt"))</Temp></PropertyGroup></Project>',
+    ],
+)
+def test_msbuild_project_inputs_and_implicit_execution_hooks_require_approval(
+    isolated: tuple[Path, Path], project_xml: str,
+) -> None:
+    root, outside = isolated
+    (root / "Demo.csproj").write_text(project_xml, encoding="utf-8")
+    found = detect_checks(root)
+    assert len(found) == 1 and found[0].risk == "ask"
+    launcher = FakeLauncher()
+    registry, shell = _registry(root, launcher)
+    try:
+        pending = _execute(registry)
+        assert isinstance(pending, NeedsApproval)
+        assert pending.request["tool"] == "run_checks"
+        assert pending.request["network"] is False
+        assert launcher.starts == []
+        _assert_unmodified(root, outside)
+    finally:
+        shell.close()
+
+
+@pytest.mark.parametrize(
+    ("location", "filename"),
+    [
+        ("root", "Directory.Build.props"),
+        ("parent", "Directory.Build.targets"),
+        ("parent", "Directory.Build.rsp"),
+        ("project", "Directory.Build.props"),
+        ("project", "Directory.Build.targets"),
+        ("project", "MSBuild.rsp"),
+        ("project", "obj/Demo.csproj.nuget.g.targets"),
+    ],
+)
+def test_msbuild_imports_in_project_ancestors_and_obj_are_not_trusted(
+    isolated: tuple[Path, Path], location: str, filename: str,
+) -> None:
+    root, outside = isolated
+    project_dir = root / "src" / "nested"
+    project_dir.mkdir(parents=True)
+    (project_dir / "Demo.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8",
+    )
+    parent = {"root": root, "parent": project_dir.parent, "project": project_dir}[location]
+    opaque = parent / filename
+    opaque.parent.mkdir(parents=True, exist_ok=True)
+    # These aren't in the bounded source snapshot, but can be loaded by MSBuild.
+    opaque.write_bytes(b"\xffopaque import content")
+    found = detect_checks(root)
+    assert [(check.command, check.risk) for check in found] == [
+        ("dotnet test 'src/nested/Demo.csproj'", "ask"),
+    ]
+    _assert_unmodified(root, outside)
+
+
+@pytest.mark.parametrize(
+    ("global_json", "risk"),
+    [
+        ({"sdk": {"version": "8.0.100"}}, "safe"),
+        ({"msbuild-sdks": {"Microsoft.NET.Sdk": "1.2.3"}}, "ask"),
+        ({"sdk": {"paths": ["../outside"]}}, "ask"),
+        ("{ malformed", "ask"),
+    ],
+)
+def test_msbuild_sdk_resolution_from_global_json(
+    isolated: tuple[Path, Path], global_json: object, risk: str,
+) -> None:
+    root, outside = isolated
+    (root / "Demo.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8")
+    value = global_json if isinstance(global_json, str) else json.dumps(global_json)
+    (root / "global.json").write_text(value, encoding="utf-8")
+    assert [check.risk for check in detect_checks(root)] == [risk]
+    _assert_unmodified(root, outside)
+
+
+def test_msbuild_unrelated_project_is_not_tainted_by_sibling_hooks(
+    isolated: tuple[Path, Path],
+) -> None:
+    root, outside = isolated
+    (root / "Plain.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8")
+    sibling = root / "hostile"
+    sibling.mkdir()
+    (sibling / "Bad.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8")
+    (sibling / "Directory.Build.props").write_text(
+        '<Project><Target Name="Attack"><Exec Command="attack" /></Target></Project>',
+        encoding="utf-8",
+    )
+    found = {check.key: check.risk for check in detect_checks(root)}
+    assert found == {"dotnet:Plain.csproj": "safe", "dotnet:hostile/Bad.csproj": "ask"}
+    _assert_unmodified(root, outside)
+
+
+@pytest.mark.parametrize("name", ["Demo.fsproj", "Demo.vbproj", "Demo.slnx"])
+def test_supported_msbuild_project_and_solution_formats_detected(
+    isolated: tuple[Path, Path], name: str,
+) -> None:
+    root, outside = isolated
+    contents = ('<Solution><Project Path="Local.csproj" /></Solution>'
+                if name.endswith(".slnx") else '<Project Sdk="Microsoft.NET.Sdk" />')
+    (root / name).write_text(contents, encoding="utf-8")
+    found = detect_checks(root)
+    assert [check.key for check in found] == [f"dotnet:{name}"]
+    assert [check.risk for check in found] == (["ask"] if name.endswith(".slnx") else ["safe"])
+    _assert_unmodified(root, outside)
+
+
+@pytest.mark.parametrize("relative", [
+    "../../outside/Demo.csproj", "../Demo.csproj", "src/../Demo.csproj",
+    "/tmp/Demo.csproj", r"C:\outside\Demo.csproj", r"\\server\share\Demo.csproj",
+])
+def test_msbuild_ancestor_probe_rejects_noncanonical_paths_before_any_io(
+    isolated: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    import os
+
+    root, outside = isolated
+    original_lstat = Path.lstat
+    scanned: list[Path] = []
+
+    def guarded_lstat(path: Path, *args: Any, **kwargs: Any):
+        canonical_lexical = Path(os.path.normpath(str(path)))
+        assert canonical_lexical.is_relative_to(root), "metadata probe escaped work copy"
+        scanned.append(canonical_lexical)
+        return original_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(Path, "lstat", guarded_lstat)
+        assert checks._implicit_msbuild_import(root, relative) is True
+    assert scanned == []
+    _assert_unmodified(root, outside)
+
+
+def test_msbuild_implicit_link_never_read_or_followed(
+    isolated: tuple[Path, Path],
+) -> None:
+    root, outside = isolated
+    target = outside / "linked.targets"
+    target.write_text('<Project><Exec Command="hostile" /></Project>', encoding="utf-8")
+    (root / "Demo.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8")
+    try:
+        (root / "Directory.Build.targets").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creating test symlinks is not permitted on this host")
+    assert [check.risk for check in detect_checks(root)] == ["ask"]
+    _assert_unmodified(root, outside)
 
 
 def test_external_msbuild_import_is_never_resolved_or_read(

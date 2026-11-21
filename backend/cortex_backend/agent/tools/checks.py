@@ -53,14 +53,27 @@ def _files(root: str | os.PathLike[str]) -> dict[str, bytes]:
     return {name: item.contents for name, item in source.items()}
 
 
-def _msbuild_file_has_opaque_hooks(content: bytes) -> bool:
-    """Treat imports and executable targets as opaque, not as trusted commands.
+# Bundled Microsoft.NET.Sdk imports are part of the installed dotnet toolchain.
+# Any other SDK name/version can resolve to arbitrary project-supplied targets.
+_MSBUILD_BUNDLED_SDKS: Final = frozenset({"microsoft.net.sdk"})
+_MSBUILD_OPAQUE_ELEMENTS: Final = frozenset({
+    "import", "importgroup", "usingtask", "exec", "target",
+    "projectreference", "packagereference", "packagedownload",
+})
+_MSBUILD_OPAQUE_PROPERTIES: Final = frozenset({
+    "prebuildevent", "postbuildevent", "prelinkevent",
+    "directorybuildpropspath", "directorybuildtargetspath",
+    "msbuildprojectextensionspath", "baseintermediateoutputpath",
+    "msbuildextensionspath",
+})
 
-    In particular, do not resolve or read an Import's Project attribute:
-    MSBuild permits absolute paths, wildcards and variable expansion, so no
-    external import is allowed to become a source of trusted policy. The
-    import element itself always requires a separately approved check.
-    Malformed XML and implicit SDK imports are approval-gated as well.
+
+def _msbuild_file_has_opaque_hooks(content: bytes) -> bool:
+    """Classify executable/importing MSBuild XML without following any import.
+
+    Built-in SDK syntax is normal for an otherwise plain dotnet project. The
+    standard SDK may still load user-supplied Directory.Build files, generated
+    project extensions and references; those are gated separately.
     """
     try:
         project = ElementTree.fromstring(content)
@@ -68,28 +81,69 @@ def _msbuild_file_has_opaque_hooks(content: bytes) -> bool:
         return True
     if not isinstance(project.tag, str) or project.tag.rsplit("}", 1)[-1].casefold() != "project":
         return True
-    if any(key.casefold() == "sdk" for key in project.attrib):
-        return True
     for element in project.iter():
         if not isinstance(element.tag, str):
             continue
         tag = element.tag.rsplit("}", 1)[-1].casefold()
-        if tag in {"import", "importgroup", "sdk", "usingtask", "exec", "target"}:
-            # Even a custom task without a local UsingTask may be imported
-            # from an SDK or build target. Never auto-run a project Target.
+        if tag == "sdk":
+            # The top-level <Sdk Name="Microsoft.NET.Sdk" /> form is another
+            # spelling of the bundled SDK import, without a custom version.
+            if (element not in project or set(element.attrib) != {"Name"}
+                    or element.attrib["Name"].casefold() not in _MSBUILD_BUNDLED_SDKS):
+                return True
+            continue
+        if (tag in _MSBUILD_OPAQUE_ELEMENTS or tag in _MSBUILD_OPAQUE_PROPERTIES
+                or tag.endswith("dependson")
+                or tag.startswith(("custombefore", "customafter")) and tag.endswith(("props", "targets"))):
+            return True
+        # Project Sdk="Microsoft.NET.Sdk" is an expected toolchain import.
+        # Unknown SDKs, SDKs on other elements and expressions are not.
+        for attribute, value in element.attrib.items():
+            name = attribute.rsplit("}", 1)[-1].casefold()
+            if name == "sdk" and (element is not project or value.casefold() not in _MSBUILD_BUNDLED_SDKS):
+                return True
+            if "$([" in value:
+                return True
+        if element.text and "$([" in element.text:
             return True
     return False
 
 
-def _implicit_msbuild_import(root: Path, project_path: str) -> bool:
-    """Check only ancestor entries *inside* the verified work copy.
+def _msbuild_project_directory(root: Path, project_path: str) -> Path | None:
+    """Reject every non-snapshot path before doing even a metadata lookup."""
+    if (not project_path or "\\" in project_path or ":" in project_path
+            or any(part in {"", ".", ".."} for part in project_path.split("/"))):
+        return None
+    relative = PurePosixPath(project_path)
+    if relative.is_absolute():
+        return None
+    directory = root.joinpath(*relative.parent.parts)
+    return directory if directory.is_relative_to(root) else None
 
-    MSBuild auto-loads Directory.Build.props/targets without an explicit
-    Import. Their contents are excluded from the bounded source snapshot;
-    presence, unreadability or a link is therefore enough to require approval.
-    No imported content is opened, followed or executed by detection.
+
+def _msbuild_file_present(path: Path) -> bool:
+    """Existence, links and unreadability all require approval; never open."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _implicit_msbuild_import(root: Path, project_path: str) -> bool:
+    """Check MSBuild auto-inputs along ancestors inside the work copy only.
+
+    Directory.Build.* searches walk upward from a project and can include
+    response files. MSBuild.rsp may also be read at the project or CLI cwd.
+    We never inspect the contents or follow a link, and never inspect parents
+    outside root. The launcher remains responsible for sandboxing execution.
     """
-    directory = root.joinpath(*PurePosixPath(project_path).parent.parts)
+    directory = _msbuild_project_directory(root, project_path)
+    if directory is None:
+        return True
+    project_dir = directory
     while directory.is_relative_to(root):
         try:
             info = directory.lstat()
@@ -97,19 +151,58 @@ def _implicit_msbuild_import(root: Path, project_path: str) -> bool:
             return True
         if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
             return True
-        for filename in ("Directory.Build.props", "Directory.Build.targets"):
-            try:
-                (directory / filename).lstat()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                return True
-            else:
+        for filename in ("Directory.Build.props", "Directory.Build.targets", "Directory.Build.rsp"):
+            if _msbuild_file_present(directory / filename):
                 return True
         if directory == root:
-            return False
+            break
         directory = directory.parent
-    return True
+    return (_msbuild_file_present(project_dir / "MSBuild.rsp")
+            or _msbuild_file_present(root / "MSBuild.rsp"))
+
+
+def _msbuild_global_sdk_override(root: Path, files: dict[str, bytes]) -> bool:
+    """An unscanned global.json or custom SDK resolution is not a trusted SDK."""
+    if not _msbuild_file_present(root / "global.json"):
+        return False
+    content = files.get("global.json")
+    if content is None:
+        return True
+    try:
+        config = json.loads(content.decode("utf-8-sig"))
+    except (UnicodeError, ValueError):
+        return True
+    if not isinstance(config, dict):
+        return True
+    sdk = config.get("sdk", {})
+    return (not isinstance(sdk, dict) or "paths" in sdk
+            or "msbuild-sdks" in config)
+
+
+def _msbuild_generated_import(root: Path, project_path: str) -> bool:
+    """SDK/MSBuild may glob generated *.props/targets under project obj/."""
+    directory = _msbuild_project_directory(root, project_path)
+    if directory is None:
+        return True
+    extension_dir = directory / "obj"
+    try:
+        info = extension_dir.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        return True
+    prefix = PurePosixPath(project_path).name.casefold() + "."
+    try:
+        with os.scandir(extension_dir) as entries:
+            return any(
+                entry.name.casefold().startswith(prefix)
+                and entry.name.casefold().endswith((".props", ".targets"))
+                for entry in entries
+            )
+    except OSError:
+        return True
 
 
 def workcopy_fingerprint(root: str | os.PathLike[str]) -> str:
@@ -182,21 +275,27 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
             checks.append(DetectedCheck(f"go:{path}", command))
 
     # A solution already contains its projects; do not run every csproj again.
-    solutions = sorted(path for path in files if path.casefold().endswith(".sln"))
-    projects = sorted(path for path in files if path.casefold().endswith(".csproj"))
-    # A solution may reference projects outside the bounded snapshot. As with
-    # explicit imports, do not attempt to resolve their paths. Both get an
-    # approval instead of silently trusting an incomplete view.
+    solutions = sorted(path for path in files if path.casefold().endswith((".sln", ".slnx")))
+    projects = sorted(path for path in files if path.casefold().endswith((".csproj", ".fsproj", ".vbproj")))
     root_path = canonical_workcopy(_safe_root(str(Path(root))))
-    build_hooks = bool(solutions) or any(
-        _msbuild_file_has_opaque_hooks(files[path])
-        or _implicit_msbuild_import(root_path, path)
-        for path in projects
-    )
-    for path in solutions or projects:
-        checks.append(DetectedCheck(
-            f"dotnet:{path}", f"dotnet test {_quoted(path)}", "ask" if build_hooks else "safe",
-        ))
+    if solutions:
+        # A solution can reference projects absent from the bounded snapshot,
+        # and MSBuild can load Directory.Solution.* and solution targets.
+        # Do not parse guessed project paths or treat an incomplete view as safe.
+        for path in solutions:
+            checks.append(DetectedCheck(f"dotnet:{path}", f"dotnet test {_quoted(path)}", "ask"))
+    else:
+        sdk_override = _msbuild_global_sdk_override(root_path, files)
+        for path in projects:
+            opaque = (
+                sdk_override
+                or _msbuild_file_has_opaque_hooks(files[path])
+                or _implicit_msbuild_import(root_path, path)
+                or _msbuild_generated_import(root_path, path)
+            )
+            checks.append(DetectedCheck(
+                f"dotnet:{path}", f"dotnet test {_quoted(path)}", "ask" if opaque else "safe",
+            ))
     return tuple(checks)
 
 
