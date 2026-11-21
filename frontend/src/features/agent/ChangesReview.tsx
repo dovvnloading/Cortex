@@ -79,6 +79,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
   const acceptButtonRef = useRef<HTMLButtonElement>(null);
   const discardButtonRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const undoButtonRef = useRef<HTMLButtonElement>(null);
   const lastConfirmation = useRef<Confirmation["action"] | null>(null);
   const previouslyAccepted = useRef(accepted);
@@ -136,14 +137,16 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
   useLayoutEffect(() => {
     if (accepted && !previouslyAccepted.current) {
       undoButtonRef.current?.focus();
+    } else if (!accepted && previouslyAccepted.current) {
+      (firstCheckboxRef.current ?? discardButtonRef.current)?.focus();
     } else if (confirmation) {
-      confirmButtonRef.current?.focus();
+      (confirmationCurrent ? confirmButtonRef : cancelButtonRef).current?.focus();
     } else if (lastConfirmation.current) {
       (lastConfirmation.current === "accept" ? acceptButtonRef : discardButtonRef).current?.focus();
     }
     lastConfirmation.current = confirmation?.action ?? null;
     previouslyAccepted.current = accepted;
-  }, [accepted, confirmation]);
+  }, [accepted, confirmation, confirmationCurrent]);
 
   const initialFocus = useCallback(() => {
     const active = document.activeElement;
@@ -266,7 +269,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
         {accepted ? (
           <div className="dialog-actions" style={{ marginTop: 20 }}>
             <span role="status" style={{ marginRight: "auto" }}>Changes accepted to the project.</span>
-            <button ref={undoButtonRef} type="button" className="button button-secondary" onClick={onUndo}>
+            <button ref={undoButtonRef} type="button" className="button button-secondary" onClick={() => { setConfirmation(null); onUndo(); }}>
               Undo
             </button>
           </div>
@@ -279,7 +282,7 @@ export function ChangesReview({ summary, changes, onAccept, onDiscard, onUndo, a
             </p>
             {!confirmationCurrent && <p role="alert">Changes or selection changed. Cancel and review again.</p>}
             <div className="dialog-actions" style={{ marginTop: 16 }}>
-              <button type="button" className="button button-secondary" onClick={() => setConfirmation(null)}>
+              <button ref={cancelButtonRef} type="button" className="button button-secondary" onClick={() => setConfirmation(null)}>
                 Cancel
               </button>
               <button
