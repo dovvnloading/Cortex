@@ -14,7 +14,9 @@ import re
 from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from threading import Event
-from typing import Any, cast
+from typing import Any, Literal, cast
+
+ProtocolPath = Literal["native_tools", "constrained_json", "plain_json"]
 
 MAX_ARGUMENT_BYTES = 64 * 1024
 _MAX_CALLS = 32
@@ -421,6 +423,7 @@ def call_model(
     tools: list[ToolSpec],
     options: dict,
     cancellation_event: Event | None = None,
+    protocol_path: ProtocolPath | None = None,
 ) -> ModelTurn:
     """One model request -> validated descriptions of calls; never execution.
 
@@ -431,6 +434,17 @@ def call_model(
     if cancellation_event is not None and cancellation_event.is_set():
         return ModelTurn("", [], "cancelled")
     capabilities = runtime_capabilities(client, model=model) if tools else RuntimeCapabilities()
+    if tools and protocol_path is not None:
+        # A measured model profile may select a less ambitious wire format,
+        # but cannot claim adapter capabilities that are not available now.
+        if protocol_path == "native_tools" and capabilities.native_tools:
+            capabilities = RuntimeCapabilities(native_tools=True)
+        elif protocol_path == "constrained_json" and capabilities.json_schema:
+            capabilities = RuntimeCapabilities(json_schema=True, format_style=capabilities.format_style)
+        elif protocol_path in {"native_tools", "constrained_json", "plain_json"}:
+            capabilities = RuntimeCapabilities()
+        else:
+            raise ValueError("invalid model tool protocol")
     request: dict[str, Any] = {"model": model, "messages": messages, "options": options}
     if cancellation_event is not None:
         request["cancellation_event"] = cancellation_event
