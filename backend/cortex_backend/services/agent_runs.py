@@ -21,7 +21,7 @@ from cortex_backend.agent.loop import AgentLoop, LoopBudgets, LoopResult
 from cortex_backend.agent.protocol import ToolCall, ToolSpec
 from cortex_backend.agent.run_store import (
     AgentRun, AgentRunStore, AgentStep, ApprovalExpiredError,
-    ApprovalUnavailableError, InvalidRunTransitionError, RunStatus,
+    ApprovalUnavailableError, InvalidRunTransitionError,
 )
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
