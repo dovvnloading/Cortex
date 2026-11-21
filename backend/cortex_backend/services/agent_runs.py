@@ -27,6 +27,7 @@ from cortex_backend.agent.run_store import (
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
+from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
@@ -323,6 +324,8 @@ class AgentRuns:
                     mode=mode, model=model, budgets=normalized_budgets, run_id=run_id,
                 )
                 registry = _file_registry(prepared, mode)
+                if mode != "plan_only":
+                    register_git_tools(registry, prepared.path, run_id)
                 providers: Sequence[Callable[[AgentRun], str]] = (
                     lambda _run: build_repo_map(prepared.path, 700),
                     lambda _run: load_project_instructions(prepared.path),
