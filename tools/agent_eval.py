@@ -121,7 +121,7 @@ SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
     ),
     "fix-failing-test": (
         _tool_turn(("read_file", {"path": "calculator.py"}),
-                   ("read_file", {"path": "calculator_cases.py"})),
+                   ("read_file", {"path": "test_calculator.py"})),
         _tool_turn(("edit_file", {
             "path": "calculator.py", "old": "return left - right", "new": "return left + right",
         })),
