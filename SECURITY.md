@@ -83,8 +83,9 @@ the original project. The backend requires a separately confirmed selection
 to accept changed files. It verifies source hashes and saves the original
 bytes in `workspace_checkpoints.sqlite` before writing. Explicit undo or
 restore checks current hashes and refuses unexpected changes. It never
-runs automatically. The Agent page currently has a review placeholder,
-not working accept or undo controls.
+runs automatically. The Agent page exposes reviewed changes, separately
+confirmed acceptance and discard, and confirmed journal-backed undo.
+Historical runs can be reopened and their events replayed.
 
 The Windows AppContainer launcher uses a fresh low-privilege profile. It
 grants write permission only to the work copy. Permitted toolchain folders
