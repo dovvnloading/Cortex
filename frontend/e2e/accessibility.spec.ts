@@ -39,7 +39,7 @@ async function openWorkspace(page: Page, path: string) {
   });
   await page.goto(`${path}#bootstrap=launcher-token`);
   if (path === "/settings") {
-    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
   } else {
     await expect(page.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
   }
