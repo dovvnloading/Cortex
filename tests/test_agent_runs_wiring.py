@@ -313,7 +313,7 @@ def test_live_plan_updates_are_persisted_and_guard_nudges_an_unfinished_plan(tmp
         _await_status(manager, run.id, "completed")
         loop = manager._live[run.id].loop
         assert isinstance(loop, AgentLoop)
-        assert getattr(loop, "_plan_guard_installed") is True
+        assert loop._plan_guard_installed is True
         plans = [step for step in manager._ledger().list_steps(run.id, owner=OWNER) if step.kind == "plan"]
         assert len(plans) == 2
         assert json.loads(str(plans[-1].result["summary"])) == {"items": done}
