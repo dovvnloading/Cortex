@@ -279,50 +279,96 @@ def test_windows_network_off_denies_loopback_and_public_ip(
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
-        script = (
-            "import ctypes,json,select,socket,time\n"
-            "from ctypes import wintypes\n"
-            "kernel=ctypes.WinDLL('kernel32',use_last_error=True)\n"
-            "advapi=ctypes.WinDLL('advapi32',use_last_error=True)\n"
-            "kernel.GetCurrentProcess.restype=wintypes.HANDLE\n"
-            "kernel.CloseHandle.argtypes=[wintypes.HANDLE]\n"
-            "advapi.OpenProcessToken.argtypes=[wintypes.HANDLE,wintypes.DWORD,ctypes.POINTER(wintypes.HANDLE)]\n"
-            "advapi.OpenProcessToken.restype=wintypes.BOOL\n"
-            "advapi.GetTokenInformation.argtypes=[wintypes.HANDLE,ctypes.c_int,wintypes.LPVOID,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]\n"
-            "advapi.GetTokenInformation.restype=wintypes.BOOL\n"
-            "token=wintypes.HANDLE()\n"
-            "assert advapi.OpenProcessToken(kernel.GetCurrentProcess(),8,ctypes.byref(token))\n"
-            "try:\n"
-            "    is_appcontainer=wintypes.DWORD()\n"
-            "    returned=wintypes.DWORD()\n"
-            "    assert advapi.GetTokenInformation(token,29,ctypes.byref(is_appcontainer),ctypes.sizeof(is_appcontainer),ctypes.byref(returned))\n"
-            "    assert returned.value == ctypes.sizeof(is_appcontainer)\n"
-            "finally:\n"
-            "    kernel.CloseHandle(token)\n"
-            "def connect(host,port):\n"
-            "    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:\n"
-            "        sock.setblocking(False)\n"
-            "        error=sock.connect_ex((host,port))\n"
-            "        deadline=time.monotonic()+2.0\n"
-            "        while error in (10035,10036,10037):\n"
-            "            remaining=deadline-time.monotonic()\n"
-            "            if remaining <= 0:\n"
-            "                raise TimeoutError(f'connect to {host}:{port} did not complete')\n"
-            "            _,writable,exceptional=select.select([],[sock],[sock],remaining)\n"
-            "            if not writable and not exceptional:\n"
-            "                raise TimeoutError(f'connect to {host}:{port} did not complete')\n"
-            "            error=sock.getsockopt(socket.SOL_SOCKET,socket.SO_ERROR)\n"
-            "        return error\n"
-            f"print(json.dumps({{'appcontainer': is_appcontainer.value, 'errors': [connect('127.0.0.1',{port}),connect('1.1.1.1',443)]}}))\n"
-        )
+        script = """\
+import json
+import sys
+
+step = "import probe dependencies"
+try:
+    import ctypes
+    from ctypes import wintypes
+    import select
+    import socket
+    import time
+
+    step = "load Windows libraries"
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    step = "configure token bindings"
+    kernel.GetCurrentProcessToken.argtypes = []
+    kernel.GetCurrentProcessToken.restype = wintypes.HANDLE
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetTokenInformation.restype = wintypes.BOOL
+
+    # Windows 8+ token pseudo-handle supplies TOKEN_QUERY without an
+    # additional OpenProcessToken access check in the AppContainer.
+    step = "GetCurrentProcessToken"
+    token = kernel.GetCurrentProcessToken()
+    if not token:
+        raise OSError("GetCurrentProcessToken returned NULL")
+    step = "GetTokenInformation(TokenIsAppContainer)"
+    is_appcontainer = wintypes.DWORD()
+    returned = wintypes.DWORD()
+    if not advapi.GetTokenInformation(
+        token, 29, ctypes.byref(is_appcontainer),
+        ctypes.sizeof(is_appcontainer), ctypes.byref(returned),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if returned.value != ctypes.sizeof(is_appcontainer):
+        raise ValueError(f"TokenIsAppContainer returned {returned.value} bytes")
+    if is_appcontainer.value != 1:
+        raise ValueError(f"TokenIsAppContainer returned {is_appcontainer.value}")
+
+    def connect(host, port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setblocking(False)
+            error = sock.connect_ex((host, port))
+            deadline = time.monotonic() + 2.0
+            while error in (10035, 10036, 10037):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"connect to {host}:{port} did not complete")
+                _, writable, exceptional = select.select([], [sock], [sock], remaining)
+                if not writable and not exceptional:
+                    raise TimeoutError(f"connect to {host}:{port} did not complete")
+                error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return error
+
+    step = "connect(loopback)"
+    loopback_error = connect("127.0.0.1", int(sys.argv[1]))
+    step = "connect(public)"
+    public_error = connect("1.1.1.1", 443)
+    print(json.dumps({
+        "appcontainer": bool(is_appcontainer.value),
+        "errors": [loopback_error, public_error],
+    }), flush=True)
+except BaseException as exc:
+    last_error = getattr(exc, "winerror", None)
+    if last_error is None:
+        last_error = getattr(sys.modules.get("ctypes"), "get_last_error", lambda: 0)()
+    print(json.dumps({"error": {
+        "step": step,
+        "last_error": last_error,
+        "exception": repr(exc),
+    }}), flush=True)
+    sys.exit(1)
+"""
         launcher = AppContainerLauncher(tmp_path, uuid4().hex)
-        output, code = _run(launcher, ["python", "-c", script], tmp_path)
-    assert code == 0
+        output, code = _run(launcher, ["python", "-c", script, str(port)], tmp_path)
+    details = f"child stdout/stderr (merged by launcher): {output!r}"
+    assert code == 0, details
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"invalid probe JSON ({exc}); {details}")
+    assert "error" not in result, details
+    assert result.get("appcontainer") is True, details  # TokenIsAppContainer
     # WSAEACCES, rather than timeout/refused (which could hide a network leak).
-    result = json.loads(output)
-    assert result["appcontainer"] == 1  # GetTokenInformation(TokenIsAppContainer)
-    assert result["errors"] == [10013, 10013]
-    assert launcher.name not in win_appcontainer.list_profiles()
+    assert result.get("errors") == [10013, 10013], details
+    assert launcher.name not in win_appcontainer.list_profiles(), details
 
 
 @windows_only
