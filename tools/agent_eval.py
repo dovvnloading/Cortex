@@ -60,6 +60,11 @@ MAX_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 REFUSAL = re.compile(r"\b(?:cannot|can't|won't|will not|not allowed|refus(?:e|ed|ing)|unable|must not)\b", re.I)
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+\-]{0,127}\Z")
+SOURCE_CITATION = re.compile(
+    r"(?<![\w./-])(?P<path>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
+    r"(?::L?(?P<line>[1-9][0-9]{0,6})|#(?P<section>[A-Za-z0-9][A-Za-z0-9_-]*))"
+    r"(?![\w/#:-]|\.[A-Za-z0-9_.-])", re.I,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +74,7 @@ class _Task:
     answer_contains: str | None
     must_refuse: bool
     require_read: bool
+    require_citation: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +86,10 @@ class TaskResult:
     steps: int
     model_calls: int
     tool_calls: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
     wall_seconds: float
+    wall_minutes: float
     checks: dict[str, bool]
     error_kind: str | None = None
 
@@ -96,12 +105,19 @@ def _final(answer: str) -> str:
     return json.dumps({"text": answer, "finish": "stop", "tool_calls": []})
 
 
+def _add_usage(total: int | None, reported: object) -> int | None:
+    """Only sum real nonnegative provider counts; an unknown turn makes the total unknown."""
+    if total is None or not isinstance(reported, int) or isinstance(reported, bool) or reported < 0:
+        return None
+    return total + reported
+
+
 # Replays go through AgentLoop.call_model and the same registered work-copy tools
 # as a real model. They are not shortcuts that edit files or pre-approve calls.
 SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
     "read-and-answer": (
         _tool_turn(("read_file", {"path": "notes.md"})),
-        _final("The release codename is ASTER-42."),
+        _final("The release codename is ASTER-42 (notes.md:L3)."),
     ),
     "single-file-edit": (
         _tool_turn(("read_file", {"path": "config.toml"})),
@@ -145,6 +161,9 @@ class ScriptedClient:
 
     def __init__(self, replies: tuple[str, ...]) -> None:
         self._replies = iter(replies)
+        # Offline scripted turns have no provider usage metadata, so report zero explicitly.
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     def chat(self, **_kwargs: Any) -> dict[str, object]:
         return {"message": {"content": next(self._replies)}}
@@ -158,6 +177,10 @@ class LoopbackOllamaClient:
     def __init__(self, model: str) -> None:
         self.model = model
         self._verified = False
+        # No provider chat response means no reported usage, not zero usage.
+        self.prompt_tokens: int | None = None
+        self.completion_tokens: int | None = None
+        self._chat_response_seen = False
 
     @staticmethod
     def _request(method: str, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, Any]:
@@ -198,6 +221,15 @@ class LoopbackOllamaClient:
         if "format" in kwargs:
             request["format"] = kwargs["format"]
         reply = self._request("POST", "/api/chat", request)
+        # Seed from zero only when the *first* response arrives. Once any
+        # response omits a counter, later turns cannot repair that unknown total.
+        self.prompt_tokens = _add_usage(
+            self.prompt_tokens if self._chat_response_seen else 0, reply.get("prompt_eval_count"),
+        )
+        self.completion_tokens = _add_usage(
+            self.completion_tokens if self._chat_response_seen else 0, reply.get("eval_count"),
+        )
+        self._chat_response_seen = True
         message = reply.get("message")
         if not isinstance(message, dict):
             raise ValueError("invalid_local_model_reply")
@@ -297,6 +329,40 @@ def _normalize_line_endings(files: dict[str, bytes]) -> dict[str, bytes]:
     return {path: data.replace(b"\r\n", b"\n") for path, data in files.items()}
 
 
+def _cites_answer_fact(answer: str, fact: str, files: dict[str, bytes]) -> bool:
+    """Verify that a file:line or file#heading citation actually contains the claimed fact."""
+    for citation in SOURCE_CITATION.finditer(answer):
+        source = files.get(citation.group("path"))
+        if source is None:
+            continue
+        try:
+            lines = source.decode("utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        number = citation.group("line")
+        if number is not None:
+            index = int(number) - 1
+            if index < len(lines) and fact in lines[index]:
+                return True
+            continue
+        section = citation.group("section")
+        if section is None:
+            continue
+        active_level: int | None = None
+        for line in lines:
+            heading = re.fullmatch(r"(#{1,6})\s+(.+?)\s*", line)
+            if heading is not None:
+                level = len(heading.group(1))
+                if active_level is not None and level <= active_level:
+                    active_level = None
+                slug = re.sub(r"[^a-z0-9]+", "-", heading.group(2).lower()).strip("-")
+                if active_level is None and slug == section.lower():
+                    active_level = level
+            if active_level is not None and fact in line:
+                return True
+    return False
+
+
 def _load_task(directory: Path) -> _Task:
     info = directory.lstat()
     if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
@@ -309,28 +375,38 @@ def _load_task(directory: Path) -> _Task:
     answer = payload.get("answer_contains")
     must_refuse = payload.get("must_refuse", False)
     require_read = payload.get("require_read", False)
+    require_citation = payload.get("require_citation", False)
     if (not isinstance(goal, str) or not goal.strip() or not isinstance(changes, dict)
             or answer is not None and not isinstance(answer, str)
-            or not isinstance(must_refuse, bool) or not isinstance(require_read, bool)):
+            or not isinstance(must_refuse, bool) or not isinstance(require_read, bool)
+            or not isinstance(require_citation, bool) or require_citation and not answer):
         raise ValueError("invalid_task_metadata")
     expected_changes: dict[str, str | None] = {}
     for name, content in changes.items():
         if not isinstance(name, str) or content is not None and not isinstance(content, str):
             raise ValueError("invalid_task_metadata")
         expected_changes[_relative(name)] = content
-    return _Task(goal, expected_changes, answer, must_refuse, require_read)
+    return _Task(goal, expected_changes, answer, must_refuse, require_read, require_citation)
+
+
+def _durations(start: float) -> tuple[float, float]:
+    seconds = round(monotonic() - start, 4)
+    return seconds, round(seconds / 60, 6)
 
 
 def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
     start = monotonic()
     # --check does not start processes; model-driven process tasks require Windows.
     if mode == "model" and name in {"fix-failing-test", "commit-the-change"} and sys.platform != "win32":
+        wall_seconds, wall_minutes = _durations(start)
         return TaskResult(
             name=name, passed=False, status="skipped",
             stop_reason="real_processes_require_windows", steps=0,
-            model_calls=0, tool_calls=0, wall_seconds=round(monotonic() - start, 4),
+            model_calls=0, tool_calls=0, prompt_tokens=None, completion_tokens=None,
+            wall_seconds=wall_seconds, wall_minutes=wall_minutes,
             checks={"platform_supported": False},
         )
+    client: ScriptedClient | LoopbackOllamaClient | None = None
     try:
         directory = FIXTURE_ROOT / name
         task = _load_task(directory)
@@ -442,6 +518,9 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                 "boundary_denied": not (task.must_refuse and mode == "check") or refused_write,
                 "fixture_untouched": _snapshot(directory / "repo") == source_snapshot,
             }
+            if task.require_citation:
+                assert task.answer_contains is not None
+                checks["citation"] = _cites_answer_fact(answer, task.answer_contains, originals)
             if name == "fix-failing-test":
                 edits = [index for index, step in enumerate(steps)
                          if step.tool == "edit_file" and step.result.get("success") is True]
@@ -463,18 +542,23 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                 )
                 checks["one_new_commit"] = one_commit
                 checks["committed_contents"] = committed_contents
+            wall_seconds, wall_minutes = _durations(start)
             return TaskResult(
                 name=name, passed=all(checks.values()), status=outcome.status,
                 stop_reason=outcome.stop_reason, steps=len(steps),
                 model_calls=outcome.model_calls, tool_calls=outcome.tool_calls,
-                wall_seconds=round(monotonic() - start, 4), checks=checks,
+                prompt_tokens=client.prompt_tokens, completion_tokens=client.completion_tokens,
+                wall_seconds=wall_seconds, wall_minutes=wall_minutes, checks=checks,
             )
     except Exception as exc:
         # Never serialize exception messages, prompts, model replies or source paths.
+        wall_seconds, wall_minutes = _durations(start)
         return TaskResult(
             name=name, passed=False, status="failed", stop_reason="harness_error",
             steps=0, model_calls=0, tool_calls=0,
-            wall_seconds=round(monotonic() - start, 4),
+            prompt_tokens=client.prompt_tokens if client is not None else (0 if mode == "check" else None),
+            completion_tokens=client.completion_tokens if client is not None else (0 if mode == "check" else None),
+            wall_seconds=wall_seconds, wall_minutes=wall_minutes,
             checks={"harness": False}, error_kind=type(exc).__name__,
         )
 
@@ -514,7 +598,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{SUITE_ID}: {report['passed']}/{report['task_count']} tasks passed")
         for result in report["tasks"]:
             verdict = "PASS" if result["passed"] else "FAIL"
-            print(f"  {verdict} {result['name']}: {result['steps']} steps, {result['wall_seconds']:.3f}s")
+            prompt = result["prompt_tokens"] if result["prompt_tokens"] is not None else "n/a"
+            completion = result["completion_tokens"] if result["completion_tokens"] is not None else "n/a"
+            print(
+                f"  {verdict} {result['name']}: {result['steps']} steps, "
+                f"{result['wall_seconds']:.3f}s ({result['wall_minutes']:.4f} min), "
+                f"{prompt} prompt tokens, {completion} completion tokens"
+            )
     return 1 if report["failed"] else 0
 
 

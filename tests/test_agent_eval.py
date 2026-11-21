@@ -60,7 +60,7 @@ def test_json_output_reports_steps_and_wall_time(capsys: pytest.CaptureFixture[s
     for task in report["tasks"]:
         assert set(task) == {
             "name", "passed", "status", "stop_reason", "steps", "model_calls", "tool_calls",
-            "wall_seconds", "checks", "error_kind",
+            "prompt_tokens", "completion_tokens", "wall_seconds", "wall_minutes", "checks", "error_kind",
         }
         assert task["status"] == "completed"
         assert task["stop_reason"] == "final_answer"
@@ -68,7 +68,155 @@ def test_json_output_reports_steps_and_wall_time(capsys: pytest.CaptureFixture[s
         assert type(task["model_calls"]) is int and task["model_calls"] >= 2
         assert type(task["tool_calls"]) is int and task["tool_calls"] >= 1
         assert type(task["wall_seconds"]) is float and task["wall_seconds"] >= 0
+        assert type(task["wall_minutes"]) is float and task["wall_minutes"] >= 0
+        assert task["wall_minutes"] == pytest.approx(task["wall_seconds"] / 60, abs=1e-6)
+        assert task["prompt_tokens"] == 0 and task["completion_tokens"] == 0
         assert task["error_kind"] is None
+
+
+def test_human_summary_reports_minutes_and_tokens(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent_eval.main(["--check", "--task", "read-and-answer"]) == 0
+    summary = capsys.readouterr().out
+    assert "read-and-answer:" in summary
+    assert " min)" in summary
+    assert "0 prompt tokens, 0 completion tokens" in summary
+
+
+def test_ollama_uses_only_reported_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = iter([
+        {"message": {"content": "{}"}, "prompt_eval_count": 11, "eval_count": 4},
+        {"message": {"content": "{}"}, "prompt_eval_count": 7, "eval_count": 3},
+        {"message": {"content": "{}"}},
+    ])
+
+    def fake_request(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if endpoint == "/api/tags":
+            return {"models": [{"name": "synthetic:latest"}]}
+        assert endpoint == "/api/chat"
+        return next(replies)
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(fake_request))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    assert client.chat(messages=[], options={}) == {"message": {"content": "{}"}}
+    assert client.chat(messages=[], options={}) == {"message": {"content": "{}"}}
+    assert client.prompt_tokens == 18 and client.completion_tokens == 7
+    client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+
+def test_model_usage_is_unknown_before_any_provider_chat_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_inventory(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        assert endpoint == "/api/tags", "an unavailable model must not trigger a chat request"
+        return {"models": []}
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(unavailable_inventory))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    assert client.prompt_tokens is None and client.completion_tokens is None
+    with pytest.raises(ValueError, match="model_not_installed_locally"):
+        client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+    case = agent_eval.run_suite(mode="model", model="synthetic:latest", task="read-and-answer")["tasks"][0]
+    assert case["passed"] is False
+    assert case["prompt_tokens"] is None and case["completion_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    "usage", [
+        {"prompt_eval_count": True, "eval_count": -1},
+        {"prompt_eval_count": 2.5, "eval_count": "3"},
+    ],
+)
+def test_ollama_invalid_usage_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, usage: dict[str, object],
+) -> None:
+    def fake_request(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if endpoint == "/api/tags":
+            return {"models": [{"name": "synthetic:latest"}]}
+        return {"message": {"content": "{}"}, **usage}
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(fake_request))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+
+@pytest.mark.parametrize("citation", ["notes.md:3", "notes.md#release"])
+def test_read_answer_accepts_grounded_line_or_section(
+    monkeypatch: pytest.MonkeyPatch, citation: str,
+) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final(f"The release codename is ASTER-42 ({citation})."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["citation"] is True
+    assert case["passed"] is True
+
+
+def test_read_answer_rejects_missing_citation(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final("The release codename is ASTER-42."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["read_observed"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
+
+
+@pytest.mark.parametrize("citation", [
+    "notes.md:L1", "notes.md#missing", "../notes.md:L3",
+    "notes.md:L3.extra", "notes.md#release.extra",
+    "notes.md:L3..extra", "notes.md#release..extra",
+])
+def test_read_answer_rejects_unsubstantiated_anchor(
+    monkeypatch: pytest.MonkeyPatch, citation: str,
+) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final(f"The release codename is ASTER-42 ({citation})."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
+
+
+def test_read_answer_rejects_existing_file_without_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "read-and-answer", tmp_path / "read-and-answer")
+    (tmp_path / "read-and-answer" / "repo" / "unrelated.md").write_text(
+        "# Release\n\nNo codename here.\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final("The release codename is ASTER-42 (unrelated.md#release)."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["end_state"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
 
 
 def test_check_never_instantiates_a_local_network_client(monkeypatch: pytest.MonkeyPatch) -> None:
