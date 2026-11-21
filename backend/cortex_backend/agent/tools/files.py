@@ -164,6 +164,17 @@ def _matches_glob(path: str, pattern: str) -> bool:
     return match(0, 0)
 
 
+def _children(folder: Path) -> list[os.DirEntry[str]]:
+    # Do not materialize an unbounded directory before checking scan limits.
+    entries: list[os.DirEntry[str]] = []
+    with os.scandir(folder) as iterator:
+        for item in iterator:
+            if len(entries) >= MAX_SCANNED_ENTRIES:
+                raise FileToolError("scan_limit")
+            entries.append(item)
+    return sorted(entries, key=lambda item: item.name)
+
+
 def _grep_worker(text: str, expression: str, limit: int, connection: Connection) -> None:
     """Only this disposable process runs potentially pathological re.search."""
     try:
@@ -201,6 +212,7 @@ class _Files:
             raise FileToolError("unsafe_path")
 
     def _directory(self, path: str, *, create: bool = False) -> Path:
+        _check_root(self.root, self.identity)
         relative = _directory_name(path)
         cursor = self.root
         for component in relative.split("/") if relative else ():
@@ -312,8 +324,7 @@ class _Files:
             self._check(context)
             location = pending.pop()
             folder = self._directory(location)
-            with os.scandir(folder) as iterator:
-                children = sorted(iterator, key=lambda item: item.name)
+            children = _children(folder)
             for item in children:
                 self._check(context)
                 scanned += 1
@@ -346,8 +357,7 @@ class _Files:
         folder = self._directory(name)
         relative = _directory_name(name)
         entries: list[dict[str, str]] = []
-        with os.scandir(folder) as iterator:
-            children = sorted(iterator, key=lambda item: item.name)
+        children = _children(folder)
         for item in children:
             self._check(context)
             candidate = Path(item.path)
