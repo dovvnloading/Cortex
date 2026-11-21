@@ -391,8 +391,12 @@ describe("ChatPage composer integration", () => {
     });
 
     renderChat(api);
-    expect(await screen.findByText("Read my notes")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry response" })).toBeEnabled();
+    // The saved turn and its Retry action must both be ready after a cold load.
+    await waitFor(() => {
+      const recoveredTurn = screen.getByLabelText("Your message");
+      expect(within(recoveredTurn).getByText("Read my notes")).toBeInTheDocument();
+      expect(within(recoveredTurn).getByRole("button", { name: "Retry response" })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Retry response" }));
 
