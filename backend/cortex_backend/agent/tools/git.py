@@ -3,8 +3,8 @@
 Every Git process is launched through the network-disabled AppContainer. Git's
 configuration is additionally isolated by AppContainerLauncher; repository
 hooks, external diff tools, signing, fsmonitor and configured filters are
-neutralized here. A linked Git worktree is refused because its Git directory
-would be outside the sandbox's writable root.
+neutralized here. Linked worktrees use an isolated local Git directory,
+never the metadata belonging to the original checkout.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import stat
+from threading import RLock
 from typing import Any, Final
 from uuid import uuid4
 
@@ -80,6 +81,9 @@ class _Git:
         if not isinstance(run_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id) is None:
             raise ValueError("invalid run ID")
         self.run_id = run_id
+        self._git_dir = ".git"
+        self._initialization_attempted = False
+        self._lock = RLock()
 
     def _check(self, context: ToolContext) -> None:
         if context.stopped():
@@ -112,7 +116,7 @@ class _Git:
         command is configured for it. Disable every configured local driver;
         system/global config and attributes are suppressed by the launcher.
         """
-        metadata = self.root / ".git"
+        metadata = self.root / self._git_dir
         try:
             info = metadata.lstat()
         except FileNotFoundError:
@@ -175,7 +179,8 @@ class _Git:
 
     def _argv(self, command: list[str]) -> list[str]:
         argv = [
-            "git", "--no-pager", "--no-replace-objects", "--git-dir=.git", "--work-tree=.",
+            "git", "--no-pager", "--no-replace-objects", f"--git-dir={self._git_dir}", "--work-tree=.",
+            "-c", "core.bare=false",
             "-c", "core.hooksPath=", "-c", "core.fsmonitor=false",
             "-c", "commit.gpgSign=false", "-c", "credential.helper=",
             "-c", "diff.external=", "-c", f"core.attributesFile={os.devnull}",
@@ -188,9 +193,55 @@ class _Git:
                 argv.extend(("-c", f"filter.{name}.{suffix}={value}"))
         return [*argv, *command]
 
+    def _ensure_repository(self, context: ToolContext) -> None:
+        """Detach a linked worktree from the source project's object database.
+
+        A Git worktree's .git is a pointer to metadata in the original
+        checkout. Rather than follow it, create a disposable bare Git directory
+        inside this copy and snapshot its current files into a local baseline.
+        """
+        if self._git_dir != ".git":
+            return
+        metadata = self.root / ".git"
+        try:
+            info = metadata.lstat()
+        except FileNotFoundError:
+            raise GitToolError("not_a_repository") from None
+        if _is_reparse(info):
+            raise GitToolError("unsafe_repository")
+        if stat.S_ISDIR(info.st_mode):
+            return
+        if not stat.S_ISREG(info.st_mode) or self._initialization_attempted:
+            raise GitToolError("unsafe_repository")
+        shadow = self.root / ".cortex-agent-git"
+        if shadow.exists() or shadow.is_symlink():
+            raise GitToolError("unsafe_repository")
+        self._initialization_attempted = True
+        self._launch(
+            ["git", "--no-pager", "-c", "core.hooksPath=", "-c", "core.fsmonitor=false",
+             "-c", "commit.gpgSign=false", "init", "--bare", "-q", ".cortex-agent-git"],
+            context,
+        )
+        self._git_dir = ".cortex-agent-git"
+        excluded = shadow / "info" / "exclude"
+        if _is_reparse(excluded.lstat()) or not excluded.is_file():
+            raise GitToolError("unsafe_repository")
+        excluded.write_text(
+            ".cortex-agent-git/\n.cortex-agent-git-home/\n.cortex-agent-tmp/\n",
+            encoding="utf-8",
+        )
+        self._launch(self._argv(["add", "--all", "--", "."]), context)
+        self._launch(self._argv(["commit", "--allow-empty", "--no-gpg-sign", "-m", "Work-copy baseline"]),
+                     context)
+
     def _run(self, command: list[str], context: ToolContext) -> tuple[str, bool]:
+        with self._lock:
+            self._check(context)
+            self._ensure_repository(context)
+            return self._launch(self._argv(command), context)
+
+    def _launch(self, argv: list[str], context: ToolContext) -> tuple[str, bool]:
         self._check(context)
-        argv = self._argv(command)
         # Each invocation owns a separate one-shot AppContainer profile, which
         # the merged launcher deletes after the child and its job exit.
         profile = f"{self.run_id[:32]}-{uuid4().hex[:16]}"
