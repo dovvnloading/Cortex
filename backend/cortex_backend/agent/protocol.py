@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from threading import Event
-from typing import Any
+from typing import Any, cast
 
 MAX_ARGUMENT_BYTES = 64 * 1024
 _MAX_CALLS = 32
@@ -71,7 +71,8 @@ def runtime_capabilities(client: object, *, model: str | None = None) -> Runtime
     if runtime == "routing" and model is not None:
         from cortex_backend.services.chat_client import GGUF_PREFIX, is_cloud_model
 
-        target = getattr(client, "_llamacpp") if model.startswith(GGUF_PREFIX) else getattr(client, "_ollama")
+        routing_client = cast(Any, client)
+        target = routing_client._llamacpp if model.startswith(GGUF_PREFIX) else routing_client._ollama
         if is_cloud_model(model):
             target = getattr(client, "_cloud", None)
         return runtime_capabilities(target, model=model)
