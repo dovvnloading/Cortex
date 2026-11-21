@@ -6,7 +6,9 @@ import { cloudModelProvider, displayModelName } from "../../lib/localModels";
 import { chooseWorkspaceDirectory } from "../../lib/nativeFolderPicker";
 import { NavigationLink } from "../shell/NavigationLink";
 import { ApprovalCard } from "./ApprovalCard";
+import { AgentChangesPanel } from "./AgentChangesPanel";
 import { createAgentApi } from "./agentApi";
+import { RunHistory } from "./RunHistory";
 import { RunTimeline } from "./RunTimeline";
 import { useAgentRun } from "./useAgentRun";
 
@@ -57,6 +59,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
   const [mode, setMode] = useState<StartAgentRun["mode"]>("plan_only");
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [approvalView, setApprovalView] = useState(0);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const availableModels = Array.from(new Set([...localModels, ...cloudModels]));
   const model = availableModels.includes(modelChoice) ? modelChoice
@@ -65,6 +68,15 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
   const active = Boolean(agent.run && !TERMINAL.has(agent.run.status));
   const canStart = Boolean(enabled && goal.trim() && root.trim() && model && folderConsent
     && (!provider || cloudConsent) && !active && !agent.busy);
+
+  const openHistory = (runId: string) => {
+    if (active && agent.run?.id !== runId) {
+      setHistoryError("Stop or finish the current run before opening another run.");
+      return;
+    }
+    setHistoryError(null);
+    void agent.open(runId);
+  };
 
   const chooseFolder = async () => {
     setPickerError(null);
@@ -239,13 +251,18 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           )}
 
           {TERMINAL.has(agent.run.status) && (
-            <section className="coding-panel" aria-label="Changes review placeholder">
-              <h3>Changes review — panel slot</h3>
-              <p className="coding-muted">Review the run's staged changes here before choosing what to accept or discard. This panel is not implemented yet; no changes are applied to the source project from Agent mode.</p>
-            </section>
+            <AgentChangesPanel key={agent.run.id} api={agentApi} runId={agent.run.id} />
           )}
         </section>
       )}
+
+      {historyError && <p role="alert" className="coding-error">{historyError}</p>}
+      <RunHistory
+        api={agentApi}
+        onOpen={openHistory}
+        onDiscarded={(runId) => agent.forget(runId)}
+        refreshKey={agent.run?.id}
+      />
     </div>
   );
 }

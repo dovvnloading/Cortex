@@ -1,9 +1,15 @@
 import type {
+  AgentAcceptedResponse,
+  AgentChangesetResponse,
+  AgentDiscardedResponse,
   AgentRunListResponse,
   AgentRunResponse,
   AgentSSEEvent,
+  AgentUndoneResponse,
+  AcceptAgentChanges,
   DecideAgentApproval,
   StartAgentRun,
+  UndoAgentChanges,
   AddMemoryRequest,
   ChatAttachment,
   ChatAttachmentStageRequest,
@@ -644,6 +650,28 @@ export class CortexApi {
 
   agentRun(runId: string): Promise<AgentRunResponse> {
     return this.request<AgentRunResponse>(`/agent/runs/${encodeURIComponent(runId)}`);
+  }
+
+  agentChangeset(runId: string): Promise<AgentChangesetResponse> {
+    return this.request<AgentChangesetResponse>(`/agent/runs/${encodeURIComponent(runId)}/changeset`);
+  }
+
+  acceptAgentChanges(runId: string, payload: AcceptAgentChanges): Promise<AgentAcceptedResponse> {
+    return this.request<AgentAcceptedResponse>(`/agent/runs/${encodeURIComponent(runId)}/accept`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
+  }
+
+  discardAgentRun(runId: string): Promise<AgentDiscardedResponse> {
+    return this.request<AgentDiscardedResponse>(`/agent/runs/${encodeURIComponent(runId)}/discard`, {
+      method: "POST",
+    });
+  }
+
+  undoAgentChanges(runId: string, payload: UndoAgentChanges): Promise<AgentUndoneResponse> {
+    return this.request<AgentUndoneResponse>(`/agent/runs/${encodeURIComponent(runId)}/undo`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
   }
 
   streamAgentRun(
