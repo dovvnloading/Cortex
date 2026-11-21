@@ -591,7 +591,7 @@ def register_file_tools(
 
     def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
         if require_approval and call.name not in _READ_ONLY_TOOLS and not context.approved:
-            request = {
+            request: dict[str, object] = {
                 "tool": call.name,
                 "summary": "Stage this change in the disposable work copy.",
             }
