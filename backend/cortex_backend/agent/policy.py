@@ -256,6 +256,29 @@ def _beyond_workcopy(argv: tuple[str, ...]) -> bool:
     return any(_PARENT.search(arg) is not None for arg in argv)
 
 
+def _unsafe_recursive_delete_target(target: str) -> bool:
+    """Reject recursive targets outside the work copy or targeting its root."""
+    # ntpath.isabs differs across Python versions for rooted Windows paths.
+    # A drive-relative path (C:foo) is unsafe too: it depends on drive state.
+    if ntpath.splitdrive(target)[0] or target.startswith(("\\", "/")):
+        return True
+    if "$" in target or "%" in target or re.search(r"![^!]+!", target):
+        return True
+
+    parts: list[str] = []
+    for part in re.split(r"[\\/]", target):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return True
+            parts.pop()
+        else:
+            parts.append(part)
+    # A recursive delete of "." or a root-level wildcard can wipe the work copy.
+    return not parts or (len(parts) == 1 and any(char in parts[0] for char in "*?"))
+
+
 def _classify_argv(argv: tuple[str, ...]) -> CommandClass:
     if not argv:
         return "ask"
@@ -275,13 +298,32 @@ def _classify_argv(argv: tuple[str, ...]) -> CommandClass:
         or name in {"python", "python3", "py"} and args[:2] == ("-m", "pip")
     ):
         return "dangerous"
+    safe_recursive_delete = False
     if name in {"rm", "rd", "rmdir", "del", "erase", "remove-item"}:
-        recursive = any(arg in {"-r", "-rf", "-fr", "-recurse", "/s", "/s/q", "/q/s"} for arg in args)
-        if recursive and (_beyond_workcopy(argv) or any(ntpath.isabs(arg) for arg in argv[1:])):
-            return "dangerous"
+        recursive = any(
+            arg in {"/s", "/s/q", "/q/s", "-recurse", "--recursive"}
+            or bool(re.fullmatch(r"-[rfvi]*r[rfvi]*", arg))
+            for arg in args
+        )
+        if recursive:
+            switches = {"-recurse", "--recursive", "-force", "--force", "-path", "-literalpath"}
+            if name in {"rd", "rmdir", "del", "erase"}:
+                switches.update({"/s", "/q", "/s/q", "/q/s", "/f", "/p"})
+            # Check delete targets, not cmd switches such as /s and /q.
+            targets = tuple(
+                arg for arg in args
+                if arg not in switches and arg != "--"
+                and not (arg.startswith("-") and bool(re.fullmatch(r"-[rfvi]+", arg)))
+            )
+            if not targets or any(_unsafe_recursive_delete_target(target) for target in targets):
+                return "dangerous"
+            safe_recursive_delete = True
     if any(_NETWORK_PATH.search(arg) for arg in argv[1:]):
         return "network"
-    if _beyond_workcopy(argv) or any(_ABSOLUTE_PATH.match(arg) for arg in argv[1:]):
+    if (
+        (_beyond_workcopy(argv) and not safe_recursive_delete)
+        or any(_ABSOLUTE_PATH.match(arg) for arg in argv[1:])
+    ):
         return "ask"
     if any("$" in arg or "%" in arg for arg in argv):
         return "ask"
