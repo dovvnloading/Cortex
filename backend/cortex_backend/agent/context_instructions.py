@@ -116,7 +116,7 @@ def _decode_prefix(data: bytes, *, truncated: bool) -> str | None:
 
 def _fit_fence(body: str) -> str:
     rendered = _fence(body)
-    if len(rendered.encode("utf-8")) <= MAX_INSTRUCTION_BYTES:
+    if len(rendered.encode()) <= MAX_INSTRUCTION_BYTES:
         return rendered
     # Replacement of forged fence markers can expand the content. Truncate
     # the *body*, not the completed fence, to keep the closing marker intact.
@@ -125,7 +125,7 @@ def _fit_fence(body: str) -> str:
     while low < high:
         middle = (low + high + 1) // 2
         candidate = _fence(body[:middle] + suffix)
-        if len(candidate.encode("utf-8")) <= MAX_INSTRUCTION_BYTES:
+        if len(candidate.encode()) <= MAX_INSTRUCTION_BYTES:
             low = middle
         else:
             high = middle - 1
@@ -145,8 +145,8 @@ def load_project_instructions(root: str | os.PathLike[str]) -> str:
 
     # Account for metadata and possible per-file truncation notes before any
     # reads; each descriptor can consume no more than its allocated slice.
-    metadata = sum(len(f"File: {name}\n\n[truncated]\n\n".encode("utf-8")) for name, _, _ in candidates)
-    available = max(0, MAX_INSTRUCTION_BYTES - len(_fence("").encode("utf-8")) - metadata - 64)
+    metadata = sum(len(f"File: {name}\n\n[truncated]\n\n".encode()) for name, _, _ in candidates)
+    available = max(0, MAX_INSTRUCTION_BYTES - len(_fence("").encode()) - metadata - 64)
     limits = _allocation([info.st_size for _, _, info in candidates], available)
     sections: list[str] = []
     for (name, path, info), limit in zip(candidates, limits, strict=True):
