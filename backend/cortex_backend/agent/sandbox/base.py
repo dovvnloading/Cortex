@@ -30,6 +30,8 @@ _DEFAULT_LIMITS = JobLimits(
     restrict_ui=True,
 )
 
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
 
 class Process(Protocol):
     pid: int
@@ -178,11 +180,15 @@ def child_environment(
             result["LOCALAPPDATA"] = str(local_appdata_dir)
     return result
 
+class OutputLimitExceeded(RuntimeError):
+    """The child exceeded its bounded output budget; the job was terminated."""
+
+
 class RunningProcess:
     """Drains output without backpressure and always reaps the job and ACLs.
 
-    A watcher owns cleanup even when the caller never calls ``wait``. Bounded
-    output keeps a noisy agent from filling the host's memory indefinitely.
+    A watcher owns cleanup even when the caller never calls ``wait``. The
+    aggregate stdout cap terminates noisy process trees and bounds memory.
     """
 
     def __init__(
@@ -198,6 +204,8 @@ class RunningProcess:
         self._output_done = False
         self._condition = threading.Condition()
         self._chunks: deque[bytes] = deque(maxlen=256)
+        self._output_bytes = 0
+        self._output_limit_exceeded = False
         self._result: int | None = None
         self._killed = False
         self._error: Exception | None = None
@@ -213,8 +221,19 @@ class RunningProcess:
             assert hasattr(stream, "read")
             while chunk := stream.read(8192):
                 with self._condition:
-                    self._chunks.append(chunk)
-                    self._condition.notify_all()
+                    remaining = MAX_OUTPUT_BYTES - self._output_bytes
+                    if remaining:
+                        accepted = chunk[:remaining]
+                        self._chunks.append(accepted)
+                        self._output_bytes += len(accepted)
+                        self._condition.notify_all()
+                    exceeded = len(chunk) > remaining
+                    if exceeded:
+                        self._output_limit_exceeded = True
+                if exceeded:
+                    # Do not wait here: the watcher joins this reader thread.
+                    self._terminate_tree()
+                    break
         except (OSError, ValueError):
             pass  # the job may have been killed while draining
         finally:
@@ -261,11 +280,13 @@ class RunningProcess:
             raise TimeoutError("agent process exceeded its timeout and its tree was killed")
         if self._error is not None:
             raise self._error
+        if self._output_limit_exceeded:
+            raise OutputLimitExceeded("agent process exceeded its output limit and its tree was killed")
         assert self._result is not None
         # A close-triggered job kill may be observed as exit code 0 on Windows.
         return 1 if self._killed and self._result == 0 else self._result
 
-    def kill_tree(self) -> None:
+    def _terminate_tree(self) -> None:
         with self._tree_lock:
             self._killed = True
             try:
@@ -276,6 +297,9 @@ class RunningProcess:
                 self._process.kill()
             except OSError:
                 pass
+
+    def kill_tree(self) -> None:
+        self._terminate_tree()
         if not self._finished.wait(30):
             raise TimeoutError("agent process teardown did not finish")
         if self._error is not None:
