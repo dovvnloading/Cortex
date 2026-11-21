@@ -234,14 +234,14 @@ describe("AgentPage", () => {
     await user.click(within(review).getByRole("button", { name: "Confirm accept" }));
     expect(await screen.findByText("Accepted to the project: app.py")).toBeVisible();
     await waitFor(() => expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(2));
-    expect(within(recovery).getByText(legacyCheckpoint.root)).toBeVisible();
+    expect(await within(recovery).findByText(legacyCheckpoint.root)).toBeVisible();
     expect(within(recovery).queryByText(run.project_root)).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await user.click(screen.getByRole("button", { name: "Confirm undo" }));
     expect(await screen.findByText("Restored original project files: app.py")).toBeVisible();
     await waitFor(() => expect(api.workspaceCheckpoints).toHaveBeenCalledTimes(3));
-    expect(within(recovery).getByText(legacyCheckpoint.root)).toBeVisible();
+    expect(await within(recovery).findByText(legacyCheckpoint.root)).toBeVisible();
     expect(within(recovery).queryByText("No saved recovery checkpoints.")).not.toBeInTheDocument();
   });
 
