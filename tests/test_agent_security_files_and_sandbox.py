@@ -508,7 +508,7 @@ def test_appcontainer_spawn_loop_is_job_limited_and_descendants_killed(
         f"worker_executable={str(worker_executable)!r}; "
         "\nfor _ in range(20):\n"
         " try: subprocess.Popen([worker_executable,'-c',worker],"
-        " stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        " stdin=None,stdout=None,stderr=None)\n"
         " except OSError as exc:\n"
         "  denials.append({'type':type(exc).__name__,'winerror':getattr(exc,'winerror',None),"
         " 'errno':exc.errno})\n"
