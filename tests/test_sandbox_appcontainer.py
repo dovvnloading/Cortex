@@ -1,0 +1,298 @@
+"""Agent AppContainer isolation, restricted launch arguments and cleanup."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import socket
+import subprocess
+import sys
+from uuid import uuid4
+
+import pytest
+
+from cortex_backend.agent.sandbox import AppContainerLauncher, AutoLauncher, UnsandboxedFallbackRequired
+from cortex_backend.agent.sandbox import appcontainer, base
+from cortex_backend.core import win_appcontainer
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="real AppContainer requires Windows")
+
+
+def _run(launcher: AppContainerLauncher, argv: list[str], cwd: Path, *, network: bool = False) -> tuple[str, int]:
+    process = launcher.start(argv, cwd, {"SECRET_ACCESS_TOKEN": "must-not-leak"}, network=network)
+    chunks = list(process.stdout_chunks())
+    return b"".join(chunks).decode("utf-8", "replace").strip(), process.wait(timeout=30)
+
+
+def test_profile_name_rejects_injection(tmp_path: Path):
+    for value in ("a.b", "../foreign", "", "with spaces", "a" * 65):
+        with pytest.raises(ValueError, match="run_id"):
+            AppContainerLauncher(tmp_path, value)
+
+
+def test_environment_is_an_allowlist_and_tool_dirs_are_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    program = tools / "python"
+    program.write_text("#!/bin/sh\nexit 0\n")
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setenv("SECRET_ACCESS_TOKEN", "should-not-be-in-a-child")
+    monkeypatch.setattr(base, "system_directory", lambda: None)
+
+    lookup, folders = base.toolchain()
+    assert lookup == {"python": program}
+    assert folders == (tools,)
+    assert base.command_argv(["python", "-c", "print(1)"], tmp_path, lookup) == [
+        str(program), "-c", "print(1)"
+    ]
+    child = base.child_environment(tmp_path, folders)
+    assert child == {
+        "PATH": str(tools), "TEMP": str(tmp_path / ".cortex-agent-tmp"), "PYTHONUTF8": "1",
+    }
+    assert not any("TOKEN" in key or "SECRET" in key for key in child)
+
+
+def test_workspace_escape_and_unknown_executable_rejected(tmp_path: Path):
+    workcopy = tmp_path / "workcopy"
+    workcopy.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(ValueError, match="escapes"):
+        base.working_directory(outside, workcopy)
+    with pytest.raises(PermissionError, match="allowed PATH tool"):
+        base.command_argv(["unlisted.exe"], workcopy, {})
+    rogue = outside / "tool.exe"
+    rogue.touch()
+    with pytest.raises(PermissionError, match="outside"):
+        base.command_argv([str(rogue)], workcopy, {})
+
+
+def test_only_a_profile_creation_failure_selects_unsandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def refuse(*_args, **_kwargs):
+        raise win_appcontainer.ProfileCreationError("forced failure")
+
+    monkeypatch.setattr(AppContainerLauncher, "start", refuse)
+    launcher = AutoLauncher(tmp_path, "forced-failure")
+    assert launcher.level == "appcontainer"
+    # The initial sandboxed request must not run in the fallback silently.
+    with pytest.raises(UnsandboxedFallbackRequired, match="level=unsandboxed"):
+        launcher.start(["python", "-c", "print(1)"], tmp_path, network=True)
+    assert launcher.level == "unsandboxed"
+    with pytest.raises(PermissionError, match="cannot enforce"):
+        launcher.start(["python", "-c", "print(1)"], tmp_path, network=False)
+
+
+def test_non_profile_failure_never_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("ACL grant failed")
+
+    monkeypatch.setattr(AppContainerLauncher, "start", fail)
+    launcher = AutoLauncher(tmp_path, "acl-failure")
+    with pytest.raises(OSError, match="ACL grant failed"):
+        launcher.start(["python"], tmp_path, network=True)
+    assert launcher.level == "appcontainer"
+
+
+@windows_only
+def test_windows_python_and_cmd_and_profile_are_cleaned(tmp_path: Path):
+    run_id = uuid4().hex
+    launcher = AppContainerLauncher(tmp_path, run_id)
+    output, status = _run(launcher, ["python", "-c", "print('python-ok')"], tmp_path)
+    assert status == 0
+    assert output == "python-ok"
+    assert launcher.name not in win_appcontainer.list_profiles()
+    assert launcher.name not in [p.stem for p in appcontainer._journal_directory().glob("*.json")]
+    sid = win_appcontainer.derive_profile_sid(launcher.name)
+    acl = subprocess.check_output(["icacls", str(tmp_path)], text=True)
+    assert sid not in acl
+
+    cmd = AppContainerLauncher(tmp_path, uuid4().hex)
+    output, status = _run(cmd, ["cmd", "/c", "echo cmd-ok"], tmp_path)
+    assert status == 0
+    assert "cmd-ok" in output
+    assert cmd.name not in win_appcontainer.list_profiles()
+
+
+@windows_only
+def test_windows_appcontainer_cannot_read_or_write_outside_workcopy(tmp_path: Path):
+    workcopy = tmp_path / "work"
+    workcopy.mkdir()
+    private_file = tmp_path / "secret.txt"
+    private_file.write_text("private test fixture")
+    outside_write = tmp_path / "forbidden.txt"
+    script = (
+        "import json, pathlib; "
+        f"src=pathlib.Path({str(private_file)!r}); dst=pathlib.Path({str(outside_write)!r}); "
+        "results=[]; "
+        "\ntry: src.read_text(); results.append('read-ok')"
+        "\nexcept OSError: results.append('read-denied')"
+        "\ntry: dst.write_text('bad'); results.append('write-ok')"
+        "\nexcept OSError: results.append('write-denied')"
+        "\nprint(json.dumps(results))"
+    )
+    launcher = AppContainerLauncher(workcopy, uuid4().hex)
+    output, code = _run(launcher, ["python", "-c", script], workcopy)
+    assert code == 0
+    assert json.loads(output) == ["read-denied", "write-denied"]
+    assert not outside_write.exists()
+    assert launcher.name not in win_appcontainer.list_profiles()
+
+
+@windows_only
+def test_windows_network_off_denies_loopback_and_public_ip(tmp_path: Path):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        script = (
+            "import json,socket\n"
+            "def connect(host, port):\n"
+            "    try:\n"
+            "        s=socket.create_connection((host, port), timeout=2); s.close(); return 'connected'\n"
+            "    except OSError as error: return getattr(error, 'winerror', None) or error.errno\n"
+            f"print(json.dumps([connect('127.0.0.1',{port}), connect('1.1.1.1',443)]))\n"
+        )
+        launcher = AppContainerLauncher(tmp_path, uuid4().hex)
+        output, code = _run(launcher, ["python", "-c", script], tmp_path)
+    assert code == 0
+    # WSAEACCES, rather than timeout/refused (which could hide a network leak).
+    assert json.loads(output) == [10013, 10013]
+    assert launcher.name not in win_appcontainer.list_profiles()
+
+
+@windows_only
+def test_windows_timeout_kills_descendants_and_cleans_profile(tmp_path: Path):
+    marker = tmp_path / "escaped.txt"
+    child_code = f"import time,pathlib;time.sleep(3);pathlib.Path({str(marker)!r}).write_text('bad')"
+    parent_code = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
+        "time.sleep(60)"
+    )
+    launcher = AppContainerLauncher(tmp_path, uuid4().hex)
+    process = launcher.start(["python", "-c", parent_code], tmp_path)
+    with pytest.raises(TimeoutError, match="tree was killed"):
+        process.wait(timeout=1)
+    assert launcher.name not in win_appcontainer.list_profiles()
+    # No child may survive job closure to create the marker after its delay.
+    import time
+    time.sleep(3.5)
+    assert not marker.exists()
+
+
+def _fake_windows_launch(monkeypatch: pytest.MonkeyPatch, workcopy: Path, *, fail_at: str = "") -> list[str]:
+    """Record the containment order without starting Win32 on a Linux dev host."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    events: list[str] = []
+    sid = "S-1-15-2-1-2-3-4-5-6-7"
+    tool_dir = workcopy.parent / "toolchain"
+    tool_dir.mkdir(exist_ok=True)
+    tool = tool_dir / "python.exe"
+    tool.touch()
+    monkeypatch.setattr(appcontainer, "_on_windows", lambda: True)
+    monkeypatch.setattr(appcontainer, "_sweep_once", lambda: None)
+    monkeypatch.setattr(appcontainer, "_creation_gate", nullcontext)
+    monkeypatch.setattr(appcontainer, "toolchain", lambda: ({"python": tool}, (tool_dir,)))
+    monkeypatch.setattr(appcontainer, "child_environment", lambda *_a: {"PATH": str(tool_dir)})
+    monkeypatch.setattr(appcontainer, "system_directory", lambda: None)
+    monkeypatch.setattr(win_appcontainer, "derive_profile_sid", lambda *_a: sid)
+
+    def create(_name: str) -> str:
+        events.append("create-profile")
+        if fail_at == "profile":
+            raise win_appcontainer.ProfileCreationError("forced")
+        return sid
+
+    monkeypatch.setattr(win_appcontainer, "create_profile", create)
+    monkeypatch.setattr(win_appcontainer, "delete_profile", lambda *_a: events.append("delete-profile"))
+
+    class Journal:
+        def __init__(self, _name, _sid, paths):
+            events.append("journal")
+            assert paths == [workcopy, tool_dir]
+
+        def finish(self, *, delete_profile: bool, revoke: bool = True):
+            events.append(f"cleanup:{delete_profile}:{revoke}")
+
+    class Child:
+        pid = 4321
+
+        def resume(self):
+            events.append("resume")
+
+        def kill(self):
+            events.append("kill")
+
+        def wait(self, timeout=None):
+            events.append("wait-child")
+            return 0
+
+        def close(self):
+            events.append("close-child")
+
+    class Job:
+        def __init__(self, limits):
+            events.append("job")
+
+        def assign(self, pid):
+            events.append("assign")
+            assert pid == 4321
+            if fail_at == "assign":
+                raise OSError("assign denied")
+
+        def close(self):
+            events.append("close-job")
+
+    def spawn(*_a, **_kw):
+        events.append("spawn-suspended")
+        if fail_at == "spawn":
+            raise OSError("spawn denied")
+        return Child()
+
+    def grant(path, _sid, *, access):
+        events.append(f"grant-{access}")
+        if fail_at == "grant":
+            raise OSError("grant denied")
+
+    monkeypatch.setattr(appcontainer, "_Journal", Journal)
+    monkeypatch.setattr(appcontainer, "_acl", grant)
+    monkeypatch.setattr(win_appcontainer, "spawn_suspended", spawn)
+    monkeypatch.setattr(appcontainer, "KillOnCloseJob", Job)
+    monkeypatch.setattr(appcontainer, "RunningProcess", lambda *_a: SimpleNamespace(level="appcontainer"))
+    return events
+
+
+def test_mocked_child_is_assigned_to_job_before_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    events = _fake_windows_launch(monkeypatch, tmp_path)
+    launcher = AppContainerLauncher(tmp_path, "ordered")
+    process = launcher.start(["python", "-c", "print(1)"], tmp_path)
+    assert process.level == "appcontainer"
+    assert events == [
+        "journal", "create-profile", "grant-M", "grant-RX", "spawn-suspended",
+        "job", "assign", "resume",
+    ]
+
+
+@pytest.mark.parametrize("stage", ["grant", "spawn", "assign"])
+def test_mocked_failed_start_cannot_leave_a_job_or_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+):
+    events = _fake_windows_launch(monkeypatch, tmp_path, fail_at=stage)
+    with pytest.raises(OSError, match=f"{stage} denied"):
+        AppContainerLauncher(tmp_path, stage).start(["python"], tmp_path)
+    assert "resume" not in events
+    assert "cleanup:True:True" in events
+    assert ("close-job" in events) == (stage == "assign")
+    assert ("kill" in events) == (stage == "assign")
+
+
+def test_profile_creation_failure_is_not_relabelled_as_generic_launch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    events = _fake_windows_launch(monkeypatch, tmp_path, fail_at="profile")
+    with pytest.raises(win_appcontainer.ProfileCreationError):
+        AppContainerLauncher(tmp_path, "missing-profile").start(["python"], tmp_path)
+    assert events == ["journal", "create-profile", "cleanup:False:False"]
