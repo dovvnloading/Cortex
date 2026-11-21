@@ -183,12 +183,17 @@ class AgentRuns:
             raise AgentWorkflowError("agent_unavailable") from exc
 
     def _ledger(self) -> AgentRunStore:
-        if self._store is None:
-            try:
-                self._store = AgentRunStore(self._directory() / "agent" / "runs.sqlite")
-            except Exception as exc:
-                raise AgentWorkflowError("agent_unavailable") from exc
-        return self._store
+        # Initialization can mark previous-process runs interrupted. Make it
+        # exactly once for this app, even under concurrent GET and POST calls.
+        with self._lock:
+            store = self._store
+            if store is None:
+                try:
+                    store = AgentRunStore(self._directory() / "agent" / "runs.sqlite")
+                except Exception as exc:
+                    raise AgentWorkflowError("agent_unavailable") from exc
+                self._store = store
+            return store
 
     def _owned(self, run_id: str, owner: str) -> AgentRun:
         try:
@@ -353,9 +358,10 @@ class AgentRuns:
                     if current.status in _TERMINAL:
                         self._active_id = None
                 except Exception:
-                    # Event delivery is best-effort; failure cannot permit
-                    # concurrent workers or turn a file into an error message.
-                    self._active_id = None
+                    # A failure to read status is NOT proof that a worker has
+                    # finished. Retain the slot, even if this blocks new work,
+                    # rather than accidentally admit two active runs.
+                    pass
                 managed.driving = False
 
     def list_runs(self, *, owner: str) -> list[AgentRun]:
