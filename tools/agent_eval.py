@@ -33,14 +33,16 @@ for directory in (_ROOT, _BACKEND):
         sys.path.insert(0, str(directory))
 
 from cortex_backend.agent.loop import AgentLoop, LoopBudgets  # noqa: E402
-from cortex_backend.agent.protocol import RuntimeCapabilities  # noqa: E402
+from cortex_backend.agent.protocol import RuntimeCapabilities, ToolCall  # noqa: E402
 from cortex_backend.agent.run_store import AgentRunStore  # noqa: E402
-from cortex_backend.agent.tool_registry import ToolRegistry  # noqa: E402
+from cortex_backend.agent.tool_registry import (  # noqa: E402
+    NeedsApproval, ToolContext, ToolRegistry, ToolResult,
+)
 from cortex_backend.agent.tools import (  # noqa: E402
     SHELL_TOOLS, ShellTools, register_file_tools, register_git_tools,
 )
 from cortex_backend.agent.tools import git as git_tools  # noqa: E402
-from cortex_backend.agent.tools.checks import register_check_tools  # noqa: E402
+from cortex_backend.agent.tools.checks import CHECK_TOOL, CheckTools  # noqa: E402
 from tools.agent_eval_replay import (  # noqa: E402
     ReplayCheckLauncher, ReplayGitLauncher, init_git_fixture, verify_git_fixture,
 )
@@ -365,6 +367,7 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
             register_file_tools(registry, workcopy)
             shell: ShellTools | None = None
             replay_checks: ReplayCheckLauncher | None = None
+            auto_pytest_passes: list[bool] = []
             if name == "fix-failing-test":
                 if mode == "check":
                     replay = ReplayCheckLauncher(workcopy, expected["calculator.py"])
@@ -378,7 +381,20 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                     shell = ShellTools(workcopy, run.id, mode="auto_sandboxed")
                 for spec in SHELL_TOOLS:
                     registry.register(spec, shell.handle)
-                register_check_tools(registry, workcopy, shell)
+                project_checks = CheckTools(workcopy, shell)
+
+                def run_tracked_check(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+                    result = project_checks.handle(call, context)
+                    if call.id.startswith("auto-check-") and isinstance(result, ToolResult):
+                        try:
+                            detail = json.loads(result.content)
+                        except ValueError:
+                            detail = None
+                        if isinstance(detail, dict) and detail.get("check") == "pytest":
+                            auto_pytest_passes.append(detail.get("status") == "passed")
+                    return result
+
+                registry.register(CHECK_TOOL, run_tracked_check)
             elif name == "commit-the-change":
                 register_git_tools(registry, workcopy, run.id)
 
@@ -434,7 +450,7 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                     replay_checks.commands == ["python -m pytest"] if replay_checks is not None
                     else bool(pytest_passes)
                 )
-                checks["verify_completed"] = bool(final_hooks) and "1 check passed" in answer
+                checks["verify_completed"] = bool(final_hooks) and auto_pytest_passes == [True]
             elif name == "commit-the-change":
                 assert baseline is not None
                 one_commit, committed_contents = verify_git_fixture(workcopy, baseline, expected)
