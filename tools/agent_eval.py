@@ -2,7 +2,9 @@
 
 Run python tools/agent_eval.py --check --json for deterministic CI replay, or
 python tools/agent_eval.py --model qwen3:8b --json for an already-installed
-local Ollama model served at 127.0.0.1:11434. No downloads, code execution,
+local Ollama model served at 127.0.0.1:11434. --check uses no model,
+network, or child processes. Windows model mode runs checks and Git only inside
+a disposable work copy using the sandboxed launchers. No installs, downloads,
 project checkout, configurable network destinations, or external data sources.
 Each case gets only synthetic fixture bytes, a fresh work copy, and a new ledger.
 """
@@ -365,11 +367,12 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
             replay_checks: ReplayCheckLauncher | None = None
             if name == "fix-failing-test":
                 if mode == "check":
-                    replay_checks = ReplayCheckLauncher(workcopy, expected["calculator.py"])
+                    replay = ReplayCheckLauncher(workcopy, expected["calculator.py"])
+                    replay_checks = replay
                     shell = ShellTools(
                         workcopy, run.id, mode="auto_sandboxed",
-                        launcher_factory=lambda _root, _id: replay_checks,
-                        jobonly_factory=lambda _root: replay_checks,
+                        launcher_factory=lambda _root, _id: replay,
+                        jobonly_factory=lambda _root: replay,
                     )
                 else:
                     shell = ShellTools(workcopy, run.id, mode="auto_sandboxed")
