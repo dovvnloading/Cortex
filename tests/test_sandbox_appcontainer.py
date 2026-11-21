@@ -290,7 +290,7 @@ def test_windows_network_off_denies_loopback_and_public_ip(
             while not stop_monitor.is_set():
                 try:
                     connection, peer = listener.accept()
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 except OSError as exc:
                     accept_errors.append(exc)
