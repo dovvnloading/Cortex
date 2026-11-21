@@ -9,6 +9,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AgentChangesPanel } from "./AgentChangesPanel";
 import { createAgentApi } from "./agentApi";
 import { RunHistory } from "./RunHistory";
+import { SavedRecoveryPanel } from "./SavedRecoveryPanel";
 import { RunTimeline } from "./RunTimeline";
 import { useAgentRun } from "./useAgentRun";
 
@@ -121,6 +122,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           <p>Agent mode is disabled by default. To use it, open Settings, turn on <strong>Enable Agent mode</strong> under General, and save your settings.</p>
           <NavigationLink to="/settings" className="coding-primary">Open Settings</NavigationLink>
         </section>
+        <SavedRecoveryPanel api={api} />
       </div>
     );
   }
@@ -263,6 +265,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         onDiscarded={(runId) => agent.forget(runId)}
         refreshKey={agent.run?.id}
       />
+      <SavedRecoveryPanel api={api} />
     </div>
   );
 }

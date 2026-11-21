@@ -14,6 +14,7 @@ const run: AgentRunResponse = {
 function fakeClient() {
   let journalAvailable = false;
   return {
+    workspaceCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [] }),
     startAgentRun: vi.fn().mockResolvedValue(run),
     agentRuns: vi.fn().mockResolvedValue({ runs: [] }),
     agentRun: vi.fn().mockImplementation(async () => ({
@@ -66,6 +67,7 @@ describe("AgentPage", () => {
     expect(screen.getByRole("link", { name: "Open Settings" })).toHaveAttribute("href", "/settings");
     expect(screen.queryByRole("button", { name: "Start Agent" })).not.toBeInTheDocument();
     expect(api.startAgentRun).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Saved recovery checkpoints" })).toBeInTheDocument();
   });
 
   it("requires consent for the selected project and resets it when the folder changes", async () => {

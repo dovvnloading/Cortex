@@ -13,6 +13,14 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ## [Unreleased]
 
+### Changed
+
+- Retire the separate Project workspace desktop page and navigation. Agent mode
+  now hosts the saved recovery checkpoint list, confirmed restore and explicit
+  discard even when Agent execution is disabled. Old `/workspace` bookmarks
+  lead to Agent mode. Historical journals, checkpoint APIs and the read-only CLI
+  remain available without migration or automatic source writes.
+
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
@@ -45,8 +53,8 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 - Durable, owner-bound source checkpoints are saved to a dedicated private
   SQLite recovery journal **before** applying approved patches; after a crash
-  or restart the Project workspace can list, manually restore or explicitly
-  discard copies. Recovery verifies path and source hashes, never runs by
+  or restart the Agent mode recovery panel can list, manually restore or
+  explicitly discard copies. Recovery verifies path and source hashes, never runs by
   itself, and rejects external modifications or corrupt backups.
 
 - A consented, in-session source refresh lets users inspect failed tests and
