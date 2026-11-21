@@ -341,7 +341,8 @@ class AgentLoop:
                 approved=approved, clock=self.clock,
             ))
         except ToolInterrupted:
-            reason = self._interruption(state) or "tool_interrupted"
+            interruption = self._interruption(state)
+            reason: str = interruption if interruption is not None else "tool_interrupted"
             self.run_store.finish_step(
                 run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "interrupted", "success": False},
             )
@@ -351,12 +352,14 @@ class AgentLoop:
                 run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "error", "success": False},
             )
             return self._stop(run_id, state, "failed", "tool_error")
-        reason = self._interruption(state)
-        if reason is not None:
+        interruption = self._interruption(state)
+        if interruption is not None:
             self.run_store.finish_step(
                 run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "interrupted", "success": False},
             )
-            return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
+            return self._stop(
+                run_id, state, "cancelled" if interruption == "cancelled" else "failed", interruption,
+            )
         if isinstance(outcome, NeedsApproval):
             if approved:
                 self.run_store.finish_step(
