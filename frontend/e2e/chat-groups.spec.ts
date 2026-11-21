@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { expect, test, waitForNewChatComposer } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 const settings = {
@@ -58,6 +58,7 @@ test("loads chat groups successfully and files their chats", async ({ page }) =>
   }]);
 
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await expect(page.getByRole("button", { name: "Collapse Research" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
   await expect(page.getByText("Research")).toBeVisible();
@@ -74,6 +75,7 @@ test("keeps every move destination reachable above the footer in a short drawer"
     json: [{ id: "loose", title: "Loose chat", timestamp: "2026-01-01T00:00:00Z", group_id: null }],
   }));
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await page.getByRole("button", { name: "Show chat history" }).click();
   const trigger = page.getByRole("button", { name: "Move Loose chat to a group" });
   await trigger.focus();
@@ -120,6 +122,7 @@ test("does not let a late initial group response erase a group created while loa
   });
 
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByRole("button", { name: "New group" }).click();
   await page.getByRole("textbox", { name: "Group name" }).fill("Created while loading");
@@ -164,6 +167,7 @@ test("rapid moves persist the final destination even when the earlier PATCH is s
 
   try {
     await page.goto("/#bootstrap=launcher-token");
+    await waitForNewChatComposer(page);
     await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Move Grouped chat to a group" }).focus();
@@ -210,6 +214,7 @@ test("rapid collapse and expand persist the final preference after reload", asyn
 
   try {
     await page.goto("/#bootstrap=launcher-token");
+    await waitForNewChatComposer(page);
     await page.getByRole("button", { name: "Collapse Research" }).click();
     await expect.poll(() => writes).toEqual([true]);
     await page.getByRole("button", { name: "Expand Research" }).click();

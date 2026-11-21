@@ -38,6 +38,11 @@ async function openWorkspace(page: Page, path: string) {
     await route.fulfill({ json: { required_models: [], optional_models: [], installed_models: ["local-chat:7b"], missing_models: [], optional_missing_models: [], models: [{ name: "local-chat:7b" }], connection: { success: true, status: "connected", message: "Connected to local runtime." } } });
   });
   await page.goto(`${path}#bootstrap=launcher-token`);
+  if (path === "/settings") {
+    await expect(page.getByRole("heading", { name: "Settings", level: 2 })).toBeVisible();
+  } else {
+    await expect(page.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
+  }
 }
 
 /** Move focus onto `target` the way a keyboard does, so :focus-visible applies to buttons too. */
