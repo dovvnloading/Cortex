@@ -125,6 +125,13 @@ capability is off by default. A Windows Job Object limits memory, CPU time
 and child processes. Closing the job kills the process tree. AppContainer
 is not a VM or a complete boundary against every host resource.
 
+The Agent sandbox has **no general disk quota**. The Job Object limits
+process count, committed memory and CPU time, but not disk writes. Work-copy
+review and acceptance enforce source-file size limits, so oversized files
+cannot be accepted into the original project. Those checks do not cap disk
+usage during execution: a sandboxed command can fill the available disk
+space by writing inside its disposable work copy until it is stopped.
+
 If AppContainer profile creation fails, the job-only fallback is marked
 **unsandboxed**. A Job Object does not isolate files or network access.
 The fallback cannot enforce a network-off request. It requires fresh,

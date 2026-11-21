@@ -363,6 +363,10 @@ The AppContainer gets an allowlisted environment, not inherited host
 secrets. Network stays off unless explicitly approved for that command.
 If AppContainer is unavailable, the unsandboxed Job Object fallback
 requires fresh approval and cannot enforce network-off execution.
+The Job Object limits process count, committed memory and CPU time but
+provides **no general disk quota**. Source-file size checks at work-copy
+review and acceptance do not prevent a sandboxed command from filling
+available disk space inside the work copy before it is stopped.
 A foreground command can run for at most 120 seconds. Its result keeps
 at most the first and last 4 KiB of output. Live shell output is capped
 at 1 MiB per run. More than 64 MiB of process output kills the process
