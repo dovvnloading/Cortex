@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -269,7 +270,7 @@ def test_unknown_tool_is_not_dispatched_even_in_model_envelope(tmp_path: Path) -
     assert result.stop_reason == "invalid_model_replies" and not calls
     with pytest.raises(UnregisteredToolError):
         _registry(_simple_handler(calls)).execute(
-            ToolCall("call_1", "shell", {}), ToolContext(__import__("threading").Event(), float("inf")),
+            ToolCall("call_1", "shell", {}), ToolContext(Event(), float("inf")),
         )
 
 
