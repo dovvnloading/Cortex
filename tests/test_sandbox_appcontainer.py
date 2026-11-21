@@ -19,10 +19,45 @@ from cortex_backend.core import win_appcontainer
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="real AppContainer requires Windows")
 
 
+def _without_interpreter_realpath_warning(output: str, argv: list[str]) -> str:
+    """Drop the one startup warning newer CPython prints for a staged copy.
+
+    CPython 3.13+/3.14 patch releases resolve ``sys.executable`` with
+    ``CreateFileW`` + ``GetFinalPathNameByHandleW`` at startup and, when that
+    fails inside the AppContainer, write exactly
+    ``Failed to find real location of <exe>`` to stderr (merged into stdout by
+    the launcher) before running the program. Only that exact first line, for
+    the exact staged interpreter, is removed; any other output still reaches
+    the assertions unchanged.
+    """
+    if not argv or argv[0] != "python":
+        return output
+    staged = appcontainer.toolchain()[0].get("python")
+    if staged is None:
+        return output
+    first, newline, rest = output.partition("\n")
+    if first.strip() == f"Failed to find real location of {staged}":
+        return rest.strip() if newline else ""
+    return output
+
+
 def _run(launcher: AppContainerLauncher, argv: list[str], cwd: Path, *, network: bool = False) -> tuple[str, int]:
     process = launcher.start(argv, cwd, {"SECRET_ACCESS_TOKEN": "must-not-leak"}, network=network)
     chunks = list(process.stdout_chunks())
-    return b"".join(chunks).decode("utf-8", "replace").strip(), process.wait(timeout=30)
+    output = b"".join(chunks).decode("utf-8", "replace").strip()
+    return _without_interpreter_realpath_warning(output, argv), process.wait(timeout=30)
+
+
+def test_only_the_exact_staged_realpath_warning_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    staged = tmp_path / "python.exe"
+    monkeypatch.setattr(appcontainer, "toolchain", lambda: ({"python": staged}, (tmp_path,)))
+    warning = f"Failed to find real location of {staged}"
+    assert _without_interpreter_realpath_warning(f"{warning}\r\nok", ["python"]) == "ok"
+    assert _without_interpreter_realpath_warning(warning, ["python"]) == ""
+    other = f"Failed to find real location of {tmp_path / 'other.exe'}\nok"
+    assert _without_interpreter_realpath_warning(other, ["python"]) == other
+    assert _without_interpreter_realpath_warning(f"ok\n{warning}", ["python"]) == f"ok\n{warning}"
+    assert _without_interpreter_realpath_warning(f"{warning}\nok", ["cmd"]) == f"{warning}\nok"
 
 
 def test_profile_name_rejects_injection(tmp_path: Path):
