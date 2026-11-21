@@ -321,17 +321,42 @@ select an approval mode. Each run asks for consent to read and copy eligible
 files from that folder. A cloud model asks separately before sending the
 goal and project context to the named provider.
 
-**Plan only** can read and plan but cannot run shell commands or edit files.
-Shell commands are classified as inspection, build/test, work-copy edits,
-network or package operations, dangerous actions, or unknown commands.
-A command chain uses its most restrictive class. **Ask before every
-command** requires **Allow once** for each non-dangerous command that
-starts a process. **Auto-approve safe commands in the sandbox** skips
-approval only for recognized inspection or build/test commands in a
-verified AppContainer. Edits, network operations and unknown commands
-still need approval. Dangerous commands are refused in all modes.
-File replacements also need **Allow once**, even in auto mode.
-Approvals are one-time and expire. You can deny an action or stop the run.
+Every live Agent run exposes work-copy `list_dir`, `glob`, `grep`
+and `read_file` for bounded file research, `update_plan` for a bounded
+task plan, and `web_fetch` for public HTTP(S) text references. The
+selected mode determines which other tools are registered:
+
+- **Plan only** exposes exactly those six tools. It cannot write, edit,
+  move or delete files, use Git, start shell processes or run project checks.
+- **Ask before every command** additionally exposes work-copy
+  `write_file`, `edit_file`, `delete_file`, `move_file`; local
+  `git_status`, `git_diff`, `git_log`, `git_show`, `git_commit`;
+  `run_command`, `start_background`, `read_background`,
+  `stop_background`; and `run_checks`. Every file mutation,
+  `git_commit`, and non-dangerous command that starts a process requires
+  its own **Allow once** approval.
+- **Auto-approve safe commands in the sandbox** exposes the same tools
+  as Ask. Only recognized inspection and build/test shell commands in a
+  verified AppContainer can skip command approval. Work-copy edits,
+  network or package operations, and unknown shell commands still need
+  approval. All four file mutations and `git_commit` require their own
+  **Allow once** even in auto mode.
+
+Shell commands are classified by risk; a command chain uses its most
+restrictive class. Dangerous commands are refused in both shell-enabled
+modes. `web_fetch` **never auto-approves**: every call, in every mode,
+shows the exact requested URL (including its query) and requires a
+separate **Allow once**. Approvals expire, and you can deny an action
+or stop the run.
+
+`update_plan` records item statuses without executing tasks. If a
+published plan still has unfinished items when the model tries to answer,
+the final-answer guard nudges it once to update the plan, subject to run
+budgets. A recommended per-model capability profile with passing
+single-call, ordered-call and prompt-injection checks selects the
+supported native-tools, constrained-JSON or plain-JSON protocol and
+caps the context budget. Unknown, failing or corrupt profiles use
+conservative plain-JSON and context defaults.
 
 `run_command` starts PowerShell or cmd in the disposable work copy.
 The AppContainer gets an allowlisted environment, not inherited host
@@ -342,6 +367,8 @@ A foreground command can run for at most 120 seconds. Its result keeps
 at most the first and last 4 KiB of output. Live shell output is capped
 at 1 MiB per run. More than 64 MiB of process output kills the process
 tree. A timed-out, cancelled or killed command never reports success.
+In the run timeline, command output is shown as plain text under
+**Command output**, separate from the agent's **Agent response**.
 
 `start_background` runs up to two background processes at once.
 `read_background` returns buffered output and status; `stop_background`
@@ -357,21 +384,56 @@ The final answer reports passed, failed, timed-out or unrun checks.
 It also says when no files changed, no test command was found, approval
 was declined or the run budget was exhausted.
 
-Agent edits stay in a disposable work copy, not the original project. After
-a run, the backend can show a diff, discard the copy, or accept selected
-files with separate confirmation. It checks the original file hashes before
-writing. The Agent page now shows server-backed changes review after completed,
-failed, stopped and interrupted runs. Accepting selected files requires separate
-confirmation; discard and journal-backed undo require confirmation too.
-A completed run does not mean its changes were applied.
+Agent edits stay in a disposable work copy, not the original project.
+When a run completes, fails, is stopped or is interrupted, the Agent page
+shows a server-backed **Review staged changes** panel. Expand the diff for
+each added, modified or deleted file, choose which paths to accept, then
+select **Accept selected to project** and separately **Confirm accept**.
+Only the selected changes are applied to the original project; other staged
+edits remain in the copy. Finishing a run or passing its checks does not
+accept anything automatically. **Discard all** requires confirmation and
+removes the disposable copy without changing the project. You cannot
+accept its remaining edits after discard. Discard does not reverse edits
+that were already accepted.
 
-Before an accepted write, Cortex saves the original bytes in a durable
-checkpoint. Explicit undo or restore checks the project and current file
-hashes before putting those bytes back. It refuses unexpected changes and
-never runs on its own. The Agent page exposes confirmed recovery through
-the owner-scoped journal, even after a disposable copy has been discarded.
-Past runs can be opened to replay their stored event history; resume and
-delete actions retain explicit confirmation and server feedback.
+Before writing selected changes, Cortex verifies the original project's
+source hashes and saves the original bytes, file-existence state and
+expected hashes in an owner-bound recovery checkpoint. An unexpected
+source change or unsafe path refuses acceptance instead of overwriting
+someone else's work.
+
+**Undo** (or **Undo previously accepted changes**) is a separate,
+explicitly confirmed action. It restores the *pre-first-accept* originals
+of files accepted from that run, including removing files that acceptance
+created and recreating files it deleted. It does **not** restore unaccepted
+work-copy edits, unrelated project files, later independent edits, or
+side effects from commands/tests. It is not a general rollback or a
+substitute for Git and backups; filesystem metadata beyond the original
+source bytes is not guaranteed to be restored. The backend checks the
+owner, project identity and current file hashes before restoring; it
+refuses unexpected later modifications, unsafe paths or missing/invalid
+checkpoints instead of overwriting them. An interrupted multi-file
+write or restore can still require manual recovery. Undo never runs
+automatically.
+
+Recovery checkpoints survive a discarded work copy or application
+restart, so confirmed undo remains possible if the checkpoint is intact
+and the original files still pass those checks. They are stored in
+`workspace_checkpoints.sqlite` in Cortex's private per-user data
+directory, separately from the disposable copy and run ledger.
+The journal stores original source bytes as **unencrypted SQLite blobs**,
+with a limit of 32 files per checkpoint and 64 MiB of originals across
+checkpoints; a full or unavailable journal blocks further acceptance.
+Protect and back up the per-user data directory.
+
+**Agent run history** lists previous runs and lets you open one to replay
+its recorded activity. After restarting Cortex, that replay contains
+persisted step and status summaries, not a reconstruction of the full
+live process output or execution context. History's **Resume** and
+**Delete** actions require confirmation and server acknowledgement;
+resuming depends on a still-available in-memory run. Deleting/discarding
+a run's work copy does not undo accepted project changes or erase its
+recovery checkpoint.
 
 Run metadata and step summaries are stored in `agent/runs.sqlite` under
 Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.
@@ -570,10 +632,10 @@ For contributor setup, install `requirements-dev.txt` as described in
 ```
 
 For coding-agent work, read the repository-level [agent operating
-contract](AGENTS.md) first. Cortex's current product boundary is bounded local
-execution: approval-gated code in a restricted Python subset, safe computation,
-and fixed-function image recipes. Nothing here enables arbitrary workspace or
-shell authority.
+contract](AGENTS.md) first. Ordinary chat's execution boundary remains
+approval-gated code in a restricted Python subset, safe computation, and
+fixed-function image recipes. It does not inherit Agent mode's separately
+consented work-copy file, Git, shell, check or web-fetch tools.
 
 The backend also ships a deterministic trajectory evaluator that exercises
 code-proposal admission, validation, bounded repair, cancellation, contextual
