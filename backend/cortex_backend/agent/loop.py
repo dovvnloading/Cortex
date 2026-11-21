@@ -363,13 +363,14 @@ class AgentLoop:
                     run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "denied", "success": False},
                 )
                 return self._stop(run_id, state, "failed", "approval_repeated")
-            state.pending = _Pending(call, step_seq, dict(outcome.request))
+            approval_request = dict(outcome.request)
+            state.pending = _Pending(call, step_seq, approval_request)
             # Fixed metadata only: no raw arguments or approval text in SQLite.
             self.run_store.request_approval(
                 run_id, owner=self.owner, step_seq=step_seq,
                 request={"tool": call.name, "operation": "invoke", "reason": "approval_required"},
             )
-            return self._result(run_id, state, "waiting_approval", None, state.pending.request)
+            return self._result(run_id, state, "waiting_approval", None, approval_request)
         if not isinstance(outcome.content, str):
             self.run_store.finish_step(
                 run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "error", "success": False},
