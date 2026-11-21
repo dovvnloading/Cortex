@@ -4165,7 +4165,7 @@
   "paths": {
     "/api/v1/agent/runs": {
       "get": {
-        "operationId": "list_runs__api_v1_agent_runs_get",
+        "operationId": "list_runs_api_v1_agent_runs_get",
         "responses": {
           "200": {
             "content": {
@@ -4183,10 +4183,10 @@
             "CortexSession": []
           }
         ],
-        "summary": "List runs"
+        "summary": "List Runs"
       },
       "post": {
-        "operationId": "start__api_v1_agent_runs_post",
+        "operationId": "start_api_v1_agent_runs_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4229,7 +4229,7 @@
     },
     "/api/v1/agent/runs/{run_id}": {
       "get": {
-        "operationId": "get_run__api_v1_agent_runs__run_id__get",
+        "operationId": "get_run_api_v1_agent_runs__run_id__get",
         "parameters": [
           {
             "in": "path",
@@ -4268,12 +4268,12 @@
             "CortexSession": []
           }
         ],
-        "summary": "Get run"
+        "summary": "Get Run"
       }
     },
     "/api/v1/agent/runs/{run_id}/accept": {
       "post": {
-        "operationId": "accept__api_v1_agent_runs__run_id__accept_post",
+        "operationId": "accept_api_v1_agent_runs__run_id__accept_post",
         "parameters": [
           {
             "in": "path",
@@ -4327,7 +4327,7 @@
     },
     "/api/v1/agent/runs/{run_id}/approvals/{seq}": {
       "post": {
-        "operationId": "approval__api_v1_agent_runs__run_id__approvals__seq__post",
+        "operationId": "approval_api_v1_agent_runs__run_id__approvals__seq__post",
         "parameters": [
           {
             "in": "path",
@@ -4390,7 +4390,7 @@
     },
     "/api/v1/agent/runs/{run_id}/cancel": {
       "post": {
-        "operationId": "cancel__api_v1_agent_runs__run_id__cancel_post",
+        "operationId": "cancel_api_v1_agent_runs__run_id__cancel_post",
         "parameters": [
           {
             "in": "path",
@@ -4434,7 +4434,7 @@
     },
     "/api/v1/agent/runs/{run_id}/changeset": {
       "get": {
-        "operationId": "changeset__api_v1_agent_runs__run_id__changeset_get",
+        "operationId": "changeset_api_v1_agent_runs__run_id__changeset_get",
         "parameters": [
           {
             "in": "path",
@@ -4478,7 +4478,7 @@
     },
     "/api/v1/agent/runs/{run_id}/discard": {
       "post": {
-        "operationId": "discard__api_v1_agent_runs__run_id__discard_post",
+        "operationId": "discard_api_v1_agent_runs__run_id__discard_post",
         "parameters": [
           {
             "in": "path",
@@ -4522,7 +4522,7 @@
     },
     "/api/v1/agent/runs/{run_id}/events": {
       "get": {
-        "operationId": "events__api_v1_agent_runs__run_id__events_get",
+        "operationId": "events_api_v1_agent_runs__run_id__events_get",
         "parameters": [
           {
             "in": "path",
@@ -4601,7 +4601,7 @@
     },
     "/api/v1/agent/runs/{run_id}/resume": {
       "post": {
-        "operationId": "resume__api_v1_agent_runs__run_id__resume_post",
+        "operationId": "resume_api_v1_agent_runs__run_id__resume_post",
         "parameters": [
           {
             "in": "path",
