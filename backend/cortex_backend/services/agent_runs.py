@@ -28,6 +28,7 @@ from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
 from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
+from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 from cortex_backend.services.chat_client import is_cloud_model
@@ -74,12 +75,13 @@ class _LiveRun:
     next_event_id: int = 1
     last_step_seq: int = 0
     driving: bool = False
+    shell: ShellTools | None = None
+    terminal: bool = False
 
 
 def _file_registry(copy: WorkCopy, mode: str) -> ToolRegistry:
-    """Only bounded text inspection and copy-only replacement are offered.
+    """Offer the legacy bounded file tools; the opted-in shell is added separately.
 
-    No shell, process, network, install or real-project write tool is present.
     Without a verified Windows process sandbox, even auto_sandboxed asks before
     a replacement; model text alone can never grant that approval.
     """
@@ -237,6 +239,9 @@ class AgentRuns:
                     "status": current.status, "stop_reason": current.stop_reason,
                 })
                 if current.status in _TERMINAL:
+                    managed.terminal = True
+                    if managed.shell is not None:
+                        managed.shell.close()
                     self._active_id = None
 
     def _copy_for(self, run_id: str, owner: str) -> _LiveRun:
@@ -273,6 +278,13 @@ class AgentRuns:
                 "summary": step.summary, "tool": step.tool,
             })
             managed.last_step_seq = step.seq
+
+    def _shell_output(self, run_id: str, text: str) -> None:
+        """Forward live process output to this run's ephemeral SSE event stream."""
+        with self._lock:
+            managed = self._live.get(run_id)
+            if managed is not None and not managed.terminal:
+                self._emit(managed, "output", {"text": text})
 
     def _after_tool(self, run_id: str) -> Callable[[AgentStep], None]:
         def publish(_step: AgentStep) -> None:
@@ -312,6 +324,7 @@ class AgentRuns:
             # a second project and start another worker during this operation.
             self._active_id = run_id
             copy: WorkCopy | None = None
+            shell: ShellTools | None = None
             try:
                 prepared = WorkCopy.create(
                     project_root, run_id, confirmed=True, data_dir=directory,
@@ -323,6 +336,11 @@ class AgentRuns:
                     mode=mode, model=model, budgets=normalized_budgets, run_id=run_id,
                 )
                 registry = _file_registry(prepared, mode)
+                if mode != "plan_only":
+                    shell = register_shell_tools(
+                        registry, prepared.path, run_id, mode=mode,
+                        on_output=lambda text: self._shell_output(run_id, text),
+                    )
                 providers: Sequence[Callable[[AgentRun], str]] = (
                     lambda _run: build_repo_map(prepared.path, 700),
                     lambda _run: load_project_instructions(prepared.path),
@@ -332,7 +350,7 @@ class AgentRuns:
                     owner=owner, goal=goal, after_tool=self._after_tool(run_id),
                     context_providers=providers,
                 )
-                managed = _LiveRun(run_id, owner, prepared, loop)
+                managed = _LiveRun(run_id, owner, prepared, loop, shell=shell)
                 self._live[run_id] = managed
                 self._emit(managed, "status", {"status": "pending"})
                 self._submit(managed, resume=False)
@@ -340,6 +358,8 @@ class AgentRuns:
             except Exception:
                 self._active_id = None
                 self._live.pop(run_id, None)
+                if shell is not None:
+                    shell.close()
                 if copy is not None:
                     try:
                         copy.discard()
@@ -399,6 +419,9 @@ class AgentRuns:
                         "status": current.status, "stop_reason": current.stop_reason,
                     })
                     if current.status in _TERMINAL:
+                        managed.terminal = True
+                        if managed.shell is not None:
+                            managed.shell.close()
                         self._active_id = None
                 except Exception as exc:
                     logger.warning("Agent event publishing failed (%s).", type(exc).__name__)
@@ -488,6 +511,9 @@ class AgentRuns:
             managed.loop.cancel(run_id)
             current = self._owned(run_id, owner)
             if current.status in _TERMINAL and not managed.driving:
+                managed.terminal = True
+                if managed.shell is not None:
+                    managed.shell.close()
                 self._emit(managed, "status", {"status": current.status, "stop_reason": current.stop_reason})
                 self._active_id = None
             return current
@@ -508,6 +534,8 @@ class AgentRuns:
             managed = self._copy_for(run_id, owner)
             if self._owned(run_id, owner).status not in _TERMINAL or managed.driving:
                 raise AgentWorkflowError("busy")
+            if managed.shell is not None:
+                managed.shell.close()
             managed.copy.discard()
             self._live.pop(run_id, None)
 
@@ -515,6 +543,9 @@ class AgentRuns:
         with self._lock:
             self._closed = True
             managed = self._live.get(self._active_id) if self._active_id is not None else None
+            shells = [item.shell for item in self._live.values() if item.shell is not None]
+        for shell in shells:
+            shell.close()
         if managed is not None:
             try:
                 managed.loop.cancel(managed.run_id)
