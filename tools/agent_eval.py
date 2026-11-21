@@ -63,7 +63,7 @@ MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+\-]{0,127}\Z")
 SOURCE_CITATION = re.compile(
     r"(?<![\w./-])(?P<path>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
     r"(?::L?(?P<line>[1-9][0-9]{0,6})|#(?P<section>[A-Za-z0-9][A-Za-z0-9_-]*))"
-    r"(?![\w/#:-])", re.I,
+    r"(?![\w/#:-]|\.[A-Za-z0-9_.-])", re.I,
 )
 
 
@@ -177,8 +177,10 @@ class LoopbackOllamaClient:
     def __init__(self, model: str) -> None:
         self.model = model
         self._verified = False
-        self.prompt_tokens: int | None = 0
-        self.completion_tokens: int | None = 0
+        # No provider chat response means no reported usage, not zero usage.
+        self.prompt_tokens: int | None = None
+        self.completion_tokens: int | None = None
+        self._chat_response_seen = False
 
     @staticmethod
     def _request(method: str, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, Any]:
@@ -219,8 +221,15 @@ class LoopbackOllamaClient:
         if "format" in kwargs:
             request["format"] = kwargs["format"]
         reply = self._request("POST", "/api/chat", request)
-        self.prompt_tokens = _add_usage(self.prompt_tokens, reply.get("prompt_eval_count"))
-        self.completion_tokens = _add_usage(self.completion_tokens, reply.get("eval_count"))
+        # Seed from zero only when the *first* response arrives. Once any
+        # response omits a counter, later turns cannot repair that unknown total.
+        self.prompt_tokens = _add_usage(
+            self.prompt_tokens if self._chat_response_seen else 0, reply.get("prompt_eval_count"),
+        )
+        self.completion_tokens = _add_usage(
+            self.completion_tokens if self._chat_response_seen else 0, reply.get("eval_count"),
+        )
+        self._chat_response_seen = True
         message = reply.get("message")
         if not isinstance(message, dict):
             raise ValueError("invalid_local_model_reply")

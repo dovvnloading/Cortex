@@ -104,6 +104,27 @@ def test_ollama_uses_only_reported_token_counts(monkeypatch: pytest.MonkeyPatch)
     assert client.prompt_tokens is None and client.completion_tokens is None
 
 
+def test_model_usage_is_unknown_before_any_provider_chat_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_inventory(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        assert endpoint == "/api/tags", "an unavailable model must not trigger a chat request"
+        return {"models": []}
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(unavailable_inventory))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    assert client.prompt_tokens is None and client.completion_tokens is None
+    with pytest.raises(ValueError, match="model_not_installed_locally"):
+        client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+    case = agent_eval.run_suite(mode="model", model="synthetic:latest", task="read-and-answer")["tasks"][0]
+    assert case["passed"] is False
+    assert case["prompt_tokens"] is None and case["completion_tokens"] is None
+
+
 @pytest.mark.parametrize(
     "usage", [
         {"prompt_eval_count": True, "eval_count": -1},
@@ -155,7 +176,11 @@ def test_read_answer_rejects_missing_citation(monkeypatch: pytest.MonkeyPatch) -
     assert case["passed"] is False
 
 
-@pytest.mark.parametrize("citation", ["notes.md:L1", "notes.md#missing", "../notes.md:L3"])
+@pytest.mark.parametrize("citation", [
+    "notes.md:L1", "notes.md#missing", "../notes.md:L3",
+    "notes.md:L3.extra", "notes.md#release.extra",
+    "notes.md:L3..extra", "notes.md#release..extra",
+])
 def test_read_answer_rejects_unsubstantiated_anchor(
     monkeypatch: pytest.MonkeyPatch, citation: str,
 ) -> None:

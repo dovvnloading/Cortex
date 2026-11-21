@@ -13,6 +13,14 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ## [Unreleased]
 
+### Changed
+
+- The Agent task benchmark reports elapsed minutes and provider-reported prompt
+  and completion tokens per task; unavailable model usage is unknown, while
+  deterministic `--check` explicitly reports zero. Read-and-answer now
+  requires a citation to a file line or Markdown section containing the
+  reported fact (#552).
+
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
