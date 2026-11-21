@@ -155,10 +155,13 @@ even in auto-sandboxed mode. A denied or expired request fetches nothing.
 The helper permits public HTTP(S) GETs only, rejects private addresses,
 revalidates each redirect, and limits responses to supported text types,
 1 MiB, five redirects and ten seconds total. Returned web content is
-untrusted reference data, not instructions. Requested URLs and raw tool
-arguments are not saved in the run ledger.
+untrusted reference data, not instructions. Requested `web_fetch` URLs
+(including query strings) and raw `web_fetch` arguments are not saved
+in the run ledger.
 
 `update_plan` records a bounded task plan, but does not execute it.
+Its item text and statuses are persisted as JSON in the run ledger's
+plan-step `result.summary` field.
 When the latest recorded plan is unfinished, the live-loop final-answer
 guard nudges the model once before completion, within the run budget.
 Only a recommended per-model capability profile that passes single-call,
