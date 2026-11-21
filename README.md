@@ -321,35 +321,35 @@ select an approval mode. Each run asks for consent to read and copy eligible
 files from that folder. A cloud model asks separately before sending the
 goal and project context to the named provider.
 
-Every live Agent run exposes work-copy \`list_dir\`, \`glob\`, \`grep\`
-and \`read_file\` for bounded file research, \`update_plan\` for a visible
-task plan, and \`web_fetch\` for public HTTP(S) text references. The
+Every live Agent run exposes work-copy `list_dir`, `glob`, `grep`
+and `read_file` for bounded file research, `update_plan` for a visible
+task plan, and `web_fetch` for public HTTP(S) text references. The
 selected mode determines which other tools are registered:
 
 - **Plan only** exposes exactly those six tools. It cannot write, edit,
   move or delete files, use Git, start shell processes or run project checks.
 - **Ask before every command** additionally exposes work-copy
-  \`write_file\`, \`edit_file\`, \`delete_file\`, \`move_file\`; local
-  \`git_status\`, \`git_diff\`, \`git_log\`, \`git_show\`, \`git_commit\`;
-  \`run_command\`, \`start_background\`, \`read_background\`,
-  \`stop_background\`; and \`run_checks\`. Every file mutation,
-  \`git_commit\`, and non-dangerous command that starts a process requires
+  `write_file`, `edit_file`, `delete_file`, `move_file`; local
+  `git_status`, `git_diff`, `git_log`, `git_show`, `git_commit`;
+  `run_command`, `start_background`, `read_background`,
+  `stop_background`; and `run_checks`. Every file mutation,
+  `git_commit`, and non-dangerous command that starts a process requires
   its own **Allow once** approval.
 - **Auto-approve safe commands in the sandbox** exposes the same tools
   as Ask. Only recognized inspection and build/test shell commands in a
   verified AppContainer can skip command approval. Work-copy edits,
   network or package operations, and unknown shell commands still need
-  approval. All four file mutations and \`git_commit\` require **Allow
-  once** even in auto mode.
+  approval. All four file mutations and `git_commit` require their own
+  **Allow once** even in auto mode.
 
 Shell commands are classified by risk; a command chain uses its most
 restrictive class. Dangerous commands are refused in both shell-enabled
-modes. \`web_fetch\` **never auto-approves**: every call, in every mode,
+modes. `web_fetch` **never auto-approves**: every call, in every mode,
 shows the exact requested URL (including its query) and requires a
 separate **Allow once**. Approvals expire, and you can deny an action
 or stop the run.
 
-\`update_plan\` records item statuses without executing tasks. If a
+`update_plan` records item statuses without executing tasks. If a
 published plan still has unfinished items when the model tries to answer,
 the final-answer guard nudges it once to update the plan, subject to run
 budgets. A recommended per-model capability profile with passing
