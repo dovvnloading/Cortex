@@ -312,6 +312,74 @@ existing local bearer session. No project grant persists when Cortex closes.
 This is an **unreleased experimental feature** on the development branch, not
 a published desktop release.
 
+### Agent mode
+
+Agent mode is separate from ordinary chat and off by default. Turn on
+**Enable Agent mode** under **Settings > General** and save. On the Agent
+mode page, enter a goal, choose a trusted project folder and model, and
+select an approval mode. Each run asks for consent to read and copy eligible
+files from that folder. A cloud model asks separately before sending the
+goal and project context to the named provider.
+
+**Plan only** can read and plan but cannot run shell commands or edit files.
+Shell commands are classified as inspection, build/test, work-copy edits,
+network or package operations, dangerous actions, or unknown commands.
+A command chain uses its most restrictive class. **Ask before every
+command** requires **Allow once** for each non-dangerous command that
+starts a process. **Auto-approve safe commands in the sandbox** skips
+approval only for recognized inspection or build/test commands in a
+verified AppContainer. Edits, network operations and unknown commands
+still need approval. Dangerous commands are refused in all modes.
+File replacements also need **Allow once**, even in auto mode.
+Approvals are one-time and expire. You can deny an action or stop the run.
+
+`run_command` starts PowerShell or cmd in the disposable work copy.
+The AppContainer gets an allowlisted environment, not inherited host
+secrets. Network stays off unless explicitly approved for that command.
+If AppContainer is unavailable, the unsandboxed Job Object fallback
+requires fresh approval and cannot enforce network-off execution.
+A foreground command can run for at most 120 seconds. Its result keeps
+at most the first and last 4 KiB of output. Live shell output is capped
+at 1 MiB per run. More than 64 MiB of process output kills the process
+tree. A timed-out, cancelled or killed command never reports success.
+
+`start_background` runs up to two background processes at once.
+`read_background` returns buffered output and status; `stop_background`
+kills the process tree. Unread background output retains its last 8 KiB.
+All remaining processes are killed when the run ends.
+
+Before the final answer, if work-copy files changed, Agent mode detects
+pytest, npm test/lint/build/typecheck scripts, Cargo, Go and .NET checks.
+It runs them through the same shell policy, approval and sandbox path,
+with network disabled and a 60-second timeout. Failures can prompt
+at most three repair-and-recheck rounds, subject to run budgets.
+The final answer reports passed, failed, timed-out or unrun checks.
+It also says when no files changed, no test command was found, approval
+was declined or the run budget was exhausted.
+
+Agent edits stay in a disposable work copy, not the original project. After
+a run, the backend can show a diff, discard the copy, or accept selected
+files with separate confirmation. It checks the original file hashes before
+writing. The Agent page now shows server-backed changes review after completed,
+failed, stopped and interrupted runs. Accepting selected files requires separate
+confirmation; discard and journal-backed undo require confirmation too.
+A completed run does not mean its changes were applied.
+
+Before an accepted write, Cortex saves the original bytes in a durable
+checkpoint. Explicit undo or restore checks the project and current file
+hashes before putting those bytes back. It refuses unexpected changes and
+never runs on its own. The Agent page exposes confirmed recovery through
+the owner-scoped journal, even after a disposable copy has been discarded.
+Past runs can be opened to replay their stored event history; resume and
+delete actions retain explicit confirmation and server feedback.
+
+Run metadata and step summaries are stored in `agent/runs.sqlite` under
+Cortex's per-user data directory. Copies are in `agent_workcopies/<run-id>/`.
+Recovery checkpoints are in `workspace_checkpoints.sqlite`. Diagnostic
+logs use `logs/cortex.log` and `startup.log`. Raw goals, model replies,
+tool output and pending approval details are not stored in the run ledger.
+See [SECURITY.md](SECURITY.md) for the process and network limits.
+
 ### Experimental read-only repository research (CLI)
 
 The first **read-only** slice of that workspace direction is available to

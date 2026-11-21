@@ -1,7 +1,7 @@
 """Deterministic, disposable artifact-boundary security qualification.
 
-The review corpus exercises the trusted copy-in and output-publication boundary
-with fixed bytes and temporary files only.  It accepts no user/model input, never
+The review corpus exercises the execution artifact and consent-gated agent
+work-copy boundaries with fixed bytes and temporary files only.  It accepts no user/model input, never
 executes a file, and reports stable case names/categories rather than paths or
 operating-system details.  A missing Windows link primitive is a blocked release
 gate, not a silent pass.
@@ -22,6 +22,8 @@ from hashlib import sha256
 import inspect
 import json
 from pathlib import Path
+from threading import Event
+from time import monotonic
 import sys
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -41,6 +43,10 @@ from cortex_backend.execution.repository import (  # noqa: E402
     ExecutionRepository,
     ExecutionRepositoryError,
 )
+from cortex_backend.agent.protocol import ToolCall  # noqa: E402
+from cortex_backend.agent.tool_registry import ToolContext, ToolRegistry, ToolResult  # noqa: E402
+from cortex_backend.agent.tools.files import register_file_tools  # noqa: E402
+from cortex_backend.agent.workcopy import WorkCopy, WorkCopyError, create as create_workcopy  # noqa: E402
 
 
 _OWNER = "review-owner"
@@ -268,6 +274,254 @@ def _case_repository_size_integrity(root: Path, repository: ExecutionRepository,
     raise _ReviewFailure("database_size_tamper_accepted")
 
 
+# Fixed source-only bytes; every path below is created beneath run_review's temporary root.
+_AGENT_ORIGINAL = b"first\r\nsecond\n"
+_AGENT_UPDATED = b"changed\n"
+_AGENT_DELETED = b"deleted\r\nwithout-final-newline"
+_AGENT_ADDED = b"new\r\nfile\n"
+_AGENT_OUTSIDE = b"outside\r\nuntouched"
+
+
+def _agent_workcopy(root: Path) -> WorkCopy:
+    project = root / "agent-project"
+    project.mkdir()
+    (project / "source.py").write_bytes(_AGENT_ORIGINAL)
+    (project / "deleted.py").write_bytes(_AGENT_DELETED)
+    return create_workcopy(project, "review", confirmed=True, data_dir=root / "agent-data")
+
+
+def _file_result(root: Path, name: str, **arguments: object) -> ToolResult:
+    registry = ToolRegistry()
+    register_file_tools(registry, root)
+    result = registry.execute(
+        ToolCall("review-file-call", name, arguments),
+        ToolContext(Event(), monotonic() + 30),
+    )
+    if not isinstance(result, ToolResult):
+        raise _ReviewFailure("invalid_tool_result")
+    return result
+
+
+def _expect_file_error(expected: str, root: Path, name: str, **arguments: object) -> None:
+    result = _file_result(root, name, **arguments)
+    if result.success:
+        raise _ReviewFailure(f"accepted:{expected}")
+    try:
+        data = json.loads(result.content)
+    except (ValueError, TypeError):
+        raise _ReviewFailure("invalid_tool_result") from None
+    if data != {"error": expected}:
+        raise _ReviewFailure(f"wrong_category:{expected}")
+
+
+def _expect_workcopy_error(expected: str, action: Callable[[], object]) -> None:
+    try:
+        action()
+    except WorkCopyError as error:
+        if error.code != expected:
+            raise _ReviewFailure(f"wrong_category:{expected}:{error.code}") from None
+    else:
+        raise _ReviewFailure(f"accepted:{expected}")
+
+
+def _agent_bad_file_path(root: Path, bad_path: str) -> None:
+    work = _agent_workcopy(root)
+    # A single refusal suffices; avoid scanning or dispatching a grep worker.
+    _expect_file_error("invalid_path", work.path, "write_file", path=bad_path, content="changed\n")
+    if (work.path / "source.py").read_bytes() != _AGENT_ORIGINAL:
+        raise _ReviewFailure("copy_bytes_changed")
+    if (work.project_root / "source.py").read_bytes() != _AGENT_ORIGINAL:
+        raise _ReviewFailure("project_bytes_changed")
+
+
+def _case_agent_file_backslash_parent(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, r"..\escape.py")
+
+
+def _case_agent_file_absolute(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, str(root / "absolute.py"))
+
+
+def _case_agent_file_unc(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    # Only a rejected string: the review never attempts to resolve this network path.
+    _agent_bad_file_path(root, r"\\review-host\share\escape.py")
+
+
+def _case_agent_file_drive_relative(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "C:escape.py")
+
+
+def _case_agent_file_device_con(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "CON.py")
+
+
+def _case_agent_file_device_nul(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "NUL.py")
+
+
+def _case_agent_file_device_com1(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "COM1.py")
+
+
+def _case_agent_file_device_aux(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "AUX.py")
+
+
+def _case_agent_file_ads(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    _agent_bad_file_path(root, "file.txt:stream")
+
+
+def _case_agent_file_symlink(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    work = _agent_workcopy(root)
+    outside = root / "outside.py"
+    outside.write_bytes(_AGENT_OUTSIDE)
+    try:
+        (work.path / "linked.py").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        raise _BlockedCapability("symlink_unavailable") from None
+    _expect_file_error("unsafe_path", work.path, "write_file", path="linked.py", content="changed\n")
+    _expect_file_error("unsafe_path", work.path, "read_file", path="linked.py")
+    if work.changeset() != {}:
+        raise _ReviewFailure("linked_file_in_changeset")
+    work.discard()
+    if outside.read_bytes() != _AGENT_OUTSIDE:
+        raise _ReviewFailure("outside_bytes_changed")
+
+
+def _junction_primitive(link: Path, target: Path) -> None:
+    if sys.platform != "win32":
+        # POSIX's directory symlink exercises the same no-follow boundary.
+        link.symlink_to(target, target_is_directory=True)
+        return
+
+    # Create an actual Windows mount-point junction without starting cmd.exe.
+    import ctypes
+    from ctypes import wintypes
+    import struct
+
+    link.mkdir()
+    substitute = ("\\??\\" + str(target)).encode("utf-16le")
+    display = str(target).encode("utf-16le")
+    names = substitute + b"\x00\x00" + display + b"\x00\x00"
+    data = struct.pack(
+        "<IHHHHHH", 0xA0000003, 8 + len(names), 0,
+        0, len(substitute), len(substitute) + 2, len(display),
+    ) + names
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(str(link), 0x40000000, 7, None, 3, 0x02200000, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise OSError("junction primitive unavailable")
+    try:
+        kernel32.DeviceIoControl.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+        )
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        buffer = ctypes.create_string_buffer(data)
+        written = wintypes.DWORD(0)
+        if not kernel32.DeviceIoControl(
+            handle, 0x000900A4, buffer, len(data), None, 0,
+            ctypes.byref(written), None,
+        ):
+            raise OSError("junction primitive unavailable")
+    finally:
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(handle)
+
+
+def _make_directory_junction(link: Path, target: Path) -> None:
+    try:
+        _junction_primitive(link, target)
+    except (OSError, NotImplementedError, AttributeError):
+        raise _BlockedCapability("junction_unavailable") from None
+
+
+def _case_agent_file_junction(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    work = _agent_workcopy(root)
+    outside = root / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_bytes(_AGENT_OUTSIDE)
+    _make_directory_junction(work.path / "linked", outside)
+    _expect_file_error("unsafe_path", work.path, "read_file", path="linked/secret.py")
+    _expect_file_error("unsafe_path", work.path, "write_file", path="linked/new.py", content="changed\n")
+    _expect_file_error("unsafe_path", work.path, "list_dir", path="linked")
+    if work.changeset() != {}:
+        raise _ReviewFailure("junction_in_changeset")
+    work.discard()
+    if (outside / "secret.py").read_bytes() != _AGENT_OUTSIDE or (outside / "new.py").exists():
+        raise _ReviewFailure("outside_bytes_changed")
+
+
+def _case_agent_accept_root_binding(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    work = _agent_workcopy(root)
+    (work.path / "source.py").write_bytes(_AGENT_UPDATED)
+    if set(work.changeset()) != {"source.py"}:
+        raise _ReviewFailure("changeset_missing")
+    original_root = work.project_root
+    another_root = root / "other-project"
+    another_root.mkdir()
+    (another_root / "source.py").write_bytes(_AGENT_ORIGINAL)
+    # A work copy may never be rebound to a second project after creation.
+    work.project_root = another_root
+    _expect_workcopy_error("stale_root", lambda: work.accept(["source.py"], confirmed=True))
+    if (another_root / "source.py").read_bytes() != _AGENT_ORIGINAL:
+        raise _ReviewFailure("other_root_changed")
+    if (original_root / "source.py").read_bytes() != _AGENT_ORIGINAL:
+        raise _ReviewFailure("original_root_changed")
+
+
+def _case_agent_accept_link_swap(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    work = _agent_workcopy(root)
+    (work.path / "source.py").write_bytes(_AGENT_UPDATED)
+    if set(work.changeset()) != {"source.py"}:
+        raise _ReviewFailure("changeset_missing")
+    outside = root / "outside.py"
+    # Matching original bytes force the acceptance guard to check file identity,
+    # rather than accidentally passing merely because the contents differ.
+    outside.write_bytes(_AGENT_ORIGINAL)
+    target = work.project_root / "source.py"
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        raise _BlockedCapability("symlink_unavailable") from None
+    _expect_workcopy_error("unsafe_path", lambda: work.accept(["source.py"], confirmed=True))
+    if outside.read_bytes() != _AGENT_ORIGINAL or not target.is_symlink():
+        raise _ReviewFailure("swapped_target_changed")
+
+
+def _case_agent_undo_exact_bytes(root: Path, _repository: ExecutionRepository, _boundary: ArtifactBoundary, _job_id: str) -> None:
+    work = _agent_workcopy(root)
+    (work.path / "source.py").write_bytes(_AGENT_UPDATED)
+    (work.path / "deleted.py").unlink()
+    (work.path / "added.py").write_bytes(_AGENT_ADDED)
+    selected = ("added.py", "deleted.py", "source.py")
+    if tuple(sorted(work.changeset())) != selected:
+        raise _ReviewFailure("changeset_missing")
+    if work.accept(selected, confirmed=True) != selected:
+        raise _ReviewFailure("accept_missing")
+    if (
+        (work.project_root / "source.py").read_bytes() != _AGENT_UPDATED
+        or (work.project_root / "deleted.py").exists()
+        or (work.project_root / "added.py").read_bytes() != _AGENT_ADDED
+    ):
+        raise _ReviewFailure("accept_bytes_changed")
+    if work.undo(confirmed=True) != selected:
+        raise _ReviewFailure("undo_missing")
+    if (
+        (work.project_root / "source.py").read_bytes() != _AGENT_ORIGINAL
+        or (work.project_root / "deleted.py").read_bytes() != _AGENT_DELETED
+        or (work.project_root / "added.py").exists()
+    ):
+        raise _ReviewFailure("undo_bytes_changed")
+    work.discard()
+
 _CaseFunction = Callable[[Path, ExecutionRepository, ArtifactBoundary, str], None]
 
 # The corpus that runs. The digest is computed from this tuple, so it cannot
@@ -285,11 +539,29 @@ _CASES: tuple[tuple[str, _CaseFunction], ...] = (
     ("output_hardlink_rejection", _case_output_hardlink_rejection),
     ("output_publication_rollback", _case_output_publication_rollback),
     ("repository_size_integrity", _case_repository_size_integrity),
+    ("agent_file_backslash_parent", _case_agent_file_backslash_parent),
+    ("agent_file_absolute", _case_agent_file_absolute),
+    ("agent_file_unc", _case_agent_file_unc),
+    ("agent_file_drive_relative", _case_agent_file_drive_relative),
+    ("agent_file_device_con", _case_agent_file_device_con),
+    ("agent_file_device_nul", _case_agent_file_device_nul),
+    ("agent_file_device_com1", _case_agent_file_device_com1),
+    ("agent_file_device_aux", _case_agent_file_device_aux),
+    ("agent_file_ads", _case_agent_file_ads),
+    ("agent_file_symlink", _case_agent_file_symlink),
+    ("agent_file_junction", _case_agent_file_junction),
+    ("agent_accept_root_binding", _case_agent_accept_root_binding),
+    ("agent_accept_link_swap", _case_agent_accept_link_swap),
+    ("agent_undo_exact_bytes", _case_agent_undo_exact_bytes),
 )
 
 # The shared setup every case runs through. A change here changes what each
 # case exercises, so it is part of the digest too.
-_HARNESS: tuple[Callable[..., object], ...] = (_fixture, _grant, _expect_boundary_error)
+_HARNESS: tuple[Callable[..., object], ...] = (
+    _fixture, _grant, _expect_boundary_error,
+    _agent_workcopy, _file_result, _expect_file_error, _expect_workcopy_error,
+    _agent_bad_file_path, _junction_primitive, _make_directory_junction,
+)
 
 
 def _corpus_digest(cases: tuple[tuple[str, _CaseFunction], ...]) -> str:

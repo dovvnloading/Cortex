@@ -13,12 +13,24 @@ def test_artifact_security_review_is_reproducible_and_complete():
     second = run_review()
 
     assert first == second
-    assert first["status"] == "passed"
-    assert first["cases"] == 12
-    assert first["passed"] == 12
-    assert first["blocked"] == 0
+    assert first["corpus"] == "artifact-boundary-review.v1"
+    assert first["cases"] == 26
     assert first["failed"] == 0
-    assert all(outcome["status"] == "passed" for outcome in first["outcomes"])
+    assert first["passed"] + first["blocked"] == first["cases"]
+    assert first["status"] == ("blocked" if first["blocked"] else "passed")
+    assert [outcome["case"] for outcome in first["outcomes"][:12]] == [
+        "copy_in_preserves_source", "copy_in_owner_binding", "copy_in_ads_path",
+        "copy_in_untyped_grant", "copy_in_hardlink", "copy_in_symlink",
+        "mime_active_and_nonfinite_corpus", "output_exact_claims_and_quarantine",
+        "output_symlink_rejection", "output_hardlink_rejection",
+        "output_publication_rollback", "repository_size_integrity",
+    ]
+    for outcome in first["outcomes"]:
+        assert set(outcome) <= {"case", "status", "reason"}
+        if outcome["status"] == "blocked":
+            assert outcome["reason"] in {
+                "symlink_unavailable", "hardlink_unavailable", "junction_unavailable",
+            }
 
 
 def _passing_case(_root, _repository, _boundary, _job_id) -> None:

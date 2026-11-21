@@ -71,6 +71,85 @@ tokens, or local database files.
 Dependency or packaging concerns that could affect these boundaries should be
 reported privately as well.
 
+## Agent mode
+
+Agent mode uses the authenticated loopback API and a separate opt-in
+setting. Each run needs project read/copy consent. A cloud model needs
+separate consent to send the goal and eligible project context to its
+provider. Ordinary chat gets no project grant from this setting.
+
+File changes and local Git tools operate in a disposable work copy, not
+the original project. The backend requires a separately confirmed selection
+to accept changed files. It verifies source hashes and saves the original
+bytes in `workspace_checkpoints.sqlite` before writing. Explicit undo or
+restore checks current hashes and refuses unexpected changes. It never
+runs automatically. The Agent page exposes reviewed changes, separately
+confirmed acceptance and discard, and confirmed journal-backed undo.
+Historical runs can be reopened and their events replayed.
+
+The Windows AppContainer launcher uses a fresh low-privilege profile. It
+grants write permission only to the work copy. Permitted toolchain folders
+can receive temporary read/execute grants for that run. A user-installed
+tool may be unavailable unless that grant can be made each time. Network
+capability is off by default. A Windows Job Object limits memory, CPU time
+and child processes. Closing the job kills the process tree. AppContainer
+is not a VM or a complete boundary against every host resource.
+
+If AppContainer profile creation fails, the job-only fallback is marked
+**unsandboxed**. A Job Object does not isolate files or network access.
+The fallback cannot enforce a network-off request. It requires fresh,
+explicit approval before use; automatic approval does not apply. Dangerous
+operations are refused.
+
+The shell policy classifies PowerShell and cmd commands as inspection,
+build/test, work-copy edits, network operations, dangerous actions or
+unknown commands. A command chain uses its most restrictive class.
+**Plan only** does not run shell commands. **Ask before every command**
+requires one-time approval for every non-dangerous command that starts
+a process. **Auto-approve safe commands in the sandbox** skips prompts
+only for recognized inspection and build/test commands in AppContainer.
+Edits, network operations and unknown commands need explicit approval.
+Dangerous commands are blocked in every mode.
+
+`run_command` and `start_background` run in the work copy with an
+allowlisted environment. The model cannot choose another working
+directory or forward host environment values. Network stays disabled
+unless separately approved for that command. `run_command` has a
+120-second maximum timeout. Its result retains up to the first and
+last 4 KiB of output. The live stream is capped at 1 MiB per run.
+More than 64 MiB of output kills the process tree. A timed-out,
+cancelled or killed command never reports success.
+
+At most two background processes may run at once. `read_background`
+returns up to the last 8 KiB of buffered output and process status.
+`stop_background` kills the process tree. All remaining processes
+are killed at the end of the run.
+
+When work-copy files change, pre-final verification detects pytest,
+npm test/lint/build/typecheck scripts, Cargo, Go and .NET checks.
+Each check follows the same shell approval and sandbox path, with
+network disabled and a 60-second timeout. Failed checks may prompt
+up to three repair-and-recheck rounds within the run budget. The
+final result distinguishes passed, failed, timed-out and unrun
+checks. It also reports unchanged files, missing test commands,
+declined approvals and exhausted run budgets.
+
+Git tools allow only local status, diff, log, show and commit operations
+against the copy. They disable hooks, filters and external diff drivers.
+They do not run network Git commands. A separate web-fetch helper requires
+explicit approval for each public HTTP(S) GET. It rejects private addresses
+and checks every redirect. This helper is not wired into current Agent runs.
+Returned web content is untrusted reference data, not instructions.
+
+Tool calls are checked against registered names and argument schemas.
+Model output, project text and tool results are data, not permission to
+execute code. The run ledger at `agent/runs.sqlite` stores bounded
+metadata, not prompts, model output, file bytes or approval details.
+Work copies live under `agent_workcopies/`; operational logs use
+`logs/cortex.log` and `startup.log`, all in the per-user data directory.
+Temporary AppContainer grant journals use a separate per-user
+`agent-sandbox` directory.
+
 ## Automated checks
 
 CodeQL scans the Python, TypeScript and workflow code on every push and pull

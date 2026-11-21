@@ -15,13 +15,16 @@ from _thread import LockType
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cortex_backend.services.llm import _fence_untrusted, _load_asset
 
-from .protocol import ModelTurn, ProtocolError, ToolCall, _instructions, call_model
+from .protocol import ModelTurn, ProtocolError, ProtocolPath, ToolCall, _instructions, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
 from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
+
+if TYPE_CHECKING:
+    from .tools.checks import DetectedCheck
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,13 @@ class _State:
     invalid_replies: int = 0
     last_tool: tuple[str, str] | None = None
     repeated_tools: int = 0
+    initial_files: str | None = None
+    checked_fingerprint: str | None = None
+    check_results: dict[str, dict[str, object]] = field(default_factory=dict)
+    pending_final: str | None = None
+    repair_rounds: int = 0
+    last_repair_snapshot: str | None = None
+    check_blocked: bool = False
     lock: LockType = field(default_factory=Lock)
 
 
@@ -146,18 +156,23 @@ class AgentLoop:
         context_providers: Sequence[ContextProvider] = (),
         after_tool: AfterTool | None = None,
         before_final: BeforeFinal | None = None,
+        protocol_path: ProtocolPath | None = None,
+        model_options: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self.run_store = run_store
         self.client = client
         self.model = model
         self.registry = registry
+        self._checks_enabled = any(spec.name == "run_checks" for spec in registry.specs())
         self.owner = owner
         self.goal = goal
         self.system_policy = system_policy if system_policy is not None else _load_asset("system_prompt.txt", required=True)
         self.context_providers = tuple(context_providers)
         self.after_tool = after_tool
         self.before_final = before_final
+        self.protocol_path = protocol_path
+        self.model_options = dict(model_options or {})
         self.clock = clock
         self.budgets = budgets if isinstance(budgets, LoopBudgets) else LoopBudgets().narrowed(budgets, clamp=False)
         self._states: dict[str, _State] = {}
@@ -201,6 +216,13 @@ class AgentLoop:
             self._states[run_id] = state
         with state.lock:
             self.run_store.transition(run_id, owner=self.owner, status="running")
+            if self._checks_enabled:
+                from .tools.checks import workcopy_fingerprint
+
+                try:
+                    state.initial_files = workcopy_fingerprint(run.workcopy)
+                except (OSError, ValueError, RuntimeError):
+                    return self._stop(run_id, state, "failed", "check_inspection_failed")
             return self._drive(run_id, state)
 
     def resume(self, run_id: str) -> LoopResult:
@@ -240,6 +262,19 @@ class AgentLoop:
                     result={"outcome": "rejected", "success": False},
                 )
                 self._observe(state, pending.call.name, "Approval declined; tool not executed.", False)
+                if pending.call.name == "run_checks" and self._checks_enabled:
+                    from .tools.checks import detect_checks
+
+                    state.check_blocked = True
+                    try:
+                        checks = detect_checks(self._get_run(run_id).workcopy)
+                    except (OSError, ValueError, RuntimeError):
+                        return self._stop(run_id, state, "failed", "check_inspection_failed")
+                    index = pending.call.arguments.get("index", 0)
+                    if isinstance(index, int) and 0 <= index < len(checks):
+                        state.check_results[checks[index].key] = {
+                            "status": "not_run", "reason": "approval_declined",
+                        }
                 state.queued.clear()
                 if not self._after_tool(step):
                     return self._stop(run_id, state, "failed", "hook_error")
@@ -331,10 +366,124 @@ class AgentLoop:
             return None
         return [*fixed, *({"role": item.role, "content": item.content} for item in state.history), *extra]
 
+    def _complete_final(self, run_id: str, state: _State, answer: str, checks: str | None = None) -> LoopResult:
+        """Run existing final hook only after verification has settled."""
+        if self.before_final is not None:
+            try:
+                self.before_final()
+            except Exception:
+                return self._stop(run_id, state, "failed", "hook_error")
+        reason = self._interruption(state)
+        if reason is not None:
+            return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
+        summary = answer if checks is None else f"{answer.rstrip()}\n\nCheck results: {checks}"
+        return self._stop(run_id, state, "completed", "final_answer", answer=summary)
+
+    @staticmethod
+    def _check_report(state: _State, checks: tuple[DetectedCheck, ...], *, budget_limited: bool = False) -> str:
+        outcomes = [str(state.check_results.get(check.key, {}).get("status", "not_run")) for check in checks]
+        passed = outcomes.count("passed")
+        failed = outcomes.count("failed")
+        timed_out = outcomes.count("timed_out")
+        not_run = len(checks) - passed - failed - timed_out
+        parts: list[str] = []
+
+        def number(count: int) -> str:
+            return f"{count} check{'s' if count != 1 else ''}"
+
+        if passed:
+            parts.append(f"{number(passed)} passed")
+        if failed:
+            rounds = state.repair_rounds
+            parts.append(
+                f"{number(failed)} failed after {rounds} repair round{'s' if rounds != 1 else ''}"
+                if rounds else f"{number(failed)} failed (no repair rounds)"
+            )
+        if timed_out:
+            parts.append(f"{number(timed_out)} timed out (not passed)")
+        if not_run:
+            denied = any(
+                state.check_results.get(check.key, {}).get("reason") == "approval_declined"
+                for check in checks
+            )
+            why = "approval declined" if denied else "run budget exhausted" if budget_limited else "unavailable"
+            parts.append(f"{number(not_run)} not run ({why})")
+        if not parts:
+            return "tests not run: no test command found"
+        if passed == len(checks) and state.repair_rounds:
+            parts.append(f"after {state.repair_rounds} repair rounds")
+        return "; ".join(parts)
+
+    def _before_final_checks(self, run_id: str, state: _State, answer: str) -> LoopResult | None:
+        """Schedule code-selected checks, or return an honest final summary."""
+        if not self._checks_enabled:
+            return self._complete_final(run_id, state, answer)
+        from .tools.checks import detect_checks, workcopy_fingerprint
+
+        try:
+            workcopy = self._get_run(run_id).workcopy
+            current = workcopy_fingerprint(workcopy)
+            detected = detect_checks(workcopy)
+        except (OSError, ValueError, RuntimeError):
+            return self._stop(run_id, state, "failed", "check_inspection_failed")
+        if current == state.initial_files:
+            return self._complete_final(run_id, state, answer, "checks not run: no file changes")
+        if not detected:
+            return self._complete_final(run_id, state, answer, "tests not run: no test command found")
+        if current != state.checked_fingerprint:
+            state.checked_fingerprint = current
+            state.check_results.clear()
+
+        pending = [(index, check) for index, check in enumerate(detected) if check.key not in state.check_results]
+        if pending and not state.check_blocked:
+            if (state.tool_calls + len(pending) <= state.limits.max_tool_calls
+                    and state.model_calls + state.tool_calls + len(pending) <= state.limits.max_steps):
+                state.pending_final = answer
+                state.queued.extend(
+                    ToolCall(f"auto-check-{index}", "run_checks", {"index": index}) for index, _ in pending
+                )
+                return None
+            return self._complete_final(run_id, state, answer, self._check_report(state, detected, budget_limited=True))
+
+        failures = [check for check in detected if state.check_results.get(check.key, {}).get("status")
+                    in {"failed", "timed_out"}]
+        if (failures and not state.check_blocked and state.last_repair_snapshot != current
+                and state.repair_rounds < 3 and state.model_calls < state.limits.max_model_calls
+                and state.model_calls + state.tool_calls < state.limits.max_steps):
+            excerpts = []
+            for check in failures[:4]:
+                result = state.check_results[check.key]
+                output = str(result.get("output", ""))[:2048] or "(no output captured)"
+                excerpts.append(f"{check.key} ({result['status']}):\n{output}")
+            state.history.append(_History(
+                "user", _fence_untrusted("REFERENCE", "Failing project check output:\n" + "\n\n".join(excerpts)),
+                is_observation=True,
+                compact=_fence_untrusted("REFERENCE", "Project check failures; output compacted."),
+            ))
+            state.history.append(_History(
+                "user", "Repair the reported project check failures within this work copy. "
+                "Only registered tools may edit or execute commands; final verification will run again after edits.",
+            ))
+            state.repair_rounds += 1
+            state.last_repair_snapshot = current
+            return None
+        return self._complete_final(run_id, state, answer, self._check_report(state, detected))
+
     def _execute(
         self, run_id: str, state: _State, call: ToolCall, step_seq: int,
         *, approved: bool,
     ) -> LoopResult | None:
+        snapshot: str | None = None
+        if call.name == "run_checks" and self._checks_enabled:
+            from .tools.checks import workcopy_fingerprint
+
+            try:
+                snapshot = workcopy_fingerprint(self._get_run(run_id).workcopy)
+            except (OSError, ValueError, RuntimeError):
+                self.run_store.finish_step(
+                    run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "error", "success": False},
+                )
+                return self._stop(run_id, state, "failed", "check_inspection_failed")
         try:
             outcome = self.registry.execute(call, ToolContext(
                 state.cancellation, state.start + state.limits.max_seconds,
@@ -379,6 +528,19 @@ class AgentLoop:
                 run_id, owner=self.owner, step_seq=step_seq, result={"outcome": "error", "success": False},
             )
             return self._stop(run_id, state, "failed", "tool_error")
+        if snapshot is not None:
+            try:
+                detail = json.loads(outcome.content)
+            except (ValueError, TypeError):
+                detail = None
+            if (isinstance(detail, dict) and isinstance(detail.get("check"), str)
+                    and detail.get("status") in {"passed", "failed", "timed_out", "not_run"}):
+                if state.checked_fingerprint != snapshot:
+                    state.check_results.clear()
+                state.checked_fingerprint = snapshot
+                state.check_results[detail["check"]] = detail
+                if detail["status"] == "not_run":
+                    state.check_blocked = True
         step = self.run_store.finish_step(
             run_id, owner=self.owner, step_seq=step_seq,
             result={"outcome": "ok" if outcome.success else "error", "success": outcome.success},
@@ -416,6 +578,13 @@ class AgentLoop:
                 if result is not None:
                     return result
                 continue
+            if state.pending_final is not None:
+                answer = state.pending_final
+                state.pending_final = None
+                result = self._before_final_checks(run_id, state, answer)
+                if result is not None:
+                    return result
+                continue
             if state.model_calls >= state.limits.max_model_calls:
                 return self._stop(run_id, state, "failed", "model_call_budget")
             if state.model_calls + state.tool_calls >= state.limits.max_steps:
@@ -433,7 +602,8 @@ class AgentLoop:
             try:
                 turn: ModelTurn = call_model(
                     self.client, model=self.model, messages=messages, tools=self.registry.specs(),
-                    options={}, cancellation_event=state.cancellation,
+                    options=dict(self.model_options), cancellation_event=state.cancellation,
+                    protocol_path=self.protocol_path,
                 )
             except ProtocolError:
                 state.invalid_replies += 1
@@ -475,14 +645,9 @@ class AgentLoop:
                 result={"outcome": "final" if turn.finish == "stop" else "tools"},
             )
             if turn.finish == "stop":
-                if self.before_final is not None:
-                    try:
-                        self.before_final()
-                    except Exception:
-                        return self._stop(run_id, state, "failed", "hook_error")
-                reason = self._interruption(state)
-                if reason is not None:
-                    return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
-                return self._stop(run_id, state, "completed", "final_answer", answer=turn.text)
+                result = self._before_final_checks(run_id, state, turn.text)
+                if result is not None:
+                    return result
+                continue
             state.history.append(_History("assistant", f"Requested {len(turn.tool_calls)} registered tool call(s)."))
             state.queued.extend(turn.tool_calls)
