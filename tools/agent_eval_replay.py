@@ -68,6 +68,12 @@ def init_git_fixture(root: Path) -> str:
     (git_dir / "objects").mkdir(parents=True)
     (git_dir / "refs" / "heads").mkdir(parents=True)
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="ascii")
+    (git_dir / "info").mkdir()
+    (git_dir / "info" / "exclude").write_text(
+        ".cortex-agent-git-home/\n.cortex-agent-tmp/\n.cortex-agent-localappdata/\n"
+        ".pytest_cache/\n__pycache__/\n",
+        encoding="utf-8",
+    )
     (git_dir / "config").write_text(
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n\tlogallrefupdates = true\n",
         encoding="utf-8",
