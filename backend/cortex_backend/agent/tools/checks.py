@@ -96,13 +96,18 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
                     continue
                 command = f"npm run {name}" if directory == "." else f"npm --prefix {_quoted(directory)} run {name}"
                 # The launcher sees "npm run test", not the script body.
-                # Classify explicit dangerous/network shell intent before that
-                # wrapper can gain automatic build/test permission.
-                script_class = classify(script, "cmd", "appcontainer").cls
+                # npm also executes lifecycle pre/post scripts for each target.
+                # Classify explicit danger/network intent in all three before
+                # the wrapper can gain automatic build/test permission.
+                script_classes = []
+                for phase in (f"pre{name}", name, f"post{name}"):
+                    body = scripts.get(phase)
+                    if isinstance(body, str) and body.strip():
+                        script_classes.append(classify(body, "cmd", "appcontainer").cls)
                 risk: Literal["safe", "network", "dangerous"] = "safe"
-                if script_class == "dangerous":
+                if "dangerous" in script_classes:
                     risk = "dangerous"
-                elif script_class == "network":
+                elif "network" in script_classes:
                     risk = "network"
                 checks.append(DetectedCheck(f"npm:{name}:{path}", command, risk))
         elif item.name == "Cargo.toml":
