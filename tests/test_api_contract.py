@@ -809,6 +809,7 @@ def test_generation_conflict_and_cancellation_are_explicit(monkeypatch):
             "cancelled",
         ]
 
+
 def _preflight(client: TestClient, *, origin: str, headers: str, path: str = "/api/v1/session/handoff"):
     return client.options(
         path,
