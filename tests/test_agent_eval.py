@@ -13,8 +13,10 @@ import pytest
 
 from cortex_backend.agent.loop import AgentLoop
 from cortex_backend.agent.policy import classify, decide
+from cortex_backend.agent.tools.checks import detect_checks
 from tools import agent_eval
 from tools import agent_eval_replay
+from tools import ci_backend_shards
 
 
 _VERIFIED_TASKS = (
@@ -71,7 +73,7 @@ def test_json_output_reports_steps_and_wall_time(capsys: pytest.CaptureFixture[s
     for task in report["tasks"]:
         assert set(task) == {
             "name", "passed", "status", "stop_reason", "steps", "model_calls", "tool_calls",
-            "wall_seconds", "checks", "error_kind",
+            "prompt_tokens", "completion_tokens", "wall_seconds", "wall_minutes", "checks", "error_kind",
         }
         assert task["status"] == "completed"
         assert task["stop_reason"] == "final_answer"
@@ -79,7 +81,155 @@ def test_json_output_reports_steps_and_wall_time(capsys: pytest.CaptureFixture[s
         assert type(task["model_calls"]) is int and task["model_calls"] >= 2
         assert type(task["tool_calls"]) is int and task["tool_calls"] >= 1
         assert type(task["wall_seconds"]) is float and task["wall_seconds"] >= 0
+        assert type(task["wall_minutes"]) is float and task["wall_minutes"] >= 0
+        assert task["wall_minutes"] == pytest.approx(task["wall_seconds"] / 60, abs=1e-6)
+        assert task["prompt_tokens"] == 0 and task["completion_tokens"] == 0
         assert task["error_kind"] is None
+
+
+def test_human_summary_reports_minutes_and_tokens(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent_eval.main(["--check", "--task", "read-and-answer"]) == 0
+    summary = capsys.readouterr().out
+    assert "read-and-answer:" in summary
+    assert " min)" in summary
+    assert "0 prompt tokens, 0 completion tokens" in summary
+
+
+def test_ollama_uses_only_reported_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = iter([
+        {"message": {"content": "{}"}, "prompt_eval_count": 11, "eval_count": 4},
+        {"message": {"content": "{}"}, "prompt_eval_count": 7, "eval_count": 3},
+        {"message": {"content": "{}"}},
+    ])
+
+    def fake_request(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if endpoint == "/api/tags":
+            return {"models": [{"name": "synthetic:latest"}]}
+        assert endpoint == "/api/chat"
+        return next(replies)
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(fake_request))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    assert client.chat(messages=[], options={}) == {"message": {"content": "{}"}}
+    assert client.chat(messages=[], options={}) == {"message": {"content": "{}"}}
+    assert client.prompt_tokens == 18 and client.completion_tokens == 7
+    client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+
+def test_model_usage_is_unknown_before_any_provider_chat_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_inventory(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        assert endpoint == "/api/tags", "an unavailable model must not trigger a chat request"
+        return {"models": []}
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(unavailable_inventory))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    assert client.prompt_tokens is None and client.completion_tokens is None
+    with pytest.raises(ValueError, match="model_not_installed_locally"):
+        client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+    case = agent_eval.run_suite(mode="model", model="synthetic:latest", task="read-and-answer")["tasks"][0]
+    assert case["passed"] is False
+    assert case["prompt_tokens"] is None and case["completion_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    "usage", [
+        {"prompt_eval_count": True, "eval_count": -1},
+        {"prompt_eval_count": 2.5, "eval_count": "3"},
+    ],
+)
+def test_ollama_invalid_usage_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, usage: dict[str, object],
+) -> None:
+    def fake_request(
+        _method: str, endpoint: str, _payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if endpoint == "/api/tags":
+            return {"models": [{"name": "synthetic:latest"}]}
+        return {"message": {"content": "{}"}, **usage}
+
+    monkeypatch.setattr(agent_eval.LoopbackOllamaClient, "_request", staticmethod(fake_request))
+    client = agent_eval.LoopbackOllamaClient("synthetic:latest")
+    client.chat(messages=[], options={})
+    assert client.prompt_tokens is None and client.completion_tokens is None
+
+
+@pytest.mark.parametrize("citation", ["notes.md:3", "notes.md#release"])
+def test_read_answer_accepts_grounded_line_or_section(
+    monkeypatch: pytest.MonkeyPatch, citation: str,
+) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final(f"The release codename is ASTER-42 ({citation})."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["citation"] is True
+    assert case["passed"] is True
+
+
+def test_read_answer_rejects_missing_citation(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final("The release codename is ASTER-42."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["read_observed"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
+
+
+@pytest.mark.parametrize("citation", [
+    "notes.md:L1", "notes.md#missing", "../notes.md:L3",
+    "notes.md:L3.extra", "notes.md#release.extra",
+    "notes.md:L3..extra", "notes.md#release..extra",
+])
+def test_read_answer_rejects_unsubstantiated_anchor(
+    monkeypatch: pytest.MonkeyPatch, citation: str,
+) -> None:
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final(f"The release codename is ASTER-42 ({citation})."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
+
+
+def test_read_answer_rejects_existing_file_without_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "read-and-answer", tmp_path / "read-and-answer")
+    (tmp_path / "read-and-answer" / "repo" / "unrelated.md").write_text(
+        "# Release\n\nNo codename here.\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)
+    replies = dict(agent_eval.SCRIPTED_REPLIES)
+    replies["read-and-answer"] = (
+        agent_eval._tool_turn(("read_file", {"path": "notes.md"})),
+        agent_eval._final("The release codename is ASTER-42 (unrelated.md#release)."),
+    )
+    monkeypatch.setattr(agent_eval, "SCRIPTED_REPLIES", replies)
+    case = agent_eval.run_suite(task="read-and-answer")["tasks"][0]
+    assert case["checks"]["answer"] is True
+    assert case["checks"]["end_state"] is True
+    assert case["checks"]["citation"] is False
+    assert case["passed"] is False
 
 
 def test_check_never_instantiates_a_local_network_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,19 +440,49 @@ def test_new_task_rejects_extra_file_even_after_successful_verification(
 def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> None:
     repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
     manifest = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
-    # The repository suite discovers test_*.py files. The isolated work copy
-    # explicitly discovers this differently named, still-failing pytest case.
-    assert manifest["tool"]["pytest"]["ini_options"]["python_files"] == ["calculator_cases.py"]
-    assert not list(repo.glob("test_*.py"))
-    assert "assert add(2, 3) == 5" in (repo / "calculator_cases.py").read_text(encoding="utf-8")
+    # Use pytest's default test_*.py collection in the isolated project.
+    # The outer repository suite explicitly excludes its failing fixtures.
+    assert manifest["tool"]["pytest"]["ini_options"] == {"addopts": "-q -p no:cacheprovider"}
+    root = Path(__file__).resolve().parents[1]
+    outer = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    # Broad norecursedirs globs also hide real tests in unrelated agent_tasks
+    # directories. Only the specific fixture subtree may be ignored.
+    assert "norecursedirs" not in outer["tool"]["pytest"]["ini_options"]
+    assert 'collect_ignore = ["fixtures/agent_tasks"]' in (
+        root / "tests" / "conftest.py"
+    ).read_text(encoding="utf-8")
+    assert "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py" not in (
+        ci_backend_shards.discover_test_files(root)
+    )
+    assert [test.name for test in repo.glob("test_*.py")] == ["test_calculator.py"]
+    assert "assert add(2, 3) == 5" in (repo / "test_calculator.py").read_text(encoding="utf-8")
     assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
+
+
+def test_fix_failing_test_fixture_has_only_inert_pytest_addopts() -> None:
+    repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
+    assert [(item.key, item.command, item.risk) for item in detect_checks(repo)] == [
+        ("pytest", "python -m pytest", "safe"),
+    ]
+    assert not (repo / "conftest.py").exists()
 
 
 def test_generated_fixture_cache_is_never_copied_into_expected_end_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", tmp_path / "fix-failing-test")
+    # Simulate a prior pytest collection leaving caches in the fixture's
+    # source without modifying any checked-in fixture files.
+    source = tmp_path / "source-fixture"
+    ignore_generated = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc")
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", source, ignore=ignore_generated)
+    existing_cache = source / "repo" / "__pycache__"
+    existing_cache.mkdir()
+    (existing_cache / "preexisting.pyc").write_bytes(b"generated cache from prior collection")
+    # Only authored inputs should reach the test's copy. The new cache planted
+    # below must still be excluded from the evaluator's exact end-state check.
+    shutil.copytree(source, tmp_path / "fix-failing-test", ignore=ignore_generated)
     cache = tmp_path / "fix-failing-test" / "repo" / "__pycache__" / "calculator.cpython-311.pyc"
+    assert not cache.parent.exists()
     cache.parent.mkdir()
     cache.write_bytes(b"generated cache, not fixture source")
     monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)

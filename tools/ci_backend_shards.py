@@ -19,9 +19,19 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def discover_test_files(root: Path) -> tuple[str, ...]:
-    """Discover the same test_*.py modules that pyproject.toml lets pytest collect."""
+    """Discover suite modules, not the deliberately failing agent eval fixture.
 
-    files = tuple(sorted(path.relative_to(root).as_posix() for path in (root / "tests").rglob("test_*.py") if path.is_file()))
+    Quality runs explicitly assigned file paths, bypassing pytest's normal
+    norecursedirs/collect_ignore discovery rules. The copied task fixture's
+    test_*.py belongs only to its disposable project, never to these shards.
+    """
+
+    task_fixtures = root / "tests" / "fixtures" / "agent_tasks"
+    files = tuple(sorted(
+        path.relative_to(root).as_posix()
+        for path in (root / "tests").rglob("test_*.py")
+        if path.is_file() and not path.is_relative_to(task_fixtures)
+    ))
     if not files:
         raise ValueError("No test_*.py modules found; refusing to report a passing empty suite")
     return files

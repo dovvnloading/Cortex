@@ -28,7 +28,11 @@ from cortex_backend.agent.tool_registry import ToolContext, ToolRegistry, ToolRe
 from cortex_backend.agent.tools import git as git_tools
 from cortex_backend.agent.tools.git import GIT_TOOLS, register_git_tools
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH; hostile Git tests require Git")
+@pytest.fixture(scope="module", autouse=True)
+def require_git_for_adversarial_tests() -> None:
+    assert shutil.which("git") is not None, (
+        "Git must be on PATH for adversarial security tests; missing Git is a failed gate, not a skip"
+    )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_hostile_git"
 _SAFE_GIT_SUBCOMMANDS = {"init", "status", "diff", "show", "log", "add", "commit"}
@@ -258,6 +262,7 @@ def test_attributes_filters_and_diff_drivers_never_run(tmp_path: Path, git_launc
     assert _git(repo, "show", "HEAD:tracked.txt") == "changed"
     assert any("filter.tripwire.clean=" in arg for _, argv, _ in git_launches for arg in argv)
     assert any("filter.tripwire.process=" in arg for _, argv, _ in git_launches for arg in argv)
+    assert {"diff", "show"} <= {_subcommand(argv) for _, argv, _ in git_launches}
     assert all("--no-textconv" in argv for _, argv, _ in git_launches if _subcommand(argv) in {"diff", "show"})
     assert all("--no-ext-diff" in argv for _, argv, _ in git_launches if _subcommand(argv) in {"diff", "show"})
 
@@ -282,6 +287,7 @@ def test_fsmonitor_ssh_command_and_credential_helper_never_execute(tmp_path: Pat
         result, data = _call(registry, name, **args)
         assert result.success, (name, data)
         _assert_no_markers(markers)
+    assert git_launches, "Git test exercised no security-sensitive subprocess"
     assert all(not network for _, _, network in git_launches)
     assert all(_subcommand(argv) in _SAFE_GIT_SUBCOMMANDS for _, argv, _ in git_launches)
 
@@ -400,6 +406,7 @@ def test_hostile_workcopy_isolated_from_source_git(tmp_path: Path, git_launches)
             copy.path, "--git-dir=.cortex-agent-git", "--work-tree=.",
             "show", "-s", "--format=%s", "HEAD",
         ) == "agent copy only"
+        assert git_launches, "work-copy Git tests did not launch any Git subprocess"
         assert all(root == copy.path for root, _, _ in git_launches)
         assert all("--git-dir=.git" not in argv for _, argv, _ in git_launches)
         assert _git(repo, "rev-parse", "HEAD") == original_head

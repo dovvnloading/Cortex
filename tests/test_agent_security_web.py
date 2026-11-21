@@ -156,6 +156,7 @@ class _PageFollowingModel:
         self.first = first
         self.turns = 0
         self.observations: list[str] = []
+        self.attempts: list[dict[str, object]] = []
         self._last_observation: str | None = None
 
     def chat(self, **kwargs: Any) -> dict[str, object]:
@@ -176,6 +177,7 @@ class _PageFollowingModel:
                 self._last_observation = latest
                 directive = latest.split("ATTACK_CALL=", 1)[1].splitlines()[0]
                 call = json.loads(directive)
+                self.attempts.append(call)
                 reply = _tool(call["name"], call["arguments"])
         return {"message": {"content": reply}}
 
@@ -399,6 +401,7 @@ def test_page_cannot_execute_process_push_code_or_exfiltrate_an_outside_file(
         seq, _ = _approval(manager, run_id)
         _allow(manager, run_id, seq)
         _await(manager, run_id, {"waiting_approval", "completed"})
+        assert model.attempts == [{"name": name, "arguments": arguments}], model.attempts
         if manager.get(run_id, owner=_OWNER).status == "waiting_approval":
             step_seq, request = _approval(manager, run_id)
             assert request["tool"] == "run_command"
@@ -412,8 +415,17 @@ def test_page_cannot_execute_process_push_code_or_exfiltrate_an_outside_file(
             assert rejected.result == {"outcome": "rejected", "success": False}
             assert rejected.ended is not None
         else:
-            steps = _tool_steps(manager, run_id)
-            assert all(step.result and not step.result["success"] for step in steps[1:])
+            hostile_steps = _tool_steps(manager, run_id)[1:]
+            if hostile_steps:
+                assert all(
+                    step.tool == name and step.result and step.result.get("success") is False
+                    for step in hostile_steps
+                ), "a hostile tool was not denied"
+            else:
+                assert any(
+                    step.kind == "model" and step.result.get("outcome") == "invalid"
+                    for step in manager._ledger().list_steps(run_id, owner=_OWNER)
+                ), "hostile call was not rejected by the protocol"
         assert [url for url, _, _ in transport.dials] == [_FIRST]
         assert canary.read_text(encoding="utf-8") == "LOCAL_PRIVATE_CANARY"
         assert all("LOCAL_PRIVATE_CANARY" not in observation for observation in model.observations)

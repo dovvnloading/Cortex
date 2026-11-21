@@ -20,7 +20,7 @@ describe("application navigation", () => {
     expect(parseAppRoute("/")).toEqual({ kind: "chat", threadId: null });
     expect(parseAppRoute("/chat/new")).toEqual({ kind: "chat", threadId: null });
     expect(parseAppRoute("/settings/")).toEqual({ kind: "settings" });
-    expect(parseAppRoute("/workspace")).toEqual({ kind: "workspace" });
+    expect(parseAppRoute("/workspace")).toEqual({ kind: "agent" }); // Retired links still reach recovery.
     expect(parseAppRoute("/agent/")).toEqual({ kind: "agent" });
     expect(parseAppRoute("/chat/thread%20one")).toEqual({ kind: "chat", threadId: "thread one" });
     expect(parseAppRoute("/chat/%E0%A4%A")).toEqual({ kind: "not-found" });
