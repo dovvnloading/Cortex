@@ -60,7 +60,7 @@ def _registry(root: Path) -> ToolRegistry:
 
 
 def _bytes_by_path(root: Path) -> dict[str, bytes]:
-    return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
 @pytest.fixture
@@ -241,11 +241,18 @@ def test_directory_junction_cannot_be_followed_by_any_file_tool(tmp_path: Path, 
     work = WorkCopy.create(project, uuid4().hex, data_dir=tmp_path / "cortex-data")
     try:
         junction = work.path / "portal"
-        subprocess.run(
-            ["cmd", "/d", "/c", f'mklink /J "{junction}" "{outside}"'],
-            check=True, capture_output=True, timeout=10,
+        junction.parent.mkdir(parents=True, exist_ok=True)
+        outside.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"mklink /J failed ({result.returncode}): "
+            f"stdout={result.stdout!r}, stderr={result.stderr!r}"
         )
         assert junction.is_dir()
+        assert junction.resolve(strict=True) == outside.resolve(strict=True)
         _assert_link_not_followed(work.path, outside, "portal")
     finally:
         work.discard()
@@ -320,12 +327,33 @@ def test_output_bomb_closes_job_and_caps_buffer_without_windows() -> None:
     process = _FloodingProcess()
     job = _RecordingJob(process)
     handle = base.RunningProcess(process, job, "appcontainer", lambda: None)  # type: ignore[arg-type]
-    chunks = list(handle.stdout_chunks())
+    output_bytes = sum(len(chunk) for chunk in handle.stdout_chunks())
     with pytest.raises(base.OutputLimitExceeded, match="output limit"):
         handle.wait(timeout=5)
-    assert sum(map(len, chunks)) == base.MAX_OUTPUT_BYTES
+    assert handle._output_bytes == base.MAX_OUTPUT_BYTES
+    assert 0 < output_bytes <= base.MAX_OUTPUT_BYTES
     assert job.closes >= 1
     assert process.killed
+
+
+def test_output_above_old_cap_completes_without_termination() -> None:
+    class _CompletedProcess(_FloodingProcess):
+        def __init__(self) -> None:
+            self.stdout = BytesIO(b"X" * (2 * 1024 * 1024))
+            self.terminated = Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    assert base.MAX_OUTPUT_BYTES == 64 * 1024 * 1024
+    process = _CompletedProcess()
+    job = _RecordingJob(process)
+    handle = base.RunningProcess(process, job, "appcontainer", lambda: None)  # type: ignore[arg-type]
+    output_bytes = sum(len(chunk) for chunk in handle.stdout_chunks())
+    assert handle.wait(timeout=5) == 0
+    assert output_bytes == 2 * 1024 * 1024
+    assert not process.killed
 
 
 @pytest.fixture(scope="module")
@@ -435,20 +463,24 @@ def test_appcontainer_output_bomb_is_capped_and_process_killed(
 ) -> None:
     marker = _isolated_windows_launcher / "output-finished.txt"
     script = (
-        "import sys,pathlib; "
-        "[(sys.stdout.buffer.write(b'X'*8192),sys.stdout.flush()) for _ in range(1024)]; "
+        "import sys,pathlib\n"
+        f"for _ in range({2 * base.MAX_OUTPUT_BYTES // 8192}):\n"
+        "    sys.stdout.buffer.write(b'X'*8192)\n"
+        "    sys.stdout.flush()\n"
         f"pathlib.Path({str(marker)!r}).write_text('escaped')"
     )
     launcher = AppContainerLauncher(_isolated_windows_launcher, uuid4().hex)
     before = set(win_appcontainer.list_profiles())
     process = launcher.start(["python", "-c", script], _isolated_windows_launcher, network=False)
     try:
-        output = b"".join(process.stdout_chunks())
+        output_bytes = sum(len(chunk) for chunk in process.stdout_chunks())
         with pytest.raises(base.OutputLimitExceeded, match="output limit"):
             process.wait(timeout=20)
     finally:
         process.kill_tree()
-    assert len(output) == base.MAX_OUTPUT_BYTES
+    assert isinstance(process, base.RunningProcess)
+    assert process._output_bytes == base.MAX_OUTPUT_BYTES
+    assert 0 < output_bytes <= base.MAX_OUTPUT_BYTES
     assert not marker.exists()
     assert set(win_appcontainer.list_profiles()) == before
     _assert_no_profile(launcher)

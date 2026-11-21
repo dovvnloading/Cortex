@@ -30,7 +30,7 @@ _DEFAULT_LIMITS = JobLimits(
     restrict_ui=True,
 )
 
-MAX_OUTPUT_BYTES = 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 
 class Process(Protocol):
