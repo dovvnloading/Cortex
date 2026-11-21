@@ -15,14 +15,16 @@ from _thread import LockType
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cortex_backend.services.llm import _fence_untrusted, _load_asset
 
 from .protocol import ModelTurn, ProtocolError, ToolCall, _instructions, call_model
 from .run_store import AgentRun, AgentRunStore, AgentStep, RunStatus
 from .tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry
-from .tools.checks import DetectedCheck, detect_checks, workcopy_fingerprint
+if TYPE_CHECKING:
+    from .tools.checks import DetectedCheck
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +213,8 @@ class AgentLoop:
         with state.lock:
             self.run_store.transition(run_id, owner=self.owner, status="running")
             if self._checks_enabled:
+                from .tools.checks import workcopy_fingerprint
+
                 try:
                     state.initial_files = workcopy_fingerprint(run.workcopy)
                 except (OSError, ValueError, RuntimeError):
@@ -255,6 +259,8 @@ class AgentLoop:
                 )
                 self._observe(state, pending.call.name, "Approval declined; tool not executed.", False)
                 if pending.call.name == "run_checks" and self._checks_enabled:
+                    from .tools.checks import detect_checks
+
                     state.check_blocked = True
                     try:
                         checks = detect_checks(self._get_run(run_id).workcopy)
@@ -408,6 +414,8 @@ class AgentLoop:
         """Schedule code-selected checks, or return an honest final summary."""
         if not self._checks_enabled:
             return self._complete_final(run_id, state, answer)
+        from .tools.checks import detect_checks, workcopy_fingerprint
+
         try:
             workcopy = self._get_run(run_id).workcopy
             current = workcopy_fingerprint(workcopy)
@@ -463,6 +471,8 @@ class AgentLoop:
     ) -> LoopResult | None:
         snapshot: str | None = None
         if call.name == "run_checks" and self._checks_enabled:
+            from .tools.checks import workcopy_fingerprint
+
             try:
                 snapshot = workcopy_fingerprint(self._get_run(run_id).workcopy)
             except (OSError, ValueError, RuntimeError):
