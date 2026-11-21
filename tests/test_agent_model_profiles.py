@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 import json
@@ -69,7 +70,9 @@ class _ScriptedClient:
         self.requests: list[dict[str, object]] = []
 
     def chat(self, **kwargs: object) -> dict[str, object]:
-        self.requests.append(kwargs)
+        # Native tool requests share the probe's mutable message list. Capture
+        # the request at call time, before later synthetic results are appended.
+        self.requests.append(deepcopy(kwargs))
         return next(self._responses)
 
     def pull(self, *_args: object, **_kwargs: object) -> None:
