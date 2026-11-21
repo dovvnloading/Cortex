@@ -23,7 +23,7 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
-- Document live Agent file, plan, web-fetch and model-profile tools by mode, including one-time file-edit and exact-URL approvals (#536).
+- Document live Agent file, plan, web-fetch and model-profile tools by mode, including one-time file-edit and exact-URL approvals (#544).
 - Document Agent shell approvals, sandbox limits, background cleanup and automatic project-check verification.
 - Describe the current Agent mode consent, approval choices, disposable work
   copies, recovery and Windows sandbox limits. The Agent page still has a
