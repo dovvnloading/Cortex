@@ -15,7 +15,12 @@ from tools.ci_quality_gate import validate_quality_gate
 CODE_GATES = ("LINT_RESULT", "BACKEND_RESULT", "FRONTEND_RESULT", "PACKAGE_RESULT")
 
 
-def values(*, event: str = "pull_request", code: str = "true", browser: str = "true", opt_in: str = "false") -> dict[str, str]:
+def values(
+    *, event: str = "pull_request", code: str = "true", browser: str = "true",
+    opt_in: str = "false", agent_sandbox: str | None = None,
+) -> dict[str, str]:
+    if agent_sandbox is None:
+        agent_sandbox = "true" if event == "pull_request" and code == "true" else "false"
     normal = "success" if code == "true" else "skipped"
     browser_needed = code == "true" and (
         event == "push" or (event == "pull_request" and browser == "true") or (event == "workflow_dispatch" and opt_in == "true")
@@ -26,6 +31,8 @@ def values(*, event: str = "pull_request", code: str = "true", browser: str = "t
         "EVENT_NAME": event,
         "BROWSER_CHANGED": browser,
         "BROWSER_OPT_IN": opt_in,
+        "AGENT_SANDBOX_CHANGED": agent_sandbox,
+        "AGENT_SANDBOX_RESULT": "success" if event == "pull_request" and agent_sandbox == "true" else "skipped",
         "DEPENDENCY_REVIEW_RESULT": "success" if event == "pull_request" else "skipped",
         "BROWSER_RESULT": "success" if browser_needed else "skipped",
         **{name: normal for name in CODE_GATES},
@@ -57,12 +64,30 @@ def test_classification_failure_or_missing_output_never_passes(bad_value: str) -
     assert validate_quality_gate(baseline)
 
 
-@pytest.mark.parametrize("name", CODE_GATES + ("BROWSER_RESULT", "DEPENDENCY_REVIEW_RESULT"))
+@pytest.mark.parametrize("name", CODE_GATES + ("BROWSER_RESULT", "DEPENDENCY_REVIEW_RESULT", "AGENT_SANDBOX_RESULT"))
 @pytest.mark.parametrize("bad_value", ["failure", "cancelled", "skipped", ""])
 def test_failed_missing_or_skipped_required_gate_is_red(name: str, bad_value: str) -> None:
     baseline = values()
     baseline[name] = bad_value
     assert any(name in error for error in validate_quality_gate(baseline))
+
+
+def test_agent_sandbox_matrix_required_only_for_matching_prs() -> None:
+    for baseline in (values(agent_sandbox="false"), values(event="push"), values(event="workflow_dispatch")):
+        assert not validate_quality_gate(baseline)
+        baseline["AGENT_SANDBOX_RESULT"] = "success"
+        assert any("AGENT_SANDBOX_RESULT" in error for error in validate_quality_gate(baseline))
+
+
+def test_agent_sandbox_classifier_is_fail_closed_and_consistent() -> None:
+    for invalid in ("", "invalid"):
+        baseline = values()
+        baseline["AGENT_SANDBOX_CHANGED"] = invalid
+        assert any("Agent/sandbox classification" in error for error in validate_quality_gate(baseline))
+
+    baseline = values(code="false", browser="false")
+    baseline["AGENT_SANDBOX_CHANGED"] = "true"
+    assert validate_quality_gate(baseline)
 
 
 def test_docs_only_requires_all_code_jobs_to_be_skipped() -> None:
