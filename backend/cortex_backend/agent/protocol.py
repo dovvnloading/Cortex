@@ -11,7 +11,7 @@ import copy
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from threading import Event
 from typing import Any
@@ -322,7 +322,7 @@ def _arguments(raw: Any, spec: ToolSpec) -> dict[str, Any]:
     return raw
 
 
-def _keys(value: Any, required: set[str], optional: set[str] = frozenset()) -> None:
+def _keys(value: Any, required: set[str], optional: Set[str] = frozenset()) -> None:
     if not isinstance(value, dict):
         raise ProtocolError("malformed_response", "Expected a JSON object.")
     if set(value) - required - optional:
