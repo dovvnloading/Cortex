@@ -475,6 +475,7 @@ def test_launch_argv_contract(tmp_path: Path, backend: str, gpu_layers: str) -> 
             "--host", "127.0.0.1",
             "--port", "0",
             "--reasoning-format", "deepseek",
+            "--jinja",
             "-ngl", gpu_layers,
             # One slot: Cortex serialises generations, so "auto" could only
             # ever split the requested context between slots nobody uses.
