@@ -314,9 +314,16 @@ class _FloodingProcess:
 
 
 class _RecordingJob:
+    """Mirrors ``KillOnCloseJob``: an explicit terminate, then close."""
+
     def __init__(self, process: _FloodingProcess) -> None:
         self.process = process
         self.closes = 0
+        self.terminate_codes: list[int] = []
+
+    def terminate(self, exit_code: int) -> None:
+        self.terminate_codes.append(exit_code)
+        self.process.terminated.set()
 
     def close(self) -> None:
         self.closes += 1
@@ -333,6 +340,8 @@ def test_output_bomb_closes_job_and_caps_buffer_without_windows() -> None:
     assert handle._output_bytes == base.MAX_OUTPUT_BYTES
     assert 0 < output_bytes <= base.MAX_OUTPUT_BYTES
     assert job.closes >= 1
+    # The reader kills the tree with a nonzero code, so the bomb never reads as a clean exit.
+    assert job.terminate_codes and all(code != 0 for code in job.terminate_codes)
     assert process.killed
 
 
