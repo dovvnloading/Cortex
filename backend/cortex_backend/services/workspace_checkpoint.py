@@ -31,6 +31,8 @@ MAX_CHECKPOINT_FILES = 32
 MAX_CHECKPOINTS_PER_OWNER = 16
 MAX_TOTAL_CHECKPOINTS = 32
 MAX_ORIGINAL_BYTES = 64 * 1024 * 1024
+# Preserve the original mode while remembering a current deletion.
+MODE_DELETE_FLAG = 1 << 20
 _SCHEMA_VERSION = 1
 
 
@@ -203,7 +205,7 @@ class WorkspaceCheckpointStore:
             original = bytes(row["original"])
             digest = sha256(original).hexdigest()
             if (
-                not original or len(original) > MAX_WORKSPACE_FILE_BYTES
+                len(original) > MAX_WORKSPACE_FILE_BYTES
                 or digest != row["original_sha"]
                 or not isinstance(row["expected_sha"], str)
                 or len(row["expected_sha"]) != 64
@@ -314,7 +316,7 @@ class WorkspaceCheckpointStore:
                 raise WorkspaceCheckpointError("checkpoint_pending")
             previous = {
                 str(row["path"]): row for row in connection.execute(
-                    "SELECT path, original_sha, expected_sha FROM checkpoint_files "
+                    "SELECT path, original_sha, expected_sha, mode FROM checkpoint_files "
                     "WHERE checkpoint_id = ?", (checkpoint_id,),
                 )
             }
@@ -340,10 +342,14 @@ class WorkspaceCheckpointStore:
                 if existing is not None:
                     if existing["expected_sha"] != baseline:
                         raise WorkspaceCheckpointError("stale_source")
+                    # Original mode/absence is immutable across approvals;
+                    # only the latest deletion marker can change.
+                    original_mode = int(existing["mode"]) & ~MODE_DELETE_FLAG
+                    delete_marker = (mode & MODE_DELETE_FLAG) if original_mode else 0
                     connection.execute(
-                        "UPDATE checkpoint_files SET pending_sha = ? "
+                        "UPDATE checkpoint_files SET pending_sha = ?, mode = ? "
                         "WHERE checkpoint_id = ? AND path = ?",
-                        (target, checkpoint_id, path),
+                        (target, original_mode | delete_marker, checkpoint_id, path),
                     )
                 else:
                     connection.execute(
