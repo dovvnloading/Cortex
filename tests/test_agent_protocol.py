@@ -80,7 +80,8 @@ def test_three_runtime_paths_return_identical_validated_tool_calls(path: str) ->
         assert "format" not in request
     else:
         assert "tools" not in request
-        assert request["messages"][:-1] == messages
+        assert request["messages"][0]["role"] == "system"
+        assert request["messages"][1:] == messages
         if schema:
             format_schema = request["format"]
             assert format_schema["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"][
