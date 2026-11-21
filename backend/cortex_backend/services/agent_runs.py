@@ -27,8 +27,9 @@ from cortex_backend.agent.run_store import (
 from cortex_backend.agent.tool_registry import (
     NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult,
 )
-from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
+from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
+from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 from cortex_backend.services.chat_client import is_cloud_model
@@ -337,6 +338,7 @@ class AgentRuns:
                 )
                 registry = _file_registry(prepared, mode)
                 if mode != "plan_only":
+                    register_git_tools(registry, prepared.path, run_id)
                     shell = register_shell_tools(
                         registry, prepared.path, run_id, mode=mode,
                         on_output=lambda text: self._shell_output(run_id, text),
