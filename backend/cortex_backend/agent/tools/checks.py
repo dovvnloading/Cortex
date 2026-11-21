@@ -99,7 +99,11 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
                 # Classify explicit dangerous/network shell intent before that
                 # wrapper can gain automatic build/test permission.
                 script_class = classify(script, "cmd", "appcontainer").cls
-                risk = script_class if script_class in {"dangerous", "network"} else "safe"
+                risk: Literal["safe", "network", "dangerous"] = "safe"
+                if script_class == "dangerous":
+                    risk = "dangerous"
+                elif script_class == "network":
+                    risk = "network"
                 checks.append(DetectedCheck(f"npm:{name}:{path}", command, risk))
         elif item.name == "Cargo.toml":
             command = "cargo test" if directory == "." else f"cargo test --manifest-path {_quoted(path)}"
