@@ -174,7 +174,7 @@ def _matches_type(value: Any, name: str) -> bool:
         "string": lambda: isinstance(value, str),
         "integer": lambda: isinstance(value, int) and not isinstance(value, bool),
         "number": lambda: isinstance(value, (int, float)) and not isinstance(value, bool)
-        and math.isfinite(value),
+        and (isinstance(value, int) or math.isfinite(value)),
         "boolean": lambda: isinstance(value, bool),
         "null": lambda: value is None,
     }.get(name, lambda: False)()
