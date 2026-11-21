@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, Protocol
@@ -30,6 +31,8 @@ from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyErro
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
 
+
+logger = logging.getLogger(__name__)
 
 EventKind = Literal["step", "output", "approval", "status"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -295,14 +298,14 @@ class AgentRuns:
                 self._emit(managed, "status", {"status": "pending"})
                 self._submit(managed, resume=False)
                 return created
-            except BaseException:
+            except Exception:
                 self._active_id = None
                 self._live.pop(run_id, None)
                 if copy is not None:
                     try:
                         copy.discard()
-                    except WorkCopyError:
-                        pass
+                    except WorkCopyError as exc:
+                        logger.warning("Agent work-copy cleanup failed (%s).", exc.code)
                 raise
 
     def _submit(self, managed: _LiveRun, *, resume: bool) -> None:
@@ -321,7 +324,8 @@ class AgentRuns:
             with self._lock:
                 self._emit(managed, "status", {"status": "running"})
             result = managed.loop.resume(managed.run_id) if resume else managed.loop.run(managed.run_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Agent worker failed (%s).", type(exc).__name__)
             # A model/tool exception may contain a prompt, path, or source
             # bytes. Never log it or return it in a response.
             try:
@@ -336,8 +340,8 @@ class AgentRuns:
                             managed.run_id, owner=managed.owner,
                             status="failed", stop_reason="agent_error",
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Agent worker status recovery failed (%s).", type(exc).__name__)
         finally:
             with self._lock:
                 try:
@@ -357,11 +361,11 @@ class AgentRuns:
                     })
                     if current.status in _TERMINAL:
                         self._active_id = None
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Agent event publishing failed (%s).", type(exc).__name__)
                     # A failure to read status is NOT proof that a worker has
                     # finished. Retain the slot, even if this blocks new work,
                     # rather than accidentally admit two active runs.
-                    pass
                 managed.driving = False
 
     def list_runs(self, *, owner: str) -> list[AgentRun]:
@@ -467,8 +471,8 @@ class AgentRuns:
         if managed is not None:
             try:
                 managed.loop.cancel(managed.run_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Agent shutdown cancellation failed (%s).", type(exc).__name__)
         # Model transport is closed by the application after this step. Never
         # wait indefinitely for an uncooperative network/model call.
         self._executor.shutdown(wait=False, cancel_futures=True)
