@@ -1,0 +1,10 @@
+{
+  "goal": "Rename display_name to greet in helpers.py, card.py and summary.py, updating every import and call across those files. Leave rename_cases.py unchanged. Verify with python -m pytest -q rename_cases.py.",
+  "expected_changes": {
+    "helpers.py": "def greet(name: str) -> str:\n    return f\"Hello, {name}!\"\n",
+    "card.py": "from helpers import greet\n\n\ndef card_line(name: str) -> str:\n    return greet(name)\n",
+    "summary.py": "from helpers import greet\n\n\ndef summary_line(name: str) -> str:\n    return \"Summary: \" + greet(name)\n"
+  },
+  "answer_contains": "Renamed",
+  "require_read": true
+}
