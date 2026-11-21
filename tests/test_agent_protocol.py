@@ -153,7 +153,7 @@ def test_unoffered_tool_is_rejected_on_every_path(path: str) -> None:
         ('{"text":"a","tool_calls":[],"finish":"stop","route":"shell"}', "extra_fields"),
         ('{"text":"a","finish":"stop"}', "missing_fields"),
         ('{"text":"a","tool_calls":[],"finish":"tool_calls"}', "invalid_finish"),
-        ('`json\n{}\n`', "invalid_json"),
+        ('```json\n{}\n```', "invalid_json"),
     ],
 )
 def test_strict_fallback_rejects_untrusted_json_envelopes(content: str, code: str) -> None:
