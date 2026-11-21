@@ -207,14 +207,11 @@ class ChatClient(Protocol):
         cancellation_event: Event | None = None,
         on_delta: Callable[[str, str], None] | None = None,
         think: bool | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        format: str | dict[str, Any] | None = None,
     ) -> dict:
         ...
 
 
 class OllamaChatClient:
-    tool_protocol_runtime = "ollama"
     """Thin pass-through wrapping a real ``ollama.Client`` instance.
 
     ``stream_client_factory`` is what makes Stop prompt. The ollama package
@@ -230,6 +227,8 @@ class OllamaChatClient:
     streams through the shared client and can only notice Stop between
     chunks.
     """
+
+    tool_protocol_runtime = "ollama"
 
     def __init__(
         self,
@@ -422,7 +421,6 @@ class OllamaChatClient:
 
 
 class RoutingChatClient:
-    tool_protocol_runtime = "routing"
     """Dispatches each individual ``chat()`` call by the model tag's prefix.
 
     Dispatch is deliberately per-call, not per-agent-instance: one
@@ -431,6 +429,8 @@ class RoutingChatClient:
     turn (``_generation_snapshot()`` in ``api/routes.py`` resolves
     ``translation_model`` separately from the chat model).
     """
+
+    tool_protocol_runtime = "routing"
 
     def __init__(
         self, ollama_client: ChatClient, llamacpp_client: ChatClient, cloud_client: ChatClient | None = None,
