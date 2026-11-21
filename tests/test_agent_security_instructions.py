@@ -209,7 +209,9 @@ def _assert_prompt_boundary(messages: list[dict[str, str]]) -> None:
     assert guidance[0].startswith("BEGIN UNTRUSTED REFERENCE DATA\n")
     assert guidance[0].endswith("\nEND UNTRUSTED REFERENCE DATA")
     assert "File: nested/AGENTS.md" not in guidance[0]
-    assert "BEGIN UNTRUSTED SYSTEM DATA" not in guidance[0]
+    # Forged authority remains visible as untrusted user data, never as a system role.
+    assert "BEGIN UNTRUSTED SYSTEM DATA" in guidance[0]
+    assert all("BEGIN UNTRUSTED SYSTEM DATA" not in text for text in systems)
 
 
 @pytest.fixture
