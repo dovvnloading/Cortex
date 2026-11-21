@@ -643,7 +643,7 @@ export class CortexApi {
   }
 
   agentRun(runId: string): Promise<AgentRunResponse> {
-    return this.request<AgentRunResponse>("/agent/runs/" + encodeURIComponent(runId));
+    return this.request<AgentRunResponse>(`/agent/runs/${encodeURIComponent(runId)}`);
   }
 
   streamAgentRun(
@@ -652,26 +652,26 @@ export class CortexApi {
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
     return this.streamEvents<AgentSSEEvent>(
-      "/agent/runs/" + encodeURIComponent(runId) + "/events", onEvent, options,
+      `/agent/runs/${encodeURIComponent(runId)}/events`, onEvent, options,
     ).then(() => undefined);
   }
 
   decideAgentApproval(runId: string, seq: number, decision: DecideAgentApproval["decision"]): Promise<AgentRunResponse> {
     return this.request<AgentRunResponse>(
-      "/agent/runs/" + encodeURIComponent(runId) + "/approvals/" + encodeURIComponent(String(seq)),
+      `/agent/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(seq)}`,
       { method: "POST", body: JSON.stringify({ decision }) },
     );
   }
 
   resumeAgentRun(runId: string): Promise<AgentRunResponse> {
     return this.request<AgentRunResponse>(
-      "/agent/runs/" + encodeURIComponent(runId) + "/resume", { method: "POST" },
+      `/agent/runs/${encodeURIComponent(runId)}/resume`, { method: "POST" },
     );
   }
 
   cancelAgentRun(runId: string): Promise<AgentRunResponse> {
     return this.request<AgentRunResponse>(
-      "/agent/runs/" + encodeURIComponent(runId) + "/cancel", { method: "POST" },
+      `/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" },
     );
   }
 
