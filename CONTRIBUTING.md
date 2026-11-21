@@ -196,10 +196,13 @@ The GitHub Actions workflows are part of the code and get the same treatment:
 
 - `actionlint` checks them for mistakes (bad expressions, unknown keys, wrong
   runner labels) and `zizmor` audits them for security (unpinned actions,
-  template injection, persisted credentials). Both are pinned in the dev lock
-  and run in `check.ps1` and in CI's `lint` job. Every `uses:` is pinned to a
-  commit with the version as a trailing comment; to bump one, look up the
-  commit for the new tag and change both.
+  template injection, persisted credentials). `zizmor` is pinned in the dev
+  lock; `actionlint` is pinned to a SHA-256-verified release archive by
+  `scripts/run_actionlint.ps1` and downloaded only during workflow linting,
+  never while installing backend test dependencies. Both run in `check.ps1`
+  and CI's `lint` job. Every `uses:` is pinned to a commit with the version
+  as a trailing comment; to bump one, look up the commit for the new tag and
+  change both.
 - A `dependency-review` job fails a pull request that adds a dependency with
   a known vulnerability.
 - CodeQL (GitHub's default setup) scans Python, TypeScript and the workflows

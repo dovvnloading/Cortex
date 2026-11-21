@@ -158,14 +158,15 @@ jobs:
       - name: Lint Python
         run: python -m ruff check backend tests tools main.py app_factory.py scripts
 
-      # Both linters are console scripts pinned in the dev lock, so this runs
-      # the same versions as scripts/check.ps1. actionlint catches workflow
-      # mistakes (bad expressions, unknown keys, wrong runner labels); zizmor
-      # audits them for security (unpinned actions, template injection,
-      # persisted credentials). The token lets zizmor also confirm that every
-      # pinned commit really exists in the action's own repository.
+      # actionlint v1.7.12 is fetched and SHA-256-verified only by the
+      # workflow-lint step, not built while installing the dev lock in every
+      # backend test shard. scripts/check.ps1 uses the same pinned runner.
+      # zizmor remains pinned in the dev lock. actionlint checks workflow
+      # syntax; zizmor audits security and can verify pinned action commits
+      # with the CI token.
       - name: Lint workflows
-        run: actionlint -shellcheck= -pyflakes=
+        shell: pwsh
+        run: ./scripts/run_actionlint.ps1
 
       - name: Audit workflows
         env:

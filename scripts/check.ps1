@@ -159,19 +159,18 @@ if (-not $SkipBackend) {
         python -m ruff check backend tests tools main.py app_factory.py scripts
     }
 
-    # The same two checks as quality.yml's `Lint workflows` and `Audit
-    # workflows` steps, from the same pinned versions. zizmor runs offline
-    # here; CI has a token for the audits that consult GitHub.
+    # The same pinned actionlint release as quality.yml's workflow-lint step.
+    # Only this step fetches the SHA-256-verified binary; zizmor is installed
+    # from the dev lock and runs offline here (CI supplies a GitHub token).
     Invoke-Step 'Lint workflows (actionlint, zizmor)' {
-        $actionlint = Find-PythonScript 'actionlint'
         $zizmor = Find-PythonScript 'zizmor'
-        if (-not $actionlint -or -not $zizmor) {
-            Write-Host '   actionlint or zizmor is not installed; CI still enforces this.' -ForegroundColor Yellow
-            Write-Host '   Install them with: python -m pip install -r requirements-dev.lock.txt' -ForegroundColor Yellow
+        if (-not $zizmor) {
+            Write-Host '   zizmor is not installed; CI still enforces this.' -ForegroundColor Yellow
+            Write-Host '   Install it with: python -m pip install -r requirements-dev.lock.txt' -ForegroundColor Yellow
             $global:LASTEXITCODE = $SKIPPED_EXIT_CODE
             return
         }
-        & $actionlint -shellcheck= -pyflakes=
+        & (Join-Path $PSScriptRoot 'run_actionlint.ps1')
         if ($LASTEXITCODE -ne 0) { return }
         & $zizmor --offline .github/workflows
     }
