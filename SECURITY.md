@@ -85,7 +85,12 @@ bytes in `workspace_checkpoints.sqlite` before writing. Explicit undo or
 restore checks current hashes and refuses unexpected changes. It never
 runs automatically. The Agent page exposes reviewed changes, separately
 confirmed acceptance and discard, and confirmed journal-backed undo.
-Historical runs can be reopened and their events replayed.
+Historical runs can be reopened and their events replayed within their
+authenticated session. Agent-run undo checkpoints share the journal but
+remain scoped to the run's bearer session. The **Saved recovery checkpoints**
+panel in Agent mode instead lists legacy installation-owned Project
+workspace copies, including when Agent execution is disabled; a new bearer
+session cannot use the earlier session's Agent run undo.
 
 The Windows AppContainer launcher uses a fresh low-privilege profile. It
 grants write permission only to the work copy. Permitted toolchain folders

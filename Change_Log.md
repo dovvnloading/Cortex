@@ -16,12 +16,13 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 ### Changed
 
 - Fold the separate Project workspace page into Agent mode (#549), removing its
-  page and navigation links. The **Saved recovery checkpoints** panel is now in
-  Agent mode even when Agent execution is disabled. Users can refresh saved
-  checkpoints and confirm restore or discard there. Old `/workspace` bookmarks
-  redirect to `/agent`. Historical journals, authenticated recovery/workspace
-  APIs and the read-only CLI remain available without data migration or
-  automatic source writes.
+  page and navigation links. The **Saved recovery checkpoints** panel now lives
+  in Agent mode even when Agent execution is disabled. It lists legacy,
+  installation-owned checkpoints with Refresh and separately confirmed
+  restore/discard; Agent-run undo is a separate, session-scoped action in run
+  review. Old `/workspace` bookmarks redirect to `/agent`. Historical
+  journals, authenticated recovery/workspace APIs and the read-only CLI
+  remain available without data migration or automatic source writes.
 
 ### Security
 
@@ -53,11 +54,12 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   offers Stop. No source changes are automatically applied.
 
 
-- Durable, owner-bound source checkpoints are saved to a dedicated private
-  SQLite recovery journal **before** applying approved patches; after a crash
-  or restart the Agent mode recovery panel can list, manually restore or
-  explicitly discard copies. Recovery verifies path and source hashes, never runs by
-  itself, and rejects external modifications or corrupt backups.
+- Durable, installation-owned checkpoints for the former Project workspace
+  were saved in a private SQLite journal **before** approved patches were
+  applied. After a crash or restart, Agent mode's recovery panel can list,
+  manually restore or explicitly discard those legacy copies. Recovery
+  verifies project identity and current source hashes before writing, never
+  runs by itself, and rejects external modifications or corrupt backups.
 
 - The former Project workspace page allowed a consented in-session source
   refresh to inspect failed tests and propose another patch without losing

@@ -244,31 +244,38 @@ workflow is replaced in the desktop UI by Agent's consent-gated work-copy
 workflow; the read-only `tools/workspace_research.py` CLI remains available.
 
 The **Saved recovery checkpoints** panel is now in Agent mode, including
-when Agent execution is disabled in Settings. It lists historical durable
-source checkpoints and their project roots, paths, timestamps, and states,
-without revealing backed-up file contents or requiring a new Agent run.
+when Agent execution is disabled in Settings. It lists installation-owned
+checkpoints from the former Project workspace, showing project roots,
+paths, timestamps and states without revealing backed-up source bytes or
+requiring a new Agent run. It does not list accepted Agent-run edits.
 Choose **Restore originals** or **Discard backup**, each requiring its own
-confirmation. Restoration verifies the project root, file identity and
-every current source hash before making any changes, and refuses an entire
-restore if an external edit or corrupt checkpoint is detected. Discard
+confirmation. Before changing any files, restoration checks the project
+root, file identity and current source hashes. An unexpected edit or
+corrupt checkpoint found during preflight prevents restoration from
+starting. A failure after restoration begins can leave some originals
+restored; the journal stays available for an explicit retry. Discard
 deletes the recovery copy without changing project files. Recovery never
-runs automatically; an interrupted restore can be explicitly retried.
+runs automatically.
 
-Before applying reviewed edits, Cortex saves original source bytes and
-expected hashes in the private `workspace_checkpoints.sqlite` journal.
-Historical checkpoints survive a crash, app restart, session expiry or
-discarded work copy and remain installation-owner-scoped. They store up to
-32 files per checkpoint and 64 MiB of original data in total. Source bytes
-are protected by OS permissions but are not separately encrypted; keep
-independent Git/backups and protect Cortex's data directory. Checkpoints
-do not guarantee preservation of additional Windows metadata or ACLs.
+The former Project workspace saved original source bytes and expected
+hashes in the private `workspace_checkpoints.sqlite` journal before
+approved writes. Those installation-owned checkpoints survive crashes,
+app restarts, session expiry and closure of the former workspace. The
+journal stores up to 32 files per checkpoint and 64 MiB of original data
+across all checkpoints. Source bytes are protected by OS permissions but
+are not separately encrypted; keep independent Git/backups and protect
+Cortex's data directory. Checkpoints do not guarantee preservation of
+additional Windows metadata or ACLs.
 
-Agent run review also offers a separate confirmed undo for accepted Agent
-edits, including after a disposable work copy is gone. The saved-checkpoint
-list retains recovery of patches created by the former Project workspace.
-The existing authenticated checkpoint HTTP endpoints and legacy workspace
-API are retained for compatibility; the CLI and backend snapshot/checkpoint
-implementations have not been removed.
+Accepting selected Agent-run edits also creates a checkpoint in the same
+journal, but it is scoped to the Agent run's bearer session rather than
+the installation-owned legacy list. Use the run's separately confirmed
+**Undo** action to restore accepted Agent edits, including after the
+disposable work copy has been discarded, while that session and checkpoint
+remain accessible. A new bearer session cannot access the earlier
+session's Agent runs or undo. The existing authenticated checkpoint HTTP
+endpoints and legacy workspace API remain for compatibility; the CLI
+and backend snapshot/checkpoint implementations have not been removed.
 
 ### Agent mode
 
