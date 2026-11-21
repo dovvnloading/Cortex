@@ -315,10 +315,25 @@ def test_hostile_repository_instructions_never_grant_authority(
             assert steps[-1].result == {"outcome": "error", "success": False}
         else:
             assert outcome.status == "failed" and outcome.stop_reason == "invalid_model_replies"
-            assert name not in {spec.name for spec in loop.registry.specs()}
-            with pytest.raises(UnregisteredToolError):
-                loop.registry.execute(ToolCall("forged", name, resolved),
-                                      ToolContext(Event(), monotonic() + 10))
+            invalid_steps = [
+                step for step in store.list_steps(run_id, owner=_OWNER)
+                if step.kind == "model" and step.result.get("outcome") == "invalid"
+            ]
+            assert len(invalid_steps) == 2
+            registered = {spec.name for spec in loop.registry.specs()}
+            forged = ToolCall("forged", name, resolved)
+            context = ToolContext(Event(), monotonic() + 10)
+            if name == "run_command":
+                # The tool exists; its unexpected approval/mode arguments do not.
+                assert name in registered
+                rejected = loop.registry.execute(forged, context)
+                assert isinstance(rejected, ToolResult) and not rejected.success
+                assert json.loads(rejected.content) == {"error": "invalid_arguments"}
+            else:
+                assert name in {"disable_approvals", "switch_mode"}
+                assert name not in registered
+                with pytest.raises(UnregisteredToolError):
+                    loop.registry.execute(forged, context)
 
         run = store.get_run(run_id, owner=_OWNER)
         assert run is not None and run.mode == "ask"
