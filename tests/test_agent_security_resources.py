@@ -235,7 +235,7 @@ def _approve_and_run(
     assert before.approval_request["network"] is (kind == "jobonly")
     assert not (copy.path / "spawn-report.json").exists()
     pending = [step for step in ledger.list_steps(run_id, owner=_OWNER) if step.kind == "tool"]
-    assert len(pending) == 1 and pending[0].result is None
+    assert len(pending) == 1 and pending[0].result == {}
     ledger.decide_approval(run_id, owner=_OWNER, step_seq=pending[0].seq, decision="approved")
     finished = loop.resume(run_id)
     assert finished.status == "completed", f"status={finished.status}, reason={finished.stop_reason}"
@@ -244,7 +244,7 @@ def _approve_and_run(
     assert len(steps) == 1 and steps[0].result == {"outcome": "error", "success": False}
     assert model.turns == 2 and model.observation is not None
     detail = model.observation
-    assert detail.get("exit_code") != 0 or detail.get("timed_out") is True, detail
+    assert detail.get("exit_code") not in (None, 0) or detail.get("timed_out") is True, detail
     assert not (copy.project_root / "spawn-report.json").exists()
     assert (copy.project_root / "sentinel.py").read_text() == "original = True\n"
     return detail
@@ -308,6 +308,7 @@ def test_memory_bomb_is_rejected_by_real_job_commit_limits(
     script = (
         "import sys\n"
         "blocks=[]\n"
+        "print('ALLOCATION_STARTED',flush=True)\n"
         "try:\n"
         " for _ in range(20): blocks.append(bytearray(8*1024*1024))\n"
         "except MemoryError:\n"
@@ -321,6 +322,7 @@ def test_memory_bomb_is_rejected_by_real_job_commit_limits(
         result = _approve_and_run(ledger, run_id, loop, model, kind, copy)
         assert result.get("timed_out") is False, result
         assert result["exit_code"] != 0, result
+        assert "ALLOCATION_STARTED" in str(result.get("output", "")), result
         assert "MEMORY_LIMIT_BYPASSED" not in str(result.get("output", ""))
     _check_profiles(isolated_launchers, previous)
 
