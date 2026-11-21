@@ -20,6 +20,14 @@ function fakeClient() {
     decideAgentApproval: vi.fn().mockResolvedValue({ ...run, status: "running" }),
     resumeAgentRun: vi.fn().mockResolvedValue({ ...run, status: "completed" }),
     cancelAgentRun: vi.fn().mockResolvedValue({ ...run, status: "cancelled" }),
+    agentChangeset: vi.fn().mockImplementation(async (runId: string) => ({
+      run_id: runId,
+      changes: [{ path: "app.py", kind: "modify", baseline_sha256: "before", new_sha256: "after",
+        diff: "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 42\n+value = 43\n" }],
+    })),
+    acceptAgentChanges: vi.fn().mockResolvedValue({ paths: ["app.py"] }),
+    discardAgentRun: vi.fn().mockResolvedValue({ discarded: true }),
+    undoAgentChanges: vi.fn().mockResolvedValue({ paths: ["app.py"] }),
   };
 }
 
@@ -84,7 +92,7 @@ describe("AgentPage", () => {
       confirmed_project: true,
       confirmed_cloud: true,
     })));
-    expect(screen.getByRole("checkbox", { name: /I approve Cortex reading/i })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /I approve Cortex reading/i, hidden: true })).not.toBeChecked();
   });
 
   it("uses the existing ApprovalCard and posts only a one-time human decision before resuming", async () => {
@@ -122,4 +130,114 @@ describe("AgentPage", () => {
     await waitFor(() => expect(api.cancelAgentRun).toHaveBeenCalledWith("run-1"));
     expect(await screen.findByText("Run stopped")).toBeInTheDocument();
   });
+  it("loads the changeset and renders the merged review for a finished run", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByRole("heading", { name: "Review agent changes" })).toBeVisible();
+    expect(within(dialog).getByRole("checkbox", { name: "Select app.py" })).toBeChecked();
+    expect(within(dialog).getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+    expect(api.agentChangeset).toHaveBeenCalledWith("run-1");
+    expect(api.acceptAgentChanges).not.toHaveBeenCalled();
+  });
+
+  it("never accepts without a second confirmation or before the server acknowledges paths", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    let resolveAccept!: (value: { paths: string[] }) => void;
+    api.acceptAgentChanges.mockImplementation(() => new Promise((resolve) => { resolveAccept = resolve; }));
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    await user.click(within(dialog).getByRole("button", { name: "Accept selected to project" }));
+    expect(api.acceptAgentChanges).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(api.acceptAgentChanges).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Accept selected to project" }));
+    await user.click(within(dialog).getByRole("button", { name: "Confirm accept" }));
+    expect(api.acceptAgentChanges).toHaveBeenCalledWith("run-1", { paths: ["app.py"], confirmed: true });
+    expect(within(dialog).getByText(/Waiting for the server to confirm/)).toBeVisible();
+    expect(within(dialog).queryByText("Changes accepted to the project.")).not.toBeInTheDocument();
+
+    resolveAccept({ paths: ["app.py"] });
+    expect(await within(dialog).findByText("Changes accepted to the project.")).toBeVisible();
+    expect(within(dialog).getByText("Accepted to the project: app.py")).toBeVisible();
+  });
+
+  it("confirms discard, reports the server result, and never offers acceptance afterward", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    await user.click(within(dialog).getByRole("button", { name: "Discard all" }));
+    expect(api.discardAgentRun).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Confirm discard" }));
+    await waitFor(() => expect(api.discardAgentRun).toHaveBeenCalledWith("run-1"));
+    expect(await screen.findByText("Work copy discarded. Discard did not alter the project.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Accept selected to project" })).not.toBeInTheDocument();
+    expect(api.acceptAgentChanges).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh confirmation before undo, then shows restored paths", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Accept selected to project" }));
+    await user.click(within(dialog).getByRole("button", { name: "Confirm accept" }));
+    await within(dialog).findByText("Changes accepted to the project.");
+
+    await user.click(within(dialog).getByRole("button", { name: "Undo" }));
+    expect(api.undoAgentChanges).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("group", { name: "Undo confirmation" })).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Confirm undo" }));
+    await waitFor(() => expect(api.undoAgentChanges).toHaveBeenCalledWith("run-1", { confirmed: true }));
+    expect(await within(dialog).findByText("Restored original project files: app.py")).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+  });
+
+  it("keeps the review open and reports a rejected accept without success", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.acceptAgentChanges.mockRejectedValueOnce(new Error("network unavailable"));
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Accept selected to project" }));
+    await user.click(within(dialog).getByRole("button", { name: "Confirm accept" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Could not confirm acceptance");
+    expect(within(dialog).queryByText("Changes accepted to the project.")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+  });
+
+  it("opens a selected past run from history and follows its events", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    const old = { ...run, id: "historical-run", project_root: "C:\\\\archive\\\\example" };
+    api.agentRuns.mockResolvedValue({ runs: [old] });
+    api.agentRun.mockResolvedValue(old);
+    page(api);
+
+    await user.click(await screen.findByRole("button", { name: "Open run: Goal unavailable" }));
+    await waitFor(() => expect(api.agentRun).toHaveBeenCalledWith("historical-run"));
+    expect(await screen.findByRole("heading", { name: "Run completed" })).toBeVisible();
+    await waitFor(() => expect(api.agentChangeset).toHaveBeenCalledWith("historical-run"));
+    await waitFor(() => expect(api.streamAgentRun).toHaveBeenCalledWith(
+      "historical-run", expect.any(Function), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+  });
+
 });
