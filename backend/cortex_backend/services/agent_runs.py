@@ -471,7 +471,7 @@ class AgentRuns:
                 if self._checkpoint_store is None and not database.is_file():
                     return False
                 store = self._checkpoint_store or WorkspaceCheckpointStore(database)
-                checkpoint = store.get(owner=owner, checkpoint_id=run_id)
+                checkpoint = store.get(owner=owner, checkpoint_id=f"agent-workcopy-{run_id}")
                 return checkpoint.state in {"active", "pending"} and bool(checkpoint.files)
             except Exception:
                 # Missing, unreadable or corrupt checkpoints must fail closed.
