@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, waitForNewChatComposer } from "./fixtures";
 
 test("completes a streamed new-chat parity flow", async ({ page }) => {
   const threadId = "thread-e2e";
@@ -41,6 +41,7 @@ test("completes a streamed new-chat parity flow", async ({ page }) => {
   });
 
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await expect(page.getByText("What will you make today?")).toHaveCount(0);
   await expect(page.getByText("LOCAL, PRIVATE, YOURS")).toHaveCount(0);
@@ -115,6 +116,7 @@ test("supports retry, regenerate, and fork without losing the persisted thread",
   });
 
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
   await page.getByLabel("Message Cortex").fill("fail");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -167,6 +169,7 @@ test("manages settings, permanent memory, and model pull progress", async ({ pag
   });
 
   await page.goto("/#bootstrap=launcher-token");
+  await waitForNewChatComposer(page);
   await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
   await page.getByRole("button", { name: "Select a local model" }).click();
   await page.getByRole("option", { name: /local-chat:7b/i }).click();
