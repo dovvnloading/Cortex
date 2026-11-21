@@ -9,6 +9,7 @@ set them. Output is ephemeral: only bounded excerpts reach tool observations.
 from __future__ import annotations
 
 from collections.abc import Callable
+from _thread import LockType
 from dataclasses import dataclass, field
 import json
 import os
@@ -140,7 +141,7 @@ class _Background:
     pending: bytes = b""
     dropped: bool = False
     stopped: bool = False
-    lock: Lock = field(default_factory=Lock)
+    lock: LockType = field(default_factory=Lock)
 
     def append(self, data: bytes) -> None:
         with self.lock:
