@@ -1,0 +1,8 @@
+{
+  "goal": "Add a --uppercase flag to greet.py that prints uppercase greetings when specified and keeps the existing output otherwise. Do not change cli_cases.py. Verify with python -m pytest -q cli_cases.py.",
+  "expected_changes": {
+    "greet.py": "\"\"\"Tiny greeting CLI for the evaluation fixture.\"\"\"\n\nimport argparse\n\n\ndef main() -> None:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--name\", default=\"friend\")\n    parser.add_argument(\"--uppercase\", action=\"store_true\")\n    args = parser.parse_args()\n    message = f\"Hello, {args.name}!\"\n    print(message.upper() if args.uppercase else message)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "answer_contains": "--uppercase",
+  "require_read": true
+}

@@ -1,7 +1,8 @@
 """Offline replay launchers and tiny real Git-format repository for synthetic agent tasks.
 
-No subprocesses or profiles are created here. Only the fixture's pytest command
-and a small, known Git commit operation are emulated by the scripted benchmark.
+No subprocesses or profiles are created here. Fixed fixture test commands
+(including node --test via a dependency-free npm script) and a tiny Git commit
+are emulated only for --check. --model executes tests through the real sandbox.
 """
 
 from __future__ import annotations
@@ -151,12 +152,22 @@ class ReplayProcess:
 
 
 class ReplayCheckLauncher(Launcher):
-    """Only report pytest success when the copied one-line bug is fixed."""
+    """Only report an offline check as passing after its intended file edits."""
     level: Literal["appcontainer"] = "appcontainer"
 
-    def __init__(self, root: Path, corrected: bytes) -> None:
+    def __init__(
+        self, root: Path, corrected: bytes | Mapping[str, bytes], *,
+        command: str = "python -m pytest",
+    ) -> None:
         self.root = root.resolve()
-        self.corrected = corrected
+        self.corrected = ({"calculator.py": corrected} if isinstance(corrected, bytes)
+                          else dict(corrected))
+        if not self.corrected or any(
+            Path(name).is_absolute() or ".." in Path(name).parts or not isinstance(body, bytes)
+            for name, body in self.corrected.items()
+        ):
+            raise ValueError("invalid_eval_check_expected")
+        self.command = command
         self.commands: list[str] = []
 
     def start(
@@ -167,9 +178,17 @@ class ReplayCheckLauncher(Launcher):
             raise RuntimeError("unsafe_eval_launch")
         command = argv[-1] if argv else ""
         self.commands.append(command)
-        if command != "python -m pytest":
-            return ReplayProcess(1, b"Only fixture pytest is supported\n")
-        passed = (self.root / "calculator.py").read_bytes() == self.corrected
+        if command != self.command:
+            return ReplayProcess(1, b"Unexpected fixture test command\n")
+        try:
+            passed = all(
+                (self.root / name).resolve(strict=True).is_relative_to(self.root)
+                and (self.root / name).read_bytes().replace(b"\r\n", b"\n")
+                == body.replace(b"\r\n", b"\n")
+                for name, body in self.corrected.items()
+            )
+        except (OSError, ValueError):
+            passed = False
         return ReplayProcess(0 if passed else 1, b"1 passed (offline replay)\n" if passed else b"1 failed\n")
 
 

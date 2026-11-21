@@ -53,7 +53,16 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "age
 TASK_NAMES = (
     "read-and-answer", "single-file-edit", "multi-file-edit",
     "outside-workcopy-refusal", "fix-failing-test", "commit-the-change",
+    "fix-failing-js-test", "rename-across-files", "add-cli-flag", "create-file-from-spec",
 )
+# The actual checks use these commands inside a sandbox. --check substitutes
+# only their process boundary; it never installs packages or contacts a model.
+VERIFICATION_COMMANDS = {
+    "fix-failing-js-test": "npm run test",  # package.json runs plain node --test
+    "rename-across-files": "python -m pytest -q rename_cases.py",
+    "add-cli-flag": "python -m pytest -q cli_cases.py",
+    "create-file-from-spec": "python -m pytest -q spec_cases.py",
+}
 MAX_FILES = 64
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
@@ -150,6 +159,64 @@ SCRIPTED_REPLIES: dict[str, tuple[str, ...]] = {
         })),
         _tool_turn(("git_commit", {"message": "Mark release ready"})),
         _final("Updated and committed release.txt."),
+    ),
+    "fix-failing-js-test": (
+        _tool_turn(("read_file", {"path": "math.js"}), ("read_file", {"path": "math.test.js"}),
+                   ("read_file", {"path": "package.json"})),
+        _tool_turn(("edit_file", {
+            "path": "math.js", "old": "return left - right;", "new": "return left + right;",
+        })),
+        # cmd selects npm.cmd on Windows rather than execution-policy-restricted npm.ps1.
+        _tool_turn(("run_command", {
+            "command": "npm run test", "timeout_s": 30, "network": False, "shell": "cmd",
+        })),
+        _final("Fixed the JavaScript addition and verified it with node --test."),
+    ),
+    "rename-across-files": (
+        _tool_turn(("read_file", {"path": "helpers.py"}), ("read_file", {"path": "card.py"}),
+                   ("read_file", {"path": "summary.py"}), ("read_file", {"path": "rename_cases.py"})),
+        _tool_turn(("edit_file", {"path": "helpers.py", "old": "display_name", "new": "greet"}),
+                   ("edit_file", {"path": "card.py", "old": "display_name", "new": "greet",
+                                  "replace_all": True}),
+                   ("edit_file", {"path": "summary.py", "old": "display_name", "new": "greet",
+                                  "replace_all": True})),
+        _tool_turn(("run_command", {
+            "command": "python -m pytest -q rename_cases.py", "timeout_s": 30,
+            "network": False, "shell": "powershell",
+        })),
+        _final("Renamed the function across files and verified the rename test."),
+    ),
+    "add-cli-flag": (
+        _tool_turn(("read_file", {"path": "greet.py"}), ("read_file", {"path": "cli_cases.py"})),
+        _tool_turn(("edit_file", {
+            "path": "greet.py",
+            "old": "    args = parser.parse_args()\n    print(f\"Hello, {args.name}!\")",
+            "new": "    parser.add_argument(\"--uppercase\", action=\"store_true\")\n"
+                   "    args = parser.parse_args()\n"
+                   "    message = f\"Hello, {args.name}!\"\n"
+                   "    print(message.upper() if args.uppercase else message)",
+        })),
+        _tool_turn(("run_command", {
+            "command": "python -m pytest -q cli_cases.py", "timeout_s": 30,
+            "network": False, "shell": "powershell",
+        })),
+        _final("Added the --uppercase CLI flag and verified its behavior."),
+    ),
+    "create-file-from-spec": (
+        _tool_turn(("read_file", {"path": "SPEC.md"}), ("read_file", {"path": "spec_cases.py"})),
+        _tool_turn(("write_file", {
+            "path": "slug.py",
+            "content": "import re\n\n\ndef slugify(text: str) -> str:\n"
+                       "    ascii_lower = text.translate(str.maketrans(\n"
+                       "        \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\", \"abcdefghijklmnopqrstuvwxyz\",\n"
+                       "    ))\n"
+                       "    return re.sub(r\"[^a-z0-9]+\", \"-\", ascii_lower).strip(\"-\")\n",
+        })),
+        _tool_turn(("run_command", {
+            "command": "python -m pytest -q spec_cases.py", "timeout_s": 30,
+            "network": False, "shell": "powershell",
+        })),
+        _final("Created slug.py from the spec and verified its examples."),
     ),
 }
 
@@ -397,7 +464,7 @@ def _durations(start: float) -> tuple[float, float]:
 def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
     start = monotonic()
     # --check does not start processes; model-driven process tasks require Windows.
-    if mode == "model" and name in {"fix-failing-test", "commit-the-change"} and sys.platform != "win32":
+    if mode == "model" and name in {"fix-failing-test", "commit-the-change", *VERIFICATION_COMMANDS} and sys.platform != "win32":
         wall_seconds, wall_minutes = _durations(start)
         return TaskResult(
             name=name, passed=False, status="skipped",
@@ -447,9 +514,21 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
             shell: ShellTools | None = None
             replay_checks: ReplayCheckLauncher | None = None
             auto_pytest_passes: list[bool] = []
-            if name == "fix-failing-test":
+            issued_commands: list[str] = []
+            if name == "fix-failing-test" or name in VERIFICATION_COMMANDS:
                 if mode == "check":
-                    replay = ReplayCheckLauncher(workcopy, expected["calculator.py"])
+                    if name == "fix-failing-test":
+                        replay = ReplayCheckLauncher(workcopy, expected["calculator.py"])
+                    else:
+                        # The offline process boundary checks the edited bytes.
+                        # No fixture command is executed until --model mode.
+                        corrected = {
+                            path: expected[path] for path, body in task.expected_changes.items()
+                            if body is not None
+                        }
+                        replay = ReplayCheckLauncher(
+                            workcopy, corrected, command=VERIFICATION_COMMANDS[name],
+                        )
                     replay_checks = replay
                     shell = ShellTools(
                         workcopy, run.id, mode="auto_sandboxed",
@@ -458,22 +537,31 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                     )
                 else:
                     shell = ShellTools(workcopy, run.id, mode="auto_sandboxed")
+
+                def record_shell(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+                    if call.name == "run_command":
+                        command = call.arguments.get("command")
+                        issued_commands.append(command if isinstance(command, str) else "")
+                    assert shell is not None
+                    return shell.handle(call, context)
+
                 for spec in SHELL_TOOLS:
-                    registry.register(spec, shell.handle)
-                project_checks = CheckTools(workcopy, shell)
+                    registry.register(spec, record_shell if name in VERIFICATION_COMMANDS else shell.handle)
+                if name == "fix-failing-test":
+                    project_checks = CheckTools(workcopy, shell)
 
-                def run_tracked_check(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
-                    result = project_checks.handle(call, context)
-                    if call.id.startswith("auto-check-") and isinstance(result, ToolResult):
-                        try:
-                            detail = json.loads(result.content)
-                        except ValueError:
-                            detail = None
-                        if isinstance(detail, dict) and detail.get("check") == "pytest":
-                            auto_pytest_passes.append(detail.get("status") == "passed")
-                    return result
+                    def run_tracked_check(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+                        result = project_checks.handle(call, context)
+                        if call.id.startswith("auto-check-") and isinstance(result, ToolResult):
+                            try:
+                                detail = json.loads(result.content)
+                            except ValueError:
+                                detail = None
+                            if isinstance(detail, dict) and detail.get("check") == "pytest":
+                                auto_pytest_passes.append(detail.get("status") == "passed")
+                        return result
 
-                registry.register(CHECK_TOOL, run_tracked_check)
+                    registry.register(CHECK_TOOL, run_tracked_check)
             elif name == "commit-the-change":
                 register_git_tools(registry, workcopy, run.id)
 
@@ -504,7 +592,7 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                 for step in steps
             )
             workcopy_files = (_workcopy_snapshot(workcopy)
-                              if name in {"fix-failing-test", "commit-the-change"} else _snapshot(workcopy))
+                              if name in {"fix-failing-test", "commit-the-change", *VERIFICATION_COMMANDS} else _snapshot(workcopy))
             checks = {
                 "completed": outcome.status == "completed",
                 "end_state": _normalize_line_endings(workcopy_files) == _normalize_line_endings(expected),
@@ -533,6 +621,26 @@ def _run_task(name: str, *, mode: str, model: str | None) -> TaskResult:
                     else bool(pytest_passes)
                 )
                 checks["verify_completed"] = bool(final_hooks) and bool(auto_pytest_passes) and all(auto_pytest_passes)
+            elif name in VERIFICATION_COMMANDS:
+                # Refuse a superficially correct final file if the real shell
+                # tool did not successfully verify *after* the last mutation.
+                mutations = [
+                    index for index, step in enumerate(steps)
+                    if step.tool in {"write_file", "edit_file", "delete_file", "move_file"}
+                    and step.result.get("success") is True
+                ]
+                verified = [
+                    index for index, step in enumerate(steps)
+                    if step.tool == "run_command" and step.result.get("success") is True
+                ]
+                checks["verification_after_edit"] = (
+                    bool(mutations) and bool(verified) and max(verified) > max(mutations)
+                )
+                command = VERIFICATION_COMMANDS[name]
+                checks["verification_command"] = issued_commands == [command] and (
+                    replay_checks is None or replay_checks.commands == [command]
+                )
+                checks["verify_completed"] = bool(final_hooks) and bool(verified)
             elif name == "commit-the-change":
                 assert baseline is not None
                 one_commit, committed_contents = verify_git_fixture(workcopy, baseline, expected)
