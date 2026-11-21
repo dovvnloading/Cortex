@@ -35,6 +35,12 @@ async function installApiRequestGuard(page: Page) {
   };
 }
 
+/** Bootstrap navigation may complete before the new-chat route mounts its composer. */
+export async function waitForNewChatComposer(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "New thread" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message Cortex" })).toBeVisible();
+}
+
 export const test = base.extend({
   page: async ({ page }, use) => {
     const assertRequests = await installApiRequestGuard(page);
