@@ -38,6 +38,7 @@ def test_discovery_excludes_failing_eval_fixtures_but_keeps_other_nested_tests(t
     modules = (
         "tests/test_basic.py",
         "tests/property/test_property.py",
+        "tests/agent_tasks/test_real_module.py",
         "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py",
         "tests/fixtures/other/test_real_module.py",
     )
@@ -46,6 +47,7 @@ def test_discovery_excludes_failing_eval_fixtures_but_keeps_other_nested_tests(t
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("def test_placeholder(): pass\n", encoding="utf-8")
     assert shards.discover_test_files(tmp_path) == (
+        "tests/agent_tasks/test_real_module.py",
         "tests/fixtures/other/test_real_module.py",
         "tests/property/test_property.py",
         "tests/test_basic.py",

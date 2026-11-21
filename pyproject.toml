@@ -87,9 +87,9 @@ no_implicit_optional = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# These deliberately failing task fixtures are collected only when run from
-# their isolated work copy, not by the repository-wide pytest suite.
-norecursedirs = ["agent_tasks"]
+# tests/conftest.py narrowly excludes only the deliberately failing agent eval
+# fixtures; a generic norecursedirs = ["agent_tasks"] would also hide real tests
+# in unrelated directories with the same name.
 python_files = ["test_*.py"]
 # `backend` is the package under test; `.` (the repository root) is what makes
 # the top-level modules the tests import -- `main`, `app_factory`, `tools` --

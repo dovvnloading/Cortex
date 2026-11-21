@@ -149,10 +149,16 @@ def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> 
     # Use pytest's default test_*.py collection in the isolated project.
     # The outer repository suite explicitly excludes its failing fixtures.
     assert manifest["tool"]["pytest"]["ini_options"] == {"addopts": "-q -p no:cacheprovider"}
-    outer = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
-    assert "agent_tasks" in outer["tool"]["pytest"]["ini_options"]["norecursedirs"]
+    root = Path(__file__).resolve().parents[1]
+    outer = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    # Broad norecursedirs globs also hide real tests in unrelated agent_tasks
+    # directories. Only the specific fixture subtree may be ignored.
+    assert "norecursedirs" not in outer["tool"]["pytest"]["ini_options"]
+    assert 'collect_ignore = ["fixtures/agent_tasks"]' in (
+        root / "tests" / "conftest.py"
+    ).read_text(encoding="utf-8")
     assert "tests/fixtures/agent_tasks/fix-failing-test/repo/test_calculator.py" not in (
-        ci_backend_shards.discover_test_files(Path(__file__).resolve().parents[1])
+        ci_backend_shards.discover_test_files(root)
     )
     assert [test.name for test in repo.glob("test_*.py")] == ["test_calculator.py"]
     assert "assert add(2, 3) == 5" in (repo / "test_calculator.py").read_text(encoding="utf-8")
