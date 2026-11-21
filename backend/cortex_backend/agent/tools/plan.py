@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 import json
-from typing import Literal, TypedDict, cast
+from typing import Literal, Protocol, TypedDict, cast
 
 from ..loop import AgentLoop, LoopResult, _History, _State
 from ..protocol import ToolCall, ToolSpec
@@ -128,6 +128,18 @@ def _has_unfinished_plan(run_store: AgentRunStore, run_id: str, owner: str) -> b
     return items is None or any(item["status"] != "done" for item in items)
 
 
+class _StopCallback(Protocol):
+    def __call__(
+        self, run_id: str, state: _State, status: RunStatus, reason: str, *, answer: str | None = None,
+    ) -> LoopResult:
+        ...
+
+
+class _PlanGuardAttributes(Protocol):
+    _stop: _StopCallback
+    _plan_guard_installed: bool
+
+
 def plan_guard(loop: AgentLoop) -> None:
     """Nudge once per run when a final reply leaves a recorded plan unfinished.
 
@@ -170,5 +182,6 @@ def plan_guard(loop: AgentLoop) -> None:
         return original_stop(run_id, state, status, reason, answer=answer)
 
     loop.before_final = before_final
-    setattr(loop, "_stop", guarded_stop)
-    setattr(loop, "_plan_guard_installed", True)
+    guarded_loop = cast(_PlanGuardAttributes, loop)
+    guarded_loop._stop = guarded_stop
+    guarded_loop._plan_guard_installed = True
