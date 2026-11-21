@@ -14,14 +14,16 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from typing import Final, Literal
+from xml.etree import ElementTree
 
 from ..policy import classify
 from ..protocol import ToolCall, ToolSpec
 from ..sandbox.base import canonical_workcopy
 from ..tool_registry import NeedsApproval, ToolContext, ToolRegistry, ToolResult
 from ..workcopy import _snapshot
-from cortex_backend.services.workspace_context import _safe_root
+from cortex_backend.services.workspace_context import _is_reparse, _safe_root
 from .shell import ShellTools
 
 _CHECK_TIMEOUT_S: Final = 60.0
@@ -49,6 +51,65 @@ def _files(root: str | os.PathLike[str]) -> dict[str, bytes]:
     verified = _safe_root(str(requested))
     source = _snapshot(canonical_workcopy(verified))
     return {name: item.contents for name, item in source.items()}
+
+
+def _msbuild_file_has_opaque_hooks(content: bytes) -> bool:
+    """Treat imports and executable targets as opaque, not as trusted commands.
+
+    In particular, do not resolve or read an Import's Project attribute:
+    MSBuild permits absolute paths, wildcards and variable expansion, so no
+    external import is allowed to become a source of trusted policy. The
+    import element itself always requires a separately approved check.
+    Malformed XML and implicit SDK imports are approval-gated as well.
+    """
+    try:
+        project = ElementTree.fromstring(content)
+    except (ElementTree.ParseError, ValueError, UnicodeError):
+        return True
+    if not isinstance(project.tag, str) or project.tag.rsplit("}", 1)[-1].casefold() != "project":
+        return True
+    if any(key.casefold() == "sdk" for key in project.attrib):
+        return True
+    for element in project.iter():
+        if not isinstance(element.tag, str):
+            continue
+        tag = element.tag.rsplit("}", 1)[-1].casefold()
+        if tag in {"import", "importgroup", "sdk", "usingtask", "exec", "target"}:
+            # Even a custom task without a local UsingTask may be imported
+            # from an SDK or build target. Never auto-run a project Target.
+            return True
+    return False
+
+
+def _implicit_msbuild_import(root: Path, project_path: str) -> bool:
+    """Check only ancestor entries *inside* the verified work copy.
+
+    MSBuild auto-loads Directory.Build.props/targets without an explicit
+    Import. Their contents are excluded from the bounded source snapshot;
+    presence, unreadability or a link is therefore enough to require approval.
+    No imported content is opened, followed or executed by detection.
+    """
+    directory = root.joinpath(*PurePosixPath(project_path).parent.parts)
+    while directory.is_relative_to(root):
+        try:
+            info = directory.lstat()
+        except OSError:
+            return True
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return True
+        for filename in ("Directory.Build.props", "Directory.Build.targets"):
+            try:
+                (directory / filename).lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+            else:
+                return True
+        if directory == root:
+            return False
+        directory = directory.parent
+    return True
 
 
 def workcopy_fingerprint(root: str | os.PathLike[str]) -> str:
@@ -123,16 +184,14 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     # A solution already contains its projects; do not run every csproj again.
     solutions = sorted(path for path in files if path.casefold().endswith(".sln"))
     projects = sorted(path for path in files if path.casefold().endswith(".csproj"))
-    # MSBuild targets can execute commands before tests, including when a
-    # solution rather than an individual project is selected. The bounded
-    # work-copy snapshot omits .targets/.props and excluded build directories,
-    # so an imported hook may not be available to inspect. Treat an explicit
-    # Import as opaque executable code requiring approval, even when its target
-    # cannot be read. Inline Exec and UsingTask remain approval-gated too.
-    build_hooks = any(
-        any(marker in files[path].lower() for marker in (b"<exec", b"<usingtask", b"<import"))
-        for path in files
-        if path.casefold().endswith((".csproj", ".targets", ".props"))
+    # A solution may reference projects outside the bounded snapshot. As with
+    # explicit imports, do not attempt to resolve their paths. Both get an
+    # approval instead of silently trusting an incomplete view.
+    root_path = canonical_workcopy(_safe_root(str(Path(root))))
+    build_hooks = bool(solutions) or any(
+        _msbuild_file_has_opaque_hooks(files[path])
+        or _implicit_msbuild_import(root_path, path)
+        for path in projects
     )
     for path in solutions or projects:
         checks.append(DetectedCheck(
