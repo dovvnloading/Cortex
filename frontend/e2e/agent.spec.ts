@@ -105,7 +105,8 @@ test("Agent mode remains opt-in and exposes confirmed legacy recovery after reti
   await page.getByRole("button", { name: "Restore originals" }).first().click();
   await expect.poll(() => restored.slice()).toEqual(["legacy-pending"]);
   await expect(page.getByText("C:\\dev\\old-project")).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText("Restored 1 source files");
+  await expect(page.getByRole("region", { name: "Saved recovery checkpoints" }).getByRole("status"))
+    .toContainText("Restored 1 source files");
 
   page.once("dialog", (dialog) => { void dialog.accept(); });
   await page.getByRole("button", { name: "Discard backup" }).click();
