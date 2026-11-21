@@ -30,6 +30,7 @@ from cortex_backend.agent.tool_registry import (
 from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
+from cortex_backend.services.chat_client import is_cloud_model
 
 
 logger = logging.getLogger(__name__)
@@ -253,8 +254,13 @@ class AgentRuns:
     def start(
         self, *, owner: str, project_root: str, goal: str, mode: str,
         model: str, budgets: Mapping[str, int | float],
+        confirmed_project: bool = False, confirmed_cloud: bool = False,
     ) -> AgentRun:
         with self._lock:
+            if confirmed_project is not True:
+                raise AgentWorkflowError("consent_required")
+            if is_cloud_model(model) and confirmed_cloud is not True:
+                raise AgentWorkflowError("cloud_consent_required")
             if self._closed:
                 raise AgentWorkflowError("agent_unavailable")
             if self._active_id is not None:
