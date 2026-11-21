@@ -192,6 +192,24 @@ describe("ApprovalCard", () => {
     expect(onAllowOnce).not.toHaveBeenCalled();
   });
 
+  it("does not carry dangerous consent into a new request with identical command text", async () => {
+    const user = userEvent.setup();
+    const original = makeRequest({ cls: "dangerous", command: "reg query HKCU" });
+    const { rerender, onAllowOnce, onAlwaysAllow, onDeny } = renderApproval(original);
+    await user.click(screen.getByRole("button", { name: "Review dangerous command" }));
+    await user.click(screen.getByRole("checkbox", { name: /I have reviewed this exact command/ }));
+    expect(screen.getByRole("button", { name: "Allow once" })).toBeEnabled();
+
+    rerender(
+      <ApprovalCard request={{ ...original }} onAllowOnce={onAllowOnce} onAlwaysAllow={onAlwaysAllow} onDeny={onDeny} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Allow once" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Review dangerous command" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(onAllowOnce).not.toHaveBeenCalled();
+  });
+
   it("removes an existing Always allow choice when the network or sandbox changes", () => {
     const first = makeRequest();
     const { rerender, onAllowOnce, onAlwaysAllow, onDeny } = renderApproval(first);
