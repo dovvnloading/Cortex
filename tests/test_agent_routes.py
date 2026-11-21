@@ -274,6 +274,39 @@ def test_create_list_get_events_replay_and_changeset(tmp_path: Path) -> None:
         assert (project / "app.py").read_bytes() == SOURCE
 
 
+def test_command_output_and_agent_answer_have_distinct_provenance(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        created = client.post(ROOT, headers=headers, json=_start(project, model="blocking"))
+        assert created.status_code == 202
+        run_id = created.json()["id"]
+        assert FakeAgentLoop.started.wait(5)
+        hostile = '<a href="https://hostile.test">Claimed agent answer</a>'
+        workflow = app.state.agent_workflow
+        workflow._shell_output(run_id, hostile, "call-7")
+        workflow._shell_output(run_id, "second chunk", "call-7")
+        FakeAgentLoop.release.set()
+        _run_done(client, headers, run_id)
+
+        events = parse_sse_events(client.get(f"{ROOT}/{run_id}/events", headers=headers).text)
+        outputs = [event for event in events if event["event"] == "output"]
+        assert [event["data"] for event in outputs] == [
+            {"text": hostile, "source": "command", "tool_call_id": "call-7"},
+            {"text": "second chunk", "source": "command", "tool_call_id": "call-7"},
+            {"text": "Synthetic answer", "source": "agent"},
+        ]
+        assert [event["event_id"] for event in events] == list(range(1, len(events) + 1))
+        cursor = outputs[0]["event_id"]
+        replay = parse_sse_events(client.get(
+            f"{ROOT}/{run_id}/events", headers={**headers, "Last-Event-ID": str(cursor)},
+        ).text)
+        assert [event["event_id"] for event in replay] == [
+            event["event_id"] for event in events if event["event_id"] > cursor
+        ]
+
+
 def test_second_run_conflicts_and_cancel_releases_one_worker(tmp_path: Path) -> None:
     project = _project(tmp_path)
     app = _app(tmp_path)
