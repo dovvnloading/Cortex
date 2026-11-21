@@ -52,11 +52,11 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
     && !request.network
     && (request.cls === "inspect" || request.cls === "build_test");
 
+  // Escape or dismissal closes locally without calling any approval callback.
+  // Base UI preserves the confirmation dialogs' focus and Escape behavior.
   return (
     <AlertDialog.Root
       open={dismissedFor !== requestKey}
-      // Escape or dismissal closes locally, without granting or denying anything.
-      // Only a deliberate action-button click invokes one of the caller's callbacks.
       onOpenChange={(open) => { if (!open) setDismissedFor(requestKey); }}
     >
       <DialogContent>
