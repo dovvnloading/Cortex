@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 from threading import Event
 from time import monotonic
 from typing import Any
@@ -22,6 +24,7 @@ from cortex_backend.agent.tool_registry import NeedsApproval, ToolContext, ToolR
 from cortex_backend.agent.tools import checks, shell as shell_module
 from cortex_backend.agent.tools.checks import detect_checks, register_check_tools
 from cortex_backend.agent.tools.shell import SHELL_TOOLS, ShellTools
+from cortex_backend.services.workspace_context import _is_reparse
 
 
 class FakeProcess:
@@ -181,6 +184,30 @@ def _assert_unmodified(root: Path, outside: Path) -> None:
     assert (root.parent / "synthetic-home" / "secret.txt").read_text(encoding="utf-8") == "SYNTHETIC_SECRET"
 
 
+def _link_untrusted_input(destination: Path, target: Path) -> None:
+    """Exercise a linked config boundary even without Windows symlink privilege."""
+    try:
+        destination.symlink_to(target)
+        linked_target = target
+    except OSError as exc:
+        if sys.platform != "win32" or getattr(exc, "winerror", None) not in {5, 1314}:
+            raise
+        # Junctions do not need symlink privilege and are directory-only.
+        # A reparse directory at this exact config name is still an unsafe
+        # candidate: the snapshot must exclude it and checks must require approval.
+        linked_target = target.parent
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(destination), str(linked_target)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"mklink /J failed ({result.returncode}): {result.stdout!r} {result.stderr!r}"
+        )
+        assert destination.is_dir(), "Windows junction was not created"
+    assert _is_reparse(destination.lstat()), "test did not create a linked input"
+    assert destination.resolve(strict=True) == linked_target.resolve(strict=True)
+
+
 @pytest.mark.parametrize(
     ("kind", "risk"), [
         ("npm-chain", "dangerous"), ("npm-encoded", "dangerous"), ("npm-lifecycle", "dangerous"),
@@ -290,10 +317,7 @@ def test_linked_pytest_conftest_is_not_a_safe_omission(
     (root / "pytest.ini").write_text("[pytest]\naddopts = -q\n", encoding="utf-8")
     target = outside / "hostile_conftest.py"
     target.write_text("def pytest_sessionstart(session): pass\n", encoding="utf-8")
-    try:
-        (root / "conftest.py").symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Creating test symlinks is not permitted on this host")
+    _link_untrusted_input(root / "conftest.py", target)
     assert [check.risk for check in detect_checks(root)] == ["ask"]
     _assert_unmodified(root, outside)
 
@@ -305,10 +329,7 @@ def test_linked_root_pytest_config_is_not_silently_skipped(
     root, outside = isolated
     target = outside / "opaque-pytest-settings"
     target.write_text("[pytest]\naddopts = -p hostile_plugin\n", encoding="utf-8")
-    try:
-        (root / name).symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Creating test symlinks is not permitted on this host")
+    _link_untrusted_input(root / name, target)
     # Even if the bounded source snapshot omits a linked config, the check
     # must be offered with approval rather than silently auto-approving.
     found = detect_checks(root)
@@ -654,10 +675,7 @@ def test_msbuild_implicit_link_never_read_or_followed(
     target = outside / "linked.targets"
     target.write_text('<Project><Exec Command="hostile" /></Project>', encoding="utf-8")
     (root / "Demo.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk" />', encoding="utf-8")
-    try:
-        (root / "Directory.Build.targets").symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Creating test symlinks is not permitted on this host")
+    _link_untrusted_input(root / "Directory.Build.targets", target)
     assert [check.risk for check in detect_checks(root)] == ["ask"]
     _assert_unmodified(root, outside)
 
