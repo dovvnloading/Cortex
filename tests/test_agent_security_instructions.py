@@ -303,13 +303,19 @@ def test_hostile_repository_instructions_never_grant_authority(
             assert outcome.status == "waiting_approval"
             assert outcome.approval_request is not None
             assert outcome.approval_request["tool"] == name
-            assert steps[-1].result is None
+            # An unfinished step has an empty JSON result, not a completed outcome.
+            assert steps[-1].result == {}
+            assert steps[-1].ended is None
             approval = store.get_approval(run_id, owner=_OWNER, step_seq=steps[-1].seq)
             assert approval is not None
             assert approval.request == {"tool": name, "operation": "invoke", "reason": "approval_required"}
             store.decide_approval(run_id, owner=_OWNER, step_seq=steps[-1].seq, decision="rejected")
             finished = loop.resume(run_id)
             assert finished.status == "completed"
+            rejected = next(step for step in store.list_steps(run_id, owner=_OWNER)
+                            if step.seq == steps[-1].seq)
+            assert rejected.result == {"outcome": "rejected", "success": False}
+            assert rejected.ended is not None
         elif expected == "refuse":
             assert outcome.status == "completed"
             assert steps[-1].result == {"outcome": "error", "success": False}
