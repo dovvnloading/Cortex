@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 from cortex_backend.agent.loop import LoopResult
 from cortex_backend.agent.run_store import AgentRunStore
 from cortex_backend.api import create_app
-from cortex_backend.api.security import SessionManager
 from cortex_backend.core.settings import AgentSettings
 from cortex_backend.testing import build_demo_dependencies
 from support import parse_sse_events, session_headers, wait_until
@@ -383,11 +382,9 @@ def test_discard_without_accept_does_not_modify_original_and_stale_accept_fails(
 
 def test_owner_isolation_across_different_bearer_sessions(tmp_path: Path) -> None:
     project = _project(tmp_path)
-    manager = SessionManager(allowed_hosts=("testserver",))
     app = _app(tmp_path)
     # The installation owner is identical across both sessions by design;
     # the agent ledger deliberately scopes ownership to session_id instead.
-    app.state.session_manager = manager
     with TestClient(app) as client:
         alice = session_headers(client, app)
         run_id = client.post(ROOT, headers=alice, json=_start(project)).json()["id"]
