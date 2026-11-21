@@ -563,6 +563,54 @@ class WorkCopy:
             changes, _current = self._changes()
             return changes
 
+    def list_paths(self) -> tuple[str, ...]:
+        """List only eligible source files inside the verified disposable copy."""
+        with self._lock:
+            self._verified()
+            return tuple(sorted(_snapshot(self.path, self._ignores)))
+
+    def read_text(self, path: str) -> tuple[str, str]:
+        """Read an eligible copy file and its content digest, never the checkout."""
+        with self._lock:
+            self._verified()
+            relative = _valid_path(path)
+            if relative not in _snapshot(self.path, self._ignores):
+                raise WorkCopyError("invalid_path")
+            item = _file_at(self.path, relative)
+            if item is None:
+                raise WorkCopyError("invalid_path")
+            return item.contents.decode("utf-8"), _digest(item.contents)
+
+    def replace_text(
+        self, path: str, expected_sha256: str, old_text: str, new_text: str,
+    ) -> str:
+        """Stage exactly one bounded edit in the copy; acceptance is separate."""
+        if (
+            not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            or not isinstance(old_text, str) or not 0 < len(old_text) <= 8000
+            or not isinstance(new_text, str) or len(new_text) > 8000
+        ):
+            raise WorkCopyError("invalid_patch")
+        with self._lock:
+            self._verified()
+            relative = _valid_path(path)
+            if relative not in _snapshot(self.path, self._ignores):
+                raise WorkCopyError("invalid_path")
+            current = _file_at(self.path, relative)
+            if current is None:
+                raise WorkCopyError("invalid_path")
+            if _digest(current.contents) != expected_sha256:
+                raise WorkCopyError("stale_source")
+            source = current.contents.decode("utf-8")
+            if source.count(old_text) != 1 or new_text == old_text:
+                raise WorkCopyError("invalid_patch")
+            updated = source.replace(old_text, new_text, 1).encode("utf-8")
+            if len(updated) > MAX_WORKSPACE_FILE_BYTES:
+                raise WorkCopyError("copy_limit")
+            _write(self.path, relative, updated, current.mode)
+            return _digest(updated)
+
     def _checkpoint_store(self) -> WorkspaceCheckpointStore:
         if self._store is None:
             self._store = WorkspaceCheckpointStore(
