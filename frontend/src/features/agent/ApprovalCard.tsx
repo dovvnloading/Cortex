@@ -65,10 +65,21 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
         </AlertDialog.Description>
 
         <div role="group" aria-label="Execution context" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <span className={`status-pill ${request.sandbox_level === "appcontainer" ? "status-success" : "status-danger"}`}>
+          <span
+            className={`status-pill ${request.sandbox_level === "appcontainer" ? "status-success" : "status-danger"}`}
+            style={{
+              padding: "0 8px",
+              borderRadius: 999,
+              background: request.sandbox_level === "appcontainer" ? "var(--success-soft)" : "var(--danger-soft)",
+            }}
+          >
             {request.sandbox_level === "appcontainer" ? "Sandboxed" : "Runs as you"}
           </span>
-          {request.network && <span className="status-pill status-danger">Uses the internet</span>}
+          {request.network && (
+            <span className="status-pill status-danger" style={{ padding: "0 8px", borderRadius: 999, background: "var(--danger-soft)" }}>
+              Uses the internet
+            </span>
+          )}
         </div>
 
         <div style={{ marginTop: 16 }}>
@@ -90,7 +101,7 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, onDeny }: Ap
               <div role="group" aria-label="Dangerous command second confirmation">
                 <p>This may access private information or change system settings. Review the exact command before approving one run.</p>
                 <pre style={commandStyle}><code>{request.command}</code></pre>
-                <label className="field-label" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+                <label className="coding-consent" style={{ marginTop: 12 }}>
                   <input
                     type="checkbox"
                     autoFocus
