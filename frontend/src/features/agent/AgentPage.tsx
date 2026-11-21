@@ -9,6 +9,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AgentChangesPanel } from "./AgentChangesPanel";
 import { createAgentApi } from "./agentApi";
 import { RunHistory } from "./RunHistory";
+import { SavedRecoveryPanel } from "./SavedRecoveryPanel";
 import { RunTimeline } from "./RunTimeline";
 import { useAgentRun } from "./useAgentRun";
 
@@ -60,6 +61,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [approvalView, setApprovalView] = useState(0);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [recoveryRefreshKey, setRecoveryRefreshKey] = useState(0);
 
   const availableModels = Array.from(new Set([...localModels, ...cloudModels]));
   const model = availableModels.includes(modelChoice) ? modelChoice
@@ -121,6 +123,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           <p>Agent mode is disabled by default. To use it, open Settings, turn on <strong>Enable Agent mode</strong> under General, and save your settings.</p>
           <NavigationLink to="/settings" className="coding-primary">Open Settings</NavigationLink>
         </section>
+        <SavedRecoveryPanel api={api} />
       </div>
     );
   }
@@ -251,7 +254,8 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           )}
 
           {TERMINAL.has(agent.run.status) && (
-            <AgentChangesPanel key={agent.run.id} api={agentApi} runId={agent.run.id} />
+            <AgentChangesPanel key={agent.run.id} api={agentApi} runId={agent.run.id}
+              onRecoveryChanged={() => setRecoveryRefreshKey((current) => current + 1)} />
           )}
         </section>
       )}
@@ -263,6 +267,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         onDiscarded={(runId) => agent.forget(runId)}
         refreshKey={agent.run?.id}
       />
+      <SavedRecoveryPanel api={api} refreshKey={recoveryRefreshKey} />
     </div>
   );
 }

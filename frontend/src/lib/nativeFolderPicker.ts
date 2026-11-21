@@ -1,4 +1,4 @@
-/** The same Windows pywebview folder chooser used by Project workspace. */
+/** Windows pywebview folder chooser for Agent mode. */
 type NativeFolderApi = {
   choose_workspace_directory?: () => Promise<string | null>;
 };
