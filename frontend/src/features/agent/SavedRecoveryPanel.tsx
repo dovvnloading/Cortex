@@ -36,7 +36,8 @@ export function SavedRecoveryPanel({ api }: { api: CortexApi }) {
 
   useEffect(() => {
     mounted.current = true;
-    void reload();
+    // Schedule the initial fetch after effect setup; only its async result updates state.
+    void Promise.resolve().then(reload);
     return () => {
       mounted.current = false;
       requestNumber.current += 1;
