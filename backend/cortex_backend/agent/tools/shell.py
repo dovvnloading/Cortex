@@ -171,7 +171,7 @@ class ShellTools:
             raise ValueError("invalid agent mode")
         if not run_id or len(run_id) > 40 or not all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in run_id):
             raise ValueError("invalid run identifier")
-        self.workcopy = canonical_workcopy(workcopy)
+        self.workcopy = canonical_workcopy(Path(workcopy))
         info = self.workcopy.lstat()
         self._identity = (info.st_dev, info.st_ino)
         self.run_id = run_id
@@ -321,7 +321,7 @@ class ShellTools:
         argv, command, network, launcher = prepared
         started = self._start(argv, command, network, launcher, context, call.name)
         if not hasattr(started, "stdout_chunks"):
-            return cast(ToolResult | NeedsApproval, started)
+            return started
         process = cast(ProcessHandle, started)
         with self._lock:
             if self._closed:
@@ -382,7 +382,7 @@ class ShellTools:
         argv, command, network, launcher = prepared
         started = self._start(argv, command, network, launcher, context, call.name)
         if not hasattr(started, "stdout_chunks"):
-            return cast(ToolResult | NeedsApproval, started)
+            return started
         process = cast(ProcessHandle, started)
         with self._lock:
             if self._closed:
