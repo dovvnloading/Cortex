@@ -218,6 +218,8 @@ def build_app(
         llamacpp_manager=llamacpp_manager,
         llamacpp_chat_client=llamacpp_chat_client,
         workspace_chat_client=ollama_chat_client,
+        agent_chat_client=routing_chat_client,
+        agent_data_dir=paths.data_dir,
         workspace_checkpoint_store=WorkspaceCheckpointStore(paths.workspace_checkpoints_database),
         default_gguf_models_dir=paths.default_gguf_models_dir,
         closeables=(client,),
