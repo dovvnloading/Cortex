@@ -271,12 +271,14 @@ class AgentRuns:
             })
             managed.last_step_seq = step.seq
 
-    def _shell_output(self, run_id: str, text: str) -> None:
-        """Forward live process output to this run's ephemeral SSE event stream."""
+    def _shell_output(self, run_id: str, text: str, tool_call_id: str) -> None:
+        """Forward shell output with command provenance, never as an agent answer."""
         with self._lock:
             managed = self._live.get(run_id)
             if managed is not None and not managed.terminal:
-                self._emit(managed, "output", {"text": text})
+                self._emit(managed, "output", {
+                    "text": text, "source": "command", "tool_call_id": tool_call_id,
+                })
 
     def _after_tool(self, run_id: str) -> Callable[[AgentStep], None]:
         def publish(_step: AgentStep) -> None:
@@ -340,7 +342,7 @@ class AgentRuns:
                     register_git_tools(registry, prepared.path, run_id, require_approval=True)
                     shell = register_shell_tools(
                         registry, prepared.path, run_id, mode=mode,
-                        on_output=lambda text: self._shell_output(run_id, text),
+                        on_output=lambda text, tool_call_id: self._shell_output(run_id, text, tool_call_id),
                     )
                     register_check_tools(registry, prepared.path, shell)
                 providers: Sequence[Callable[[AgentRun], str]] = (
@@ -411,7 +413,7 @@ class AgentRuns:
                 try:
                     self._publish_steps(managed)
                     if result is not None and result.answer is not None:
-                        self._emit(managed, "output", {"text": result.answer[:16000]})
+                        self._emit(managed, "output", {"text": result.answer[:16000], "source": "agent"})
                     if result is not None and result.approval_request is not None:
                         # The pending call stays in memory and never appears in
                         # the ledger. The owner sees the concrete proposed edit.

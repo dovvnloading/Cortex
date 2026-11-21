@@ -1502,6 +1502,11 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 .agent-timeline summary { padding: 12px; cursor: pointer; font-weight: 650; overflow-wrap: anywhere; }
 .agent-timeline details[open] > :not(summary) { margin: 0 12px 12px; }
 .agent-timeline details[open] > .coding-muted p { margin: 6px 0 0; }
+.agent-timeline .agent-command-output {
+  background: var(--surface-soft);
+  border-style: dashed;
+  max-height: 240px;
+}
 
 /* Durable source recovery panel: paths remain text-only; no raw backup content. */
 .coding-recovery-list { display: grid; gap: 10px; }

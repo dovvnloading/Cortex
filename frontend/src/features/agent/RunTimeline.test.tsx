@@ -26,16 +26,41 @@ describe("RunTimeline", () => {
     expect(within(list).getByText("Details: Read 3 files")).toBeVisible();
   });
 
-  it("shows output and file text literally, without constructing HTML elements", async () => {
+  it("keeps each command chunk separate, literal and distinct from the agent answer", async () => {
     const user = userEvent.setup();
-    const malicious = '<img src=x onerror="alert(1)"><script>doBadThings()</script>';
+    const malicious = '<a href="javascript:alert(1)">click</a> [link](https://example.test)\n'
+      + '<img src=x onerror="alert(1)"><script>doBadThings()</script>';
     const { container } = render(<RunTimeline events={[
       event(1, "step", { seq: 1, kind: "tool", summary: malicious }),
-      event(2, "output", { text: malicious }),
+      event(2, "output", { source: "command", tool_call_id: "call-1", text: malicious }),
+      event(3, "output", { source: "command", tool_call_id: "call-1", text: "second chunk" }),
+      event(4, "output", { source: "agent", text: "Final answer" }),
     ]} />);
-    expect(container.querySelector("script, img")).toBeNull();
+
+    const list = screen.getByRole("list", { name: "Agent activity" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(4);
+    expect(within(list).getAllByText("Command output")).toHaveLength(2);
+    expect(within(list).getAllByText("Agent response")).toHaveLength(1);
+    expect(container.querySelector("a, img, script")).toBeNull();
+
+    for (const label of screen.getAllByText("Command output")) await user.click(label);
+    const chunks = screen.getAllByLabelText("Command output text");
+    expect(chunks.map((chunk) => chunk.textContent)).toEqual([malicious, "second chunk"]);
+    expect(chunks[0].tagName).toBe("PRE");
+    expect(chunks[0]).toHaveClass("agent-command-output");
+    expect(container.querySelector("a, img, script")).toBeNull();
+
     await user.click(screen.getByText("Agent response"));
-    expect(screen.getByLabelText("Agent response text")).toHaveTextContent(malicious);
-    expect(container.querySelector("script, img")).toBeNull();
+    expect(screen.getByLabelText("Agent response text")).toHaveTextContent("Final answer");
+  });
+
+  it("does not attribute unmarked or unknown output to the agent", () => {
+    render(<RunTimeline events={[
+      event(1, "output", { text: "legacy shell output" }),
+      event(2, "output", { source: "unexpected", text: "untrusted output" }),
+      event(3, "output", { source: "agent", text: "final answer" }),
+    ]} />);
+    expect(screen.getAllByText("Command output")).toHaveLength(2);
+    expect(screen.getAllByText("Agent response")).toHaveLength(1);
   });
 });
