@@ -58,6 +58,10 @@ export interface AgentSettings {
   enabled?: boolean;
 }
 
+export interface AgentUndoneResponse {
+  paths: Array<string>;
+}
+
 export interface AppearanceSettings {
   theme?: "light" | "dark" | "system";
 }
@@ -692,6 +696,10 @@ export interface SystemResponse {
 export interface TranslationSettings {
   enabled?: boolean;
   target_language?: string;
+}
+
+export interface UndoAgentChanges {
+  confirmed?: boolean;
 }
 
 export interface UpdateChatGroupRequest {

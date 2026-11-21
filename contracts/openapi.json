@@ -283,7 +283,24 @@
         "title": "AgentSettings",
         "type": "object"
       },
-      "AppearanceSettings": {
+      "AgentUndoneResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "title": "AgentUndoneResponse",
+      "type": "object"
+    },
+    "AppearanceSettings": {
         "additionalProperties": false,
         "properties": {
           "theme": {
@@ -4075,7 +4092,19 @@
         "title": "TranslationSettings",
         "type": "object"
       },
-      "UpdateChatGroupRequest": {
+      "UndoAgentChanges": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "title": "UndoAgentChanges",
+      "type": "object"
+    },
+    "UpdateChatGroupRequest": {
         "additionalProperties": false,
         "description": "Both fields optional: renaming and collapsing use the same endpoint.",
         "properties": {
@@ -4641,6 +4670,60 @@
           }
         ],
         "summary": "Resume"
+      }
+    },
+    "/api/v1/agent/runs/{run_id}/undo": {
+      "post": {
+        "operationId": "undo_api_v1_agent_runs__run_id__undo_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoAgentChanges"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentUndoneResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "CortexSession": []
+          }
+        ],
+        "summary": "Undo"
       }
     },
     "/api/v1/attachments": {
