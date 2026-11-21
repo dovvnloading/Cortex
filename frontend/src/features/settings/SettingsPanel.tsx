@@ -377,6 +377,15 @@ export function SettingsPanel({
                   <span><strong id="code-execution-enabled-label">Allow local code requests</strong><small id="code-execution-enabled-description">Cortex may prepare a local Python task, but every run still pauses for your one-time approval.</small></span>
                   <input id="code-execution-enabled" type="checkbox" aria-labelledby="code-execution-enabled-label" aria-describedby="code-execution-enabled-description" checked={execution.code_execution_enabled ?? true} onChange={(event) => update({ execution: { ...execution, code_execution_enabled: event.target.checked } })} />
                 </label>
+                <label className="toggle-row" htmlFor="agent-enabled">
+                  <span>
+                    <strong id="agent-enabled-label">Enable Agent mode</strong>
+                    <small id="agent-enabled-description">Allow separate, consent-gated coding runs in a temporary project work copy. Off by default.</small>
+                  </span>
+                  <input id="agent-enabled" type="checkbox" aria-labelledby="agent-enabled-label"
+                    aria-describedby="agent-enabled-description" checked={draft.agent?.enabled ?? false}
+                    onChange={(event) => update({ agent: { ...draft.agent, enabled: event.target.checked } })} />
+                </label>
               </div>
             </section>
           )}

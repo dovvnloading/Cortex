@@ -6,6 +6,7 @@ import type {
   WorkspaceOpened, WorkspacePreview, WorkspaceCheckpointSummary,
 } from "../../api/workspaceTypes";
 import { registerNavigationGuard } from "../../lib/navigation";
+import { chooseWorkspaceDirectory } from "../../lib/nativeFolderPicker";
 
 export type WorkspacePageProps = {
   api: CortexApi;
@@ -44,8 +45,6 @@ function diffRows(diff: string): DiffLine[] {
   flush();
   return rows;
 }
-
-type NativeApi = { choose_workspace_directory?: () => Promise<string | null> };
 
 const CHECKS = [
   { id: "pytest", label: "Python: pytest -q" },
@@ -228,19 +227,15 @@ export function WorkspacePage({ api, localModels, selectedModel }: WorkspacePage
   }
 
   async function browse() {
-    const native = (window as Window & { pywebview?: { api?: NativeApi } }).pywebview?.api;
-    if (!native?.choose_workspace_directory) {
-      setError("The native folder picker is not available in this browser. Enter an absolute path.");
-      return;
-    }
     try {
-      const chosen = await native.choose_workspace_directory();
+      const chosen = await chooseWorkspaceDirectory();
       if (chosen) {
         setRoot(chosen);
         setReadConsent(false);
       }
-    } catch {
-      setError("The folder picker could not open. You can still enter a path.");
+    } catch (error) {
+      setError(error instanceof Error && error.message.startsWith("The native folder picker is not available")
+        ? error.message : "The folder picker could not open. You can still enter a path.");
     }
   }
 

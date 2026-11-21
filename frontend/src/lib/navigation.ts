@@ -6,6 +6,7 @@ export type AppRoute =
   | { kind: "chat"; threadId: string | null }
   | { kind: "settings" }
   | { kind: "workspace" }
+  | { kind: "agent" }
   | { kind: "not-found" };
 
 export type NavigateOptions = {
@@ -265,6 +266,7 @@ export function parseAppRoute(pathname: string): AppRoute {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (normalized === "/settings") return { kind: "settings" };
   if (normalized === "/workspace") return { kind: "workspace" };
+  if (normalized === "/agent") return { kind: "agent" };
   if (normalized === "/" || normalized === "/chat" || normalized === "/chat/new") {
     return { kind: "chat", threadId: null };
   }

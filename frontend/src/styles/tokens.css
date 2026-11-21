@@ -1454,7 +1454,7 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 .coding-panel h3 { font-size: var(--text-lg); margin: 0; }
 .coding-panel p { margin: 0; line-height: 1.55; }
 .coding-panel label { font-size: var(--text-sm); font-weight: 600; }
-.coding-panel input:not([type="checkbox"]), .coding-panel textarea, .coding-panel select {
+.coding-panel input:not([type="checkbox"]):not([type="radio"]), .coding-panel textarea, .coding-panel select {
   min-width: 0; background: var(--surface-raised); color: var(--text); border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm); padding: 10px 12px; font: inherit;
 }
@@ -1490,6 +1490,18 @@ kbd { display: inline-block; border: 1px solid var(--line-strong); border-radius
 .coding-diff-change { background: var(--accent-soft); }
 @media (max-width: 900px) { .coding-two-column { grid-template-columns: minmax(0, 1fr); } .coding-workspace { padding: 18px 16px 48px; } }
 
+
+/* Agent mode: focused opt-in controls and readable, expandable step history. */
+.agent-starters .coding-quiet { border-radius: 999px; padding: 7px 12px; font-weight: 550; }
+.agent-modes { margin: 0; min-width: 0; padding: 0; border: 0; display: grid; gap: 10px; }
+.agent-modes legend { margin-bottom: 12px; font-size: var(--text-sm); font-weight: 700; }
+.agent-modes .coding-consent { align-items: flex-start; }
+.agent-modes input[type="radio"] { flex: 0 0 auto; margin: 4px 0 0; accent-color: var(--accent); }
+.agent-timeline ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.agent-timeline li { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); }
+.agent-timeline summary { padding: 12px; cursor: pointer; font-weight: 650; overflow-wrap: anywhere; }
+.agent-timeline details[open] > :not(summary) { margin: 0 12px 12px; }
+.agent-timeline details[open] > .coding-muted p { margin: 6px 0 0; }
 
 /* Durable source recovery panel: paths remain text-only; no raw backup content. */
 .coding-recovery-list { display: grid; gap: 10px; }

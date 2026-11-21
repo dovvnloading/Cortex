@@ -22,6 +22,14 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Added (unreleased coding workspace)
 
+- Agent mode adds an opt-in desktop route (off by default in Settings) for
+  consented runs in separate project work copies. The page asks separately
+  before sending project context to a cloud provider, follows resumable
+  activity events, requests one-time human approval for gated actions, and
+  offers Stop. A changes-review integration slot remains visible at run end;
+  no source changes are automatically applied.
+
+
 - Durable, owner-bound source checkpoints are saved to a dedicated private
   SQLite recovery journal **before** applying approved patches; after a crash
   or restart the Project workspace can list, manually restore or explicitly
