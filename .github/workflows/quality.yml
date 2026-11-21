@@ -11,8 +11,6 @@ name: Quality
 #              and generated-contract drift.
 #   backend-shard Four independent Windows pytest processes, each running
 #              disjoint modules and uploading branch-coverage data.
-#   agent-sandbox-compatibility
-#              Focused Python 3.13/3.14 agent and sandbox tests for relevant PRs.
 #   backend    Required merge gate verifies all shards and combined coverage
 #              before the remaining artifact and harness checks.
 #   frontend   Types, lint, unit tests under coverage, and the bundle build.
@@ -24,8 +22,8 @@ name: Quality
 #   heavy      Final quality gate: keep the existing required check name and
 #              reject any failed test, packaging, or requested browser check.
 #
-# The post-merge Python compatibility matrix remains in python-compatibility.yml.
-# A focused agent/sandbox matrix below also protects relevant pull requests.
+# The Python compatibility matrix is in python-compatibility.yml: it repeats
+# the suite on other interpreters and is not needed to review a pull request.
 # The full local tier covers the same gates as the jobs here; the quick tier
 # omits the browser and bundle checks for iteration (see CONTRIBUTING.md).
 
@@ -63,7 +61,6 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       browser: ${{ steps.filter.outputs.browser }}
-      agent_sandbox: ${{ steps.filter.outputs.agent_sandbox }}
     steps:
       # The pull request ref is a merge commit whose first parent is the base
       # branch tip, so two commits of history are enough to list its files.
@@ -83,12 +80,9 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           # The browser tests drive the frontend against the real backend.
           BROWSER_IF: '^(frontend/|backend/|contracts/|scripts/e2e_backend\.py|requirements\.lock\.txt|\.github/workflows/quality\.yml$)'
-          # Include the backend's two application entrypoints as well as its package.
-          AGENT_SANDBOX_IF: '^(backend/|main\.py$|app_factory\.py$|tests/test_agent_.*\.py$|tests/test_sandbox_.*\.py$|tests/test_worker_containment\.py$)'
         run: |
           code=true
           browser=true
-          agent_sandbox=false
           if [ "$EVENT_NAME" = "pull_request" ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
             echo "Changed files:"
@@ -99,16 +93,11 @@ jobs:
             if [ -n "$changed" ] && ! echo "$changed" | grep -qE "$BROWSER_IF"; then
               browser=false
             fi
-            if [ -n "$changed" ] && echo "$changed" | grep -qE "$AGENT_SANDBOX_IF"; then
-              agent_sandbox=true
-            fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "browser=$browser" >> "$GITHUB_OUTPUT"
-          echo "agent_sandbox=$agent_sandbox" >> "$GITHUB_OUTPUT"
           echo "Browser tests needed: $browser"
           echo "Code changed: $code"
-          echo "Agent/sandbox compatibility needed: $agent_sandbox"
 
   lint:
     name: Lint, types and contracts
@@ -235,49 +224,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
-
-  agent-sandbox-compatibility:
-    name: Agent/sandbox (Python ${{ matrix.python-version }})
-    needs: changes
-    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.agent_sandbox == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.13", "3.14"]
-    runs-on: windows-latest
-    permissions:
-      contents: read
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      # Use unlocked requirements, as in python-compatibility.yml, to catch
-      # interpreter-specific dependency and sandbox startup regressions.
-      - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
-
-      # PowerShell does not expand globs for native pytest invocations.
-      - name: Run agent and sandbox tests
-        shell: pwsh
-        run: |
-          $agentTests = @(Get-ChildItem -Path tests -File -Filter 'test_agent_*.py')
-          $sandboxTests = @(Get-ChildItem -Path tests -File -Filter 'test_sandbox_*.py')
-          $workerTest = Get-Item -Path tests/test_worker_containment.py
-          if ($agentTests.Count -eq 0 -or $sandboxTests.Count -eq 0) {
-            throw 'Expected agent and sandbox test files were not found.'
-          }
-          $testPaths = @(($agentTests + $sandboxTests + @($workerTest)) | ForEach-Object { $_.FullName })
-          python -m pytest -q @testPaths
 
   backend:
     name: Backend tests
@@ -586,7 +532,7 @@ jobs:
     # The longstanding required check must run even when a predecessor fails
     # or is skipped. A failed classifier or dependency-review must not result
     # in a successful (or silently skipped) final quality decision.
-    needs: [changes, lint, backend, frontend, e2e, package, dependency-review, agent-sandbox-compatibility]
+    needs: [changes, lint, backend, frontend, e2e, package, dependency-review]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -601,12 +547,10 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
           BROWSER_CHANGED: ${{ needs.changes.outputs.browser }}
-          AGENT_SANDBOX_CHANGED: ${{ needs.changes.outputs.agent_sandbox }}
           EVENT_NAME: ${{ github.event_name }}
           BROWSER_OPT_IN: ${{ inputs.run_browser_tests }}
           LINT_RESULT: ${{ needs.lint.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
-          AGENT_SANDBOX_RESULT: ${{ needs.agent-sandbox-compatibility.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           BROWSER_RESULT: ${{ needs.e2e.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}

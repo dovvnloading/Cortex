@@ -23,7 +23,6 @@ def validate_quality_gate(values: Mapping[str, str]) -> list[str]:
     event = values.get("EVENT_NAME", "")
     browser_class = values.get("BROWSER_CHANGED", "")
     browser_opt_in = values.get("BROWSER_OPT_IN", "")
-    agent_sandbox_class = values.get("AGENT_SANDBOX_CHANGED", "")
 
     if changes != "success":
         errors.append(f"Change classification must succeed; got {changes!r}")
@@ -33,10 +32,6 @@ def validate_quality_gate(values: Mapping[str, str]) -> list[str]:
         errors.append(f"Unrecognized Quality event {event!r}")
     if event == "pull_request" and browser_class not in {"true", "false"}:
         errors.append(f"Browser classification must be true/false; got {browser_class!r}")
-    if event == "pull_request" and agent_sandbox_class not in {"true", "false"}:
-        errors.append(f"Agent/sandbox classification must be true/false; got {agent_sandbox_class!r}")
-    if event == "pull_request" and code == "false" and agent_sandbox_class == "true":
-        errors.append("A document-only PR cannot require agent/sandbox compatibility")
     if event == "workflow_dispatch" and browser_opt_in not in {"true", "false"}:
         errors.append(f"Manual browser input must be true/false; got {browser_opt_in!r}")
 
@@ -54,11 +49,6 @@ def validate_quality_gate(values: Mapping[str, str]) -> list[str]:
         actual = values.get(gate, "")
         if actual != expected_code_gate:
             errors.append(f"{gate} must be {expected_code_gate}; got {actual!r}")
-
-    agent_expected = "success" if event == "pull_request" and agent_sandbox_class == "true" else "skipped"
-    agent_actual = values.get("AGENT_SANDBOX_RESULT", "")
-    if agent_actual != agent_expected:
-        errors.append(f"AGENT_SANDBOX_RESULT must be {agent_expected}; got {agent_actual!r}")
 
     browser_expected = code == "true" and (
         event == "push"
@@ -78,7 +68,7 @@ def main() -> int:
         for failure in failures:
             print(f"::error::{failure}")
         return 1
-    print("Quality gate passed: classification, dependency review, tests, agent/sandbox compatibility, packaging, and browser requirements")
+    print("Quality gate passed: classification, dependency review, tests, packaging, and browser requirements")
     return 0
 
 
