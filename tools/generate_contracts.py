@@ -95,7 +95,7 @@ def write_contracts(
         staged_paths: dict[str, Path] = {}
         for name, content in contents.items():
             staged_path = staging / name
-            staged_path.write_text(content, encoding="utf-8")
+            staged_path.write_text(content, encoding="utf-8", newline="\n")
             staged_paths[name] = staged_path
         for name, staged_path in staged_paths.items():
             os.replace(staged_path, output_dir / name)
@@ -117,7 +117,7 @@ def check_contracts(
         staged_paths: dict[str, Path] = {}
         for name, expected in contents.items():
             staged_path = staging / name
-            staged_path.write_text(expected, encoding="utf-8")
+            staged_path.write_text(expected, encoding="utf-8", newline="\n")
             staged_paths[name] = staged_path
         for name, staged_path in staged_paths.items():
             path = output_dir / name
