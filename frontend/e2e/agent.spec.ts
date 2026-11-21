@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, waitForNewChatComposer } from "./fixtures";
 
 test("Agent mode remains opt-in and exposes confirmed legacy recovery after retiring Project workspace", async ({ page }) => {
   let savedSettings = {
@@ -77,7 +77,7 @@ test("Agent mode remains opt-in and exposes confirmed legacy recovery after reti
   });
 
   await page.goto("/#bootstrap=launcher-token");
-  await expect(page.getByLabel("Message Cortex")).toBeVisible();
+  await waitForNewChatComposer(page);
   await page.getByRole("link", { name: "Agent mode" }).first().click();
   await expect(page.getByRole("heading", { name: "Agent mode is off" })).toBeVisible();
   // Saved checkpoints remain reachable before enabling new Agent executions.
@@ -117,5 +117,7 @@ test("Agent mode remains opt-in and exposes confirmed legacy recovery after reti
   // Existing bookmarks now resolve to Agent mode instead of a dead page.
   await page.goto("/workspace#bootstrap=launcher-token");
   await expect(page).toHaveURL(/\/agent$/);
+  // This route lands on Agent mode, not a new chat: wait for its real destination UI.
   await expect(page.getByRole("heading", { name: "Agent mode", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Saved recovery checkpoints" })).toBeVisible();
 });
