@@ -124,11 +124,13 @@ def detect_checks(root: str | os.PathLike[str]) -> tuple[DetectedCheck, ...]:
     solutions = sorted(path for path in files if path.casefold().endswith(".sln"))
     projects = sorted(path for path in files if path.casefold().endswith(".csproj"))
     # MSBuild targets can execute commands before tests, including when a
-    # solution rather than an individual project is selected.
-    # Imported .targets/.props can carry the same executable hooks as a
-    # .csproj; UsingTask may load project-controlled executable code too.
+    # solution rather than an individual project is selected. The bounded
+    # work-copy snapshot omits .targets/.props and excluded build directories,
+    # so an imported hook may not be available to inspect. Treat an explicit
+    # Import as opaque executable code requiring approval, even when its target
+    # cannot be read. Inline Exec and UsingTask remain approval-gated too.
     build_hooks = any(
-        any(marker in files[path].lower() for marker in (b"<exec", b"<usingtask"))
+        any(marker in files[path].lower() for marker in (b"<exec", b"<usingtask", b"<import"))
         for path in files
         if path.casefold().endswith((".csproj", ".targets", ".props"))
     )
