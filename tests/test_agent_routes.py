@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 
@@ -106,7 +107,7 @@ def _project(tmp_path: Path) -> Path:
     return root
 
 
-def _app(tmp_path: Path, *, enabled: bool = True):
+def _app(tmp_path: Path, *, enabled: bool = True, run_store: AgentRunStore | None = None):
     dependencies = build_demo_dependencies()
     if enabled:
         settings = dependencies.settings.load().settings
@@ -115,6 +116,7 @@ def _app(tmp_path: Path, *, enabled: bool = True):
         dependencies,
         allowed_hosts=("testserver",),
         agent_data_dir=tmp_path / "private-data",
+        agent_run_store=run_store,
         agent_chat_client=object(),
         agent_loop_factory=FakeAgentLoop,
     )
@@ -322,6 +324,39 @@ def test_approval_replay_decision_and_resume(tmp_path: Path) -> None:
         assert "resume" in FakeAgentLoop.calls
         _assert_code(client.post(f"{ROOT}/{run_id}/resume", headers=headers), 409, "invalid_state")
         assert (project / "app.py").read_bytes() == SOURCE
+
+
+def test_expired_approvals_fail_closed_and_free_the_worker(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    now = [datetime(2030, 1, 1, tzinfo=timezone.utc)]
+    store = AgentRunStore(
+        tmp_path / "private-data" / "agent" / "runs.sqlite", clock=lambda: now[0],
+    )
+    app = _app(tmp_path, run_store=store)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        first = client.post(ROOT, headers=headers, json=_start(project, model="approval")).json()["id"]
+        _run_done(client, headers, first, "waiting_approval")
+        wait_until(lambda: not app.state.agent_workflow._live[first].driving)
+        now[0] += timedelta(seconds=301)
+        _assert_code(client.post(f"{ROOT}/{first}/approvals/1", headers=headers, json={
+            "decision": "allow_once",
+        }), 409, "approval_expired")
+        assert client.get(f"{ROOT}/{first}", headers=headers).json()["status"] == "failed"
+
+        second = client.post(ROOT, headers=headers, json=_start(project, model="approval"))
+        assert second.status_code == 202
+        second_id = second.json()["id"]
+        _run_done(client, headers, second_id, "waiting_approval")
+        wait_until(lambda: not app.state.agent_workflow._live[second_id].driving)
+        now[0] += timedelta(seconds=301)
+        assert client.get(f"{ROOT}/{second_id}", headers=headers).json()["status"] == "failed"
+        events = parse_sse_events(client.get(f"{ROOT}/{second_id}/events", headers=headers).text)
+        assert any(event["event"] == "approval" and event["data"].get("decision") == "expired"
+                   for event in events)
+        third = client.post(ROOT, headers=headers, json=_start(project))
+        assert third.status_code == 202
+        _run_done(client, headers, third.json()["id"])
 
 
 def test_accept_requires_explicit_confirmation_and_discard_keeps_checkout(tmp_path: Path) -> None:
