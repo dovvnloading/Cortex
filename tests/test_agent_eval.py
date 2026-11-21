@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import sys
+import tomllib
 
 import pytest
 
@@ -137,6 +139,32 @@ def test_new_tasks_pass_in_check_mode(name: str) -> None:
     assert case["checks"]["end_state"] is True
     assert case["checks"]["fixture_untouched"] is True
     assert case["tool_calls"] >= 2
+
+
+def test_fix_fixture_test_is_discovered_only_inside_the_disposable_project() -> None:
+    repo = agent_eval.FIXTURE_ROOT / "fix-failing-test" / "repo"
+    manifest = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    # The repository suite discovers test_*.py files. The isolated work copy
+    # explicitly discovers this differently named, still-failing pytest case.
+    assert manifest["tool"]["pytest"]["ini_options"]["python_files"] == ["calculator_cases.py"]
+    assert not list(repo.glob("test_*.py"))
+    assert "assert add(2, 3) == 5" in (repo / "calculator_cases.py").read_text(encoding="utf-8")
+    assert "return left - right" in (repo / "calculator.py").read_text(encoding="utf-8")
+
+
+def test_generated_fixture_cache_is_never_copied_into_expected_end_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    shutil.copytree(agent_eval.FIXTURE_ROOT / "fix-failing-test", tmp_path / "fix-failing-test")
+    cache = tmp_path / "fix-failing-test" / "repo" / "__pycache__" / "calculator.cpython-311.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"generated cache, not fixture source")
+    monkeypatch.setattr(agent_eval, "FIXTURE_ROOT", tmp_path)
+    case = agent_eval.run_suite(task="fix-failing-test")["tasks"][0]
+    assert case["passed"] is True
+    assert case["checks"]["end_state"] is True
+    assert case["checks"]["fixture_untouched"] is True
+    assert case["checks"]["pytest_after_edit"] is True
 
 
 def test_fix_requires_successful_post_edit_verify_loop() -> None:

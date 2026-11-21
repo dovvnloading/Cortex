@@ -1,3 +1,4 @@
 [tool.pytest.ini_options]
 testpaths = ["."]
+python_files = ["calculator_cases.py"]
 addopts = "-q -p no:cacheprovider"
