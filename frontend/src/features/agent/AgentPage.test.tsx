@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunResponse, AgentSSEEvent } from "../../../../contracts/cortex-api";
@@ -226,18 +226,44 @@ describe("AgentPage", () => {
   it("opens a selected past run from history and follows its events", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
-    const old = { ...run, id: "historical-run", project_root: "C:\\\\archive\\\\example" };
+    const old = { ...run, id: "historical-run", status: "running", project_root: "C:\\\\archive\\\\example" };
     api.agentRuns.mockResolvedValue({ runs: [old] });
     api.agentRun.mockResolvedValue(old);
+
+    let onStreamEvent!: (event: AgentSSEEvent) => void;
+    let finishStream!: () => void;
+    let notifySubscribed!: () => void;
+    const subscribed = new Promise<void>((resolve) => { notifySubscribed = resolve; });
+    api.streamAgentRun.mockImplementation((_id, onEvent) => {
+      onStreamEvent = onEvent;
+      notifySubscribed();
+      return new Promise<void>((resolve) => { finishStream = resolve; });
+    });
     page(api);
 
     await user.click(await screen.findByRole("button", { name: "Open run: Goal unavailable" }));
-    await waitFor(() => expect(api.agentRun).toHaveBeenCalledWith("historical-run"));
-    expect(await screen.findByRole("heading", { name: "Run completed" })).toBeVisible();
-    await waitFor(() => expect(api.agentChangeset).toHaveBeenCalledWith("historical-run"));
-    await waitFor(() => expect(api.streamAgentRun).toHaveBeenCalledWith(
+    // The effect subscribes only after the selected run is committed to the page.
+    await subscribed;
+    expect(api.agentRun).toHaveBeenCalledWith("historical-run");
+    expect(api.streamAgentRun).toHaveBeenCalledWith(
       "historical-run", expect.any(Function), expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    ));
+    );
+    expect(screen.getByRole("heading", { name: "Working on your goal" })).toBeVisible();
+
+    await act(async () => {
+      onStreamEvent({ event_id: 1, run_id: "historical-run", event: "step",
+        data: { seq: 1, kind: "tool", tool: "read_file", summary: "Read archive files" } });
+      onStreamEvent({ event_id: 2, run_id: "historical-run", event: "status", data: { status: "completed" } });
+      finishStream();
+    });
+    // The terminal review is modal, so close it before querying the background heading.
+    await screen.findByRole("alertdialog", { name: "Review agent changes" });
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("button", { name: "Reopen changes review" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Run completed" })).toBeVisible();
+    expect(within(screen.getByRole("list", { name: "Agent activity" }))
+      .getByText("Read archive files")).toBeVisible();
+    await waitFor(() => expect(api.agentChangeset).toHaveBeenCalledWith("historical-run"));
   });
 
   it("offers separately confirmed recovery when a past work copy is gone", async () => {
