@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from cortex_backend.agent.protocol import ToolCall
-from cortex_backend.agent.tool_registry import ToolContext, ToolInterrupted, ToolRegistry, ToolResult
+from cortex_backend.agent.tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolRegistry, ToolResult
 from cortex_backend.agent.tools import FILE_TOOLS, register_file_tools
 from cortex_backend.agent.tools import files
 from cortex_backend.agent.workcopy import WorkCopyError
@@ -50,6 +50,29 @@ def _denied(registry: ToolRegistry, name: str, **arguments: Any) -> str:
     assert set(data) == {"error"}
     assert "SECRET" not in result.content
     return str(data["error"])
+
+
+@pytest.mark.parametrize(("name", "arguments"), [
+    ("write_file", {"path": "new.py", "content": "x"}),
+    ("edit_file", {"path": "src/sample.py", "old": "first", "new": "1st"}),
+    ("delete_file", {"path": "readme.md"}),
+    ("move_file", {"source": "readme.md", "destination": "docs.md"}),
+])
+def test_gated_file_changes_say_they_only_touch_the_work_copy(
+    tmp_path: Path, name: str, arguments: dict[str, Any],
+) -> None:
+    # The approval dialog reads "scope" to show a file change as work-copy
+    # only; a file tool never sends a command or a sandbox level.
+    root = tmp_path / "copy"
+    root.mkdir()
+    registry = ToolRegistry()
+    register_file_tools(registry, root, require_approval=True)
+    outcome = registry.execute(ToolCall("gate", name, arguments), ToolContext(Event(), monotonic() + 60))
+    assert isinstance(outcome, NeedsApproval)
+    assert outcome.request["scope"] == "workcopy"
+    assert outcome.request["tool"] == name
+    assert "command" not in outcome.request and "level" not in outcome.request
+    assert list(root.iterdir()) == []
 
 
 def test_export_and_registration_are_explicit(workcopy: tuple[Path, ToolRegistry]) -> None:

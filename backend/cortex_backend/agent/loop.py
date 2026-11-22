@@ -114,6 +114,10 @@ class _State:
     history: list[_History] = field(default_factory=list)
     queued: list[ToolCall] = field(default_factory=list)
     pending: _Pending | None = None
+    # When the run parked for a person's decision. That wait is not agent
+    # work, so resume moves 'start' forward by it; approvals expire on their
+    # own (see services/agent_runs.py), which bounds the pause.
+    parked_at: float | None = None
     model_calls: int = 0
     tool_calls: int = 0
     invalid_replies: int = 0
@@ -249,6 +253,9 @@ class AgentLoop:
                 return self._result(run_id, state, "waiting_approval", None, pending.request)
             if run.status != "running":
                 return self._result(run_id, state, run.status, run.stop_reason)
+            if state.parked_at is not None:
+                state.start += max(0.0, self.clock() - state.parked_at)
+                state.parked_at = None
             reason = self._interruption(state)
             if reason is not None:
                 return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
@@ -517,6 +524,7 @@ class AgentLoop:
                 return self._stop(run_id, state, "failed", "approval_repeated")
             approval_request = dict(outcome.request)
             state.pending = _Pending(call, step_seq, approval_request)
+            state.parked_at = self.clock()
             # Fixed metadata only: no raw arguments or approval text in SQLite.
             self.run_store.request_approval(
                 run_id, owner=self.owner, step_seq=step_seq,
