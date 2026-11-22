@@ -13,13 +13,20 @@ from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from cortex_backend.agent.context_instructions import load_project_instructions
 from cortex_backend.agent.context_repo_map import build_repo_map
 from cortex_backend.agent.loop import AgentLoop, LoopBudgets, LoopResult
-from cortex_backend.agent.model_profiles import DEFAULT_PROBE_CONTEXT_SIZE, ProfileSchemaError, ProfileStore
+from cortex_backend.agent.model_profiles import (
+    DEFAULT_PROBE_CONTEXT_SIZE,
+    ModelProfile,
+    ProbeStopped,
+    ProfileSchemaError,
+    ProfileStore,
+    probe_model,
+)
 from cortex_backend.agent.protocol import ProtocolPath, ToolCall, ToolSpec
 from cortex_backend.agent.run_store import (
     AgentRun, AgentRunStore, AgentStep, ApprovalExpiredError,
@@ -85,6 +92,11 @@ class _LiveRun:
     driving: bool = False
     shell: ShellTools | None = None
     terminal: bool = False
+    model: str = ""
+    # Measure the model on the worker before its first run (once per model).
+    needs_probe: bool = False
+    model_check: dict[str, object] | None = None
+    cancel_requested: bool = False
 
 
 _WEB_FETCH = ToolSpec(
@@ -118,23 +130,42 @@ def _register_web_fetch(registry: ToolRegistry) -> None:
     registry.register(_WEB_FETCH, handle)
 
 
-def _profile_settings(
-    data_dir: Path, model: str, budgets: dict[str, int | float],
-) -> tuple[ProtocolPath, dict[str, int | float], dict[str, int]]:
-    """Select only a passing profile; an unknown or corrupt record fails closed.
+def _stored_profile(data_dir: Path, model: str) -> tuple[ModelProfile | None, bool]:
+    """The model's saved profile, and whether the store could be read at all.
 
-    A measured num_ctx is a token count. The agent's character budget uses a
-    conservative four-characters-per-token bound, never an increased ceiling.
+    An unreadable or unsupported store counts as unreadable, so the caller
+    neither trusts it nor measures over it (save() refuses to overwrite it).
     """
     try:
         profiles = ProfileStore(data_dir).load()
     except (OSError, ProfileSchemaError):
-        profiles = []
         logger.warning("Agent model profiles unavailable; using safe defaults.")
-    selected = next((
-        profile for profile in profiles
-        if profile.model == model and profile.recommended and all(profile.passed.values())
-    ), None)
+        return None, False
+    return next((profile for profile in profiles if profile.model == model), None), True
+
+
+def _usable_profile(profile: ModelProfile | None) -> ModelProfile | None:
+    # A run uses the wire format the model was measured on whenever it managed
+    # a basic tool call there. Whether it passed every check decides only the
+    # warning the user sees; an unmeasured model keeps the prompt-only format.
+    return profile if profile is not None and profile.passed.get("single_call") is True else None
+
+
+def _model_check(profile: ModelProfile | None) -> dict[str, object] | None:
+    if profile is None:
+        return None
+    return {"recommended": profile.recommended, "failed_checks": list(profile.failed_checks)}
+
+
+def _profile_settings(
+    profile: ModelProfile | None, budgets: dict[str, int | float],
+) -> tuple[ProtocolPath, dict[str, int | float], dict[str, int]]:
+    """Wire format and limits from a usable profile, else the safe defaults.
+
+    A measured num_ctx is a token count. The agent's character budget uses a
+    conservative four-characters-per-token bound, never an increased ceiling.
+    """
+    selected = _usable_profile(profile)
     protocol_path: ProtocolPath = selected.protocol_path if selected is not None else "plain_json"
     context_size = selected.context_size if selected is not None else DEFAULT_PROBE_CONTEXT_SIZE
     narrowed = dict(budgets)
@@ -158,10 +189,14 @@ class AgentRuns:
         chat_client: Any = None,
         loop_factory: LoopFactory | None = None,
         checkpoint_store: WorkspaceCheckpointStore | None = None,
+        profile_models: bool = False,
     ) -> None:
         self._data_dir = data_dir
         self._store = run_store
         self._client = chat_client
+        # When true, a local model without a saved profile is measured with
+        # the capability probe on its first run, and the result is cached.
+        self._profile_models = profile_models
         self._loop_factory = loop_factory or AgentLoop
         self._checkpoint_store = checkpoint_store
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cortex-agent")
@@ -312,8 +347,14 @@ class AgentRuns:
             except (TypeError, ValueError) as exc:
                 raise AgentWorkflowError("invalid_budgets") from exc
             directory = self._directory()
+            profile, store_readable = _stored_profile(directory, model)
             protocol_path, normalized_budgets, model_options = _profile_settings(
-                directory, model, normalized_budgets,
+                profile, normalized_budgets,
+            )
+            # Cloud models are never probed: that would send extra requests
+            # to a provider the user approved for this run's work only.
+            needs_probe = (
+                self._profile_models and store_readable and profile is None and not is_cloud_model(model)
             )
             store = self._ledger()
             run_id = uuid4().hex
@@ -357,7 +398,10 @@ class AgentRuns:
                 )
                 if isinstance(loop, AgentLoop):
                     plan_guard(loop)
-                managed = _LiveRun(run_id, owner, prepared, loop, shell=shell)
+                managed = _LiveRun(
+                    run_id, owner, prepared, loop, shell=shell, model=model,
+                    needs_probe=needs_probe, model_check=_model_check(profile),
+                )
                 self._live[run_id] = managed
                 self._emit(managed, "status", {"status": "pending"})
                 self._submit(managed, resume=False)
@@ -384,11 +428,49 @@ class AgentRuns:
             managed.driving = False
             raise AgentWorkflowError("agent_unavailable") from exc
 
+    def _measure_model(self, managed: _LiveRun) -> None:
+        """Probe an unmeasured model once, on the worker, before its first run.
+
+        The pending run's work copy already exists; only model traffic with
+        synthetic content happens here. A probe in which every check failed is
+        not cached (a stopped or unreachable runtime looks the same), so the
+        next run measures again. Stop is honoured between checks.
+        """
+        managed.needs_probe = False
+        with self._lock:
+            self._emit(managed, "status", {"status": "pending", "phase": "model_check"})
+        try:
+            profile = probe_model(
+                self._client, managed.model, {"num_ctx": DEFAULT_PROBE_CONTEXT_SIZE},
+                should_stop=lambda: managed.cancel_requested,
+            )
+        except ProbeStopped:
+            return
+        except Exception as exc:
+            logger.warning("Agent model check failed (%s).", type(exc).__name__)
+            return
+        if any(profile.passed.values()):
+            try:
+                ProfileStore(self._directory()).upsert(profile)
+            except (OSError, ProfileSchemaError, AgentWorkflowError) as exc:
+                logger.warning("Agent model profile not saved (%s).", type(exc).__name__)
+        managed.model_check = _model_check(profile)
+        usable = _usable_profile(profile)
+        if usable is not None and hasattr(managed.loop, "protocol_path"):
+            # Same context size as the defaults the loop was built with, so
+            # only the wire format changes; the loop has not started yet.
+            cast(Any, managed.loop).protocol_path = usable.protocol_path
+
     def _drive(self, managed: _LiveRun, resume: bool) -> None:
         result: LoopResult | None = None
         try:
+            if not resume and managed.needs_probe:
+                self._measure_model(managed)
             with self._lock:
-                self._emit(managed, "status", {"status": "running"})
+                self._emit(managed, "status", {
+                    "status": "running",
+                    **({"model_check": managed.model_check} if managed.model_check is not None else {}),
+                })
             result = managed.loop.resume(managed.run_id) if resume else managed.loop.run(managed.run_id)
         except Exception as exc:
             logger.warning("Agent worker failed (%s).", type(exc).__name__)
@@ -554,6 +636,7 @@ class AgentRuns:
                     if managed.shell is not None:
                         managed.shell.close()
                 return current
+            managed.cancel_requested = True
             managed.loop.cancel(run_id)
             current = self._owned(run_id, owner)
             if current.status in _TERMINAL and not managed.driving:
