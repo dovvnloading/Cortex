@@ -11,6 +11,7 @@ import { createAgentApi } from "./agentApi";
 import { RunHistory } from "./RunHistory";
 import { SavedRecoveryPanel } from "./SavedRecoveryPanel";
 import { RunTimeline } from "./RunTimeline";
+import { stopReasonText } from "./stopReasons";
 import { useAgentRun } from "./useAgentRun";
 
 export type AgentPageProps = {
@@ -68,6 +69,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
     : (selectedModel && availableModels.includes(selectedModel) ? selectedModel : availableModels[0] ?? "");
   const provider = cloudModelProvider(model);
   const active = Boolean(agent.run && !TERMINAL.has(agent.run.status));
+  const stopReason = stopReasonText(agent.run?.stop_reason);
   const canStart = Boolean(enabled && goal.trim() && root.trim() && model && folderConsent
     && (!provider || cloudConsent) && !active && !agent.busy);
 
@@ -216,7 +218,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
             <div>
               <h3>{statusLabel(agent.run.status)}</h3>
               <p className="coding-muted">Model: {displayModelName(agent.run.model)} · Mode: {MODES.find((choice) => choice.value === agent.run?.mode)?.label ?? agent.run.mode}</p>
-              {agent.run.stop_reason && <p className="coding-muted">Reason: {agent.run.stop_reason}</p>}
+              {stopReason && <p className="coding-muted">{stopReason}</p>}
               {agent.connection === "reconnecting" && <p role="status">Connection interrupted — reconnecting to the run…</p>}
             </div>
             {active && (
@@ -265,7 +267,9 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         api={agentApi}
         onOpen={openHistory}
         onDiscarded={(runId) => agent.forget(runId)}
-        refreshKey={agent.run?.id}
+        // Status is part of the key so the list refetches when the active run
+        // finishes, instead of keeping the "Running" it read at the start.
+        refreshKey={agent.run ? `${agent.run.id}:${agent.run.status}` : undefined}
       />
       <SavedRecoveryPanel api={api} refreshKey={recoveryRefreshKey} />
     </div>
