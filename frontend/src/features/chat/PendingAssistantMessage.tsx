@@ -56,6 +56,7 @@ export function PendingAssistantMessage({ onOutputChange }: Props) {
        message, so when this is replaced by the real one nothing about the
        message changes shape or position. */
     <article className="message-card message-assistant message-pending" aria-label={contentReady ? "Cortex response ready, saving..." : "Cortex response in progress"}>
+      <span className="message-speaker" aria-hidden="true">Cortex</span>
       <div className="message-bubble">
         {content && <div className="markdown-body"><SafeMarkdown content={content} finalized={contentReady} />{!contentReady && <span className="streaming-caret" aria-hidden="true" />}</div>}
         {!content && !contentReady && <span className="streaming-caret" aria-hidden="true" />}
@@ -71,10 +72,10 @@ export function PendingAssistantMessage({ onOutputChange }: Props) {
 function GenerationStatus({ status }: { status: string }) {
   return (
     <article className="message-card message-assistant message-pending" aria-label="Cortex response in progress">
+      <span className="message-speaker" aria-hidden="true">Cortex</span>
       <div className="message-bubble">
         <div className="generation-status" role="status">
           {humanizeGenerationStatus(status)}
-          <span className="generation-status-dots" aria-hidden="true"><i /><i /><i /></span>
         </div>
       </div>
     </article>

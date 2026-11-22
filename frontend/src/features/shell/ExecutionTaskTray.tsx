@@ -135,10 +135,7 @@ export function ExecutionTaskTray({ tasks, onCancel, onDecideApproval, onLoadCod
   return (
     <aside className={`execution-task-tray${hasLiveWork ? " execution-task-tray-active" : ""}`} aria-label="Task activity">
       <div className="execution-task-tray-heading">
-        <div className="execution-task-tray-title">
-          <span className="execution-task-tray-kicker">TASK ACTIVITY</span>
-          <h2>{pendingApprovals.length ? "Review before running" : hasLiveWork ? "Running locally" : "Recent activity"}</h2>
-        </div>
+        <h2>{pendingApprovals.length ? "Review before running" : hasLiveWork ? "Running locally" : "Recent activity"}</h2>
         <div className="execution-task-tray-controls">
           <span className="execution-task-tray-count" aria-label={`${tasks.length} task${tasks.length === 1 ? "" : "s"}`}>{tasks.length}</span>
           {!hasLiveWork && Boolean(completionKey) && (

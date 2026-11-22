@@ -6,6 +6,7 @@ import type { ChatResponse } from "../../../../contracts/cortex-api";
 import type { CortexApi } from "../../api/client";
 import { useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
+import { ShortcutsHelpDialog } from "../command-palette/ShortcutsHelpDialog";
 import { ChatPage } from "./ChatPage";
 import { GenerationStreamHost } from "./GenerationStreamHost";
 
@@ -34,6 +35,7 @@ function chatApi(overrides: Partial<CortexApi> = {}): CortexApi {
 function renderPage(api: CortexApi, props: Partial<ComponentProps<typeof ChatPage>> = {}) {
   return render(
     <>
+      <ShortcutsHelpDialog />
       <GenerationStreamHost api={api} onSessionExpired={() => undefined} />
       <ChatPage
         api={api}
@@ -58,46 +60,39 @@ describe("ChatPage new thread", () => {
     window.sessionStorage.clear();
     window.localStorage.clear();
     useChatStore.setState({ generationOptionsByThread: {}, proposedMemoriesByMessage: {} });
-    useUiStore.setState({ toasts: [] });
+    useUiStore.setState({ toasts: [], shortcutsDialogOpen: false });
   });
 
-  it("shows which model will answer, three keyboard hints, and a line about attachments", async () => {
+  it("introduces the writing area and opens the keyboard reference", async () => {
+    const user = userEvent.setup();
     renderPage(chatApi());
 
-    expect(await screen.findByText("local-chat:7b", { selector: "strong" })).toBeVisible();
-    expect(screen.getByText(/Chatting with/)).toBeVisible();
-    const hints = screen.getByRole("list", { name: "Keyboard shortcuts" });
-    expect(hints.querySelectorAll("li")).toHaveLength(3);
-    expect(hints).toHaveTextContent("Enter sends");
-    expect(hints).toHaveTextContent("Ctrl/Cmd + K opens the command palette");
-    expect(hints).toHaveTextContent("? lists every shortcut");
-    expect(screen.getByText(/Drop, paste or attach images and text or code files/)).toBeVisible();
-    // The copy the product deliberately dropped stays dropped (pinned by the e2e suite too).
-    expect(screen.queryByText("What will you make today?")).not.toBeInTheDocument();
-    expect(screen.queryByText("LOCAL, PRIVATE, YOURS")).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
+    expect(screen.getByText(/drop an image or text file here/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Selected local model: local-chat:7b" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).toBeVisible();
   });
 
   it("names the GGUF file rather than its internal id", async () => {
     renderPage(chatApi(), { selectedModel: "gguf:demo.Q4_K_M.gguf", localModels: ["gguf:demo.Q4_K_M.gguf"] });
 
-    expect(await screen.findByText("demo.Q4_K_M.gguf", { selector: "strong" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Selected local model: demo.Q4_K_M.gguf" })).toBeVisible();
     expect(screen.queryByText(/gguf:/)).not.toBeInTheDocument();
   });
 
   it("points at the model picker instead of naming a model when none is selected", async () => {
     renderPage(chatApi(), { selectedModel: null, runtimeReady: false, runtimeMessage: "Select a local model before sending a message." });
 
-    expect(await screen.findByText(/No model is selected yet/)).toBeVisible();
-    expect(screen.queryByText(/Chatting with/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/Choose a model in the message box/)).toBeVisible();
   });
 
   it("is not shown for a saved conversation, even an empty one", async () => {
     renderPage(chatApi(), { threadId: "thread-a" });
 
     await screen.findByLabelText("Message Cortex");
-    expect(screen.queryByText(/Chatting with/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
   });
 
   it("goes away when the first message starts", async () => {
@@ -107,11 +102,11 @@ describe("ChatPage new thread", () => {
     });
     renderPage(api);
 
-    expect(await screen.findByText(/Chatting with/)).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "New thread" })).toBeVisible();
     await user.type(screen.getByLabelText("Message Cortex"), "hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(api.generate).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText(/Chatting with/)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "New thread" })).not.toBeInTheDocument());
   });
 });

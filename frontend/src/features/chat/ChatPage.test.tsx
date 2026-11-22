@@ -429,7 +429,7 @@ describe("ChatPage composer integration", () => {
     expect(screen.queryByRole("button", { name: "Retry response" })).toBeNull();
   });
 
-  it("renders role-aware bubbles with markdown, reasoning, and sources", async () => {
+  it("labels transcript speakers and renders markdown, reasoning, and sources", async () => {
     const transcript: ChatResponse = {
       id: "thread-a",
       title: "Workbench",
@@ -453,11 +453,10 @@ describe("ChatPage composer integration", () => {
     });
     renderChat(api);
 
-    // The speaker is carried by form and by each article's accessible name,
-    // not by a repeated visible nameplate above every turn.
     expect(await screen.findByLabelText("Cortex message")).toBeInTheDocument();
     expect(screen.getByLabelText("Your message")).toBeInTheDocument();
-    expect(screen.queryByText("Cortex")).not.toBeInTheDocument();
+    expect(screen.getByText("Cortex")).toBeVisible();
+    expect(screen.getByText("You")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Result", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy ts code" })).toBeInTheDocument();
     expect(screen.getByText("Reasoning")).toBeInTheDocument();

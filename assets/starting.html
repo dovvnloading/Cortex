@@ -23,7 +23,7 @@
     --bg: #101112;
     --text: #f0ede7;
     --muted: #aaa69f;
-    --accent: #e37b4e;
+    --accent: #ed875b;
     --track: rgba(240, 237, 231, 0.1);
   }
 }
@@ -35,13 +35,12 @@ body {
   color: var(--text);
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
-main { text-align: center; padding: 0 24px; }
-h1 { margin: 0 0 8px; font-size: 1.25rem; font-weight: 600; }
+main { width: min(22rem, calc(100% - 48px)); }
+h1 { margin: 0 0 12px; font: 400 2.5rem/1.1 Georgia, "Times New Roman", serif; letter-spacing: -0.035em; }
 p { margin: 0; color: var(--muted); font-size: 0.9rem; }
 .bar {
-  width: 12rem;
-  height: 3px;
-  margin: 20px auto 0;
+  height: 2px;
+  margin: 20px 0 0;
   overflow: hidden;
   border-radius: 2px;
   background: var(--track);

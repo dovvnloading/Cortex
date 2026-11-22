@@ -442,7 +442,7 @@ test("selects the exact cloud deployment by keyboard in a compact window with du
   // Checks hit testing while the selection confirmation is still displayed.
   await page.getByRole("button", { name: "Send message" }).click({ trial: true, timeout: 1500 });
   for (const element of [page.getByRole("button", { name: "Send message" }), page.getByLabel("Message Cortex"),
-    page.getByLabel("Keyboard shortcuts", { exact: true }).getByText("lists every shortcut", { exact: false })]) {
+    page.getByRole("button", { name: "Keyboard shortcuts", exact: true })]) {
     const rect = await element.boundingBox();
     expect(rect).not.toBeNull();
     expect(rect!.x).toBeGreaterThanOrEqual(0);

@@ -1,4 +1,4 @@
-import { ArrowUp, FileText, Image as ImageIcon, LoaderCircle, Paperclip, Square, X } from "lucide-react";
+import { FileText, Image as ImageIcon, LoaderCircle, Paperclip, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -358,9 +358,10 @@ export function MessageComposer({
             <div className="composer-toolbar-leading">
               <label className={`composer-attach-control${attachmentsBusy ? " composer-attach-control-busy" : ""}`} htmlFor={attachmentInputId} title="Attach images or documents">
                 {attachmentsBusy ? <LoaderCircle size={15} className="composer-control-spinner" aria-hidden="true" /> : <Paperclip size={15} aria-hidden="true" />}
-                <span className="sr-only">Attach images or documents</span>
+                <span className="composer-attach-label" aria-hidden="true">Attach</span>
                 <input
                   id={attachmentInputId}
+                  aria-label="Attach images or documents"
                   className="sr-only"
                   type="file"
                   multiple
@@ -413,7 +414,7 @@ export function MessageComposer({
                   disabled={isStopping || isFinishing}
                   onClick={() => void stop()}
                 >
-                  {isStopping || isFinishing ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : <Square aria-hidden="true" size={15} fill="currentColor" />}
+                  {isStopping || isFinishing ? <LoaderCircle aria-hidden="true" size={17} className="composer-control-spinner" /> : "Stop"}
                 </button>
               ) : (
                 <button
@@ -423,7 +424,7 @@ export function MessageComposer({
                   title={phase === "starting" ? "Starting response" : "Send message"}
                   disabled={!canSubmit}
                 >
-                  {phase === "starting" ? <LoaderCircle aria-hidden="true" size={18} className="composer-control-spinner" /> : <ArrowUp aria-hidden="true" size={19} strokeWidth={2.25} />}
+                  {phase === "starting" ? <LoaderCircle aria-hidden="true" size={18} className="composer-control-spinner" /> : "Send"}
                 </button>
               )}
             </div>

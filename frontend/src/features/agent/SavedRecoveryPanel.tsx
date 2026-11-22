@@ -96,17 +96,11 @@ export function SavedRecoveryPanel({ api, refreshKey = 0 }: { api: CortexApi; re
 
   return (
     <section className="coding-panel" aria-label="Saved recovery checkpoints">
-      <div className="coding-row">
+      <div className="agent-section-heading">
         <h3>Saved recovery checkpoints</h3>
         <button type="button" className="coding-quiet" disabled={busy !== null}
           onClick={() => void refresh()}>Refresh recovery list</button>
       </div>
-      <p className="coding-muted">
-        Previously applied Project workspace patches have durable recovery copies here, even after a restart.
-        This list is available without starting an Agent run. New Agent runs have their own confirmed undo
-        in the run review above. Original source bytes are stored in a private, OS-protected SQLite journal,
-        not separately encrypted. Recovery never runs automatically.
-      </p>
       {notice && <p role="status">{notice}</p>}
       {error && <p className="coding-error" role="alert">{error}</p>}
       {recoveryState === "loading"
@@ -132,6 +126,13 @@ export function SavedRecoveryPanel({ api, refreshKey = 0 }: { api: CortexApi; re
                   </div>
                 ))}
               </div>}
+      <details className="recovery-details">
+        <summary>Checkpoint storage and undo</summary>
+        <p>These copies come from edits made in the former Project workspace. They survive restarts and can
+          be restored here without starting an Agent run. Each restore requires your confirmation.</p>
+        <p>Cortex stores the original file contents in a private SQLite journal protected by operating-system
+          permissions, without separate encryption. To undo edits from a new Agent run, open its run review.</p>
+      </details>
     </section>
   );
 }

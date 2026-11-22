@@ -66,8 +66,10 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
     }
   };
 
+  const speaker = { assistant: "Cortex", user: "You", system: "System" }[message.role];
   return (
-    <article className={`message-card message-${message.role}`} aria-label={`${message.role === "assistant" ? "Cortex" : message.role === "user" ? "Your" : "System"} message`}>
+    <article className={`message-card message-${message.role}`} aria-label={`${message.role === "user" ? "Your" : speaker} message`}>
+      <span className="message-speaker" aria-hidden="true">{speaker}</span>
       <div className="message-bubble">
         <AttachmentList attachments={message.attachments} />
         {message.role === "assistant" && !message.content && message.thoughts ? (
@@ -86,13 +88,9 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
       {message.role === "assistant" && message.id && onSaveMemory && proposedMemories && proposedMemories.length > 0 && (
         <MemoryProposals messageId={message.id} memos={proposedMemories} onSave={onSaveMemory} />
       )}
-      {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary><span>Reasoning</span><span className="disclosure-hint">Show details</span></summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}
-      {/* Metadata sits below the message and stays quiet. The speaker is
-          already unambiguous from the form -- unframed text on the left is
-          Cortex, an inset on the right is you -- so repeating a nameplate
-          above every turn was chrome carrying no information. Screen readers
-          still get the speaker from this article's aria-label. */}
+      {message.role === "assistant" && message.thoughts && <details className="reasoning"><summary>Reasoning</summary><div className="details-content"><div className="markdown-body"><SafeMarkdown content={message.thoughts} /></div></div></details>}
       <div className="message-footer">
+        <MessageMeta timestamp={message.timestamp} stats={message.stats} />
         <div className="message-actions" aria-label="Message actions">
           <button className="icon-button icon-button-small" type="button" aria-label={copied ? "Message copied" : "Copy message"} title={copied ? "Copied" : "Copy message"} onClick={() => void copy()}><Copy size={14} aria-hidden="true" />{copied && <span className="message-action-feedback">Copied</span>}</button>
           {message.role === "user" && isFinalUnansweredUser && message.id && (
@@ -103,7 +101,6 @@ export const MessageCard = memo(function MessageCard({ message, index, isFinalAs
             <button className="icon-button icon-button-small" type="button" aria-label="Fork chat from this message" title="Fork chat from this message" disabled={busy || forking || !message.id} onClick={() => onFork(message)}><GitBranch size={14} aria-hidden="true" /></button>
           </>}
         </div>
-        <MessageMeta timestamp={message.timestamp} stats={message.stats} />
       </div>
     </article>
   );

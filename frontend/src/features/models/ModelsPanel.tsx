@@ -5,7 +5,7 @@ import type {
   ModelDownloadRequest,
   ModelResponse,
 } from "../../../../contracts/cortex-api";
-import { displayModelName } from "../../lib/localModels";
+import { displayModelName, localModelNames } from "../../lib/localModels";
 import { GGUFDownloadForm, type ListGGUFFiles } from "./GGUFDownloadForm";
 import { ModelInfoPanel } from "./ModelInfoPanel";
 
@@ -79,19 +79,21 @@ export function ModelsPanel({ models, busy, modelsBusy = busy, progress, onCance
   const missing = models.missing_models ?? [];
   const optionalMissing = models.optional_missing_models ?? [];
 
+  const inventory = localModelNames(models);
+  const details = new Map(models.models?.map((model) => [model.name.trim(), model]));
+
   return (
     <section className="panel models-panel" aria-labelledby="models-title">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">LOCAL MODELS</p>
-          <h2 id="models-title">Models and connectivity</h2>
-        </div>
+      <div className="section-heading">
+        <h3 id="models-title">Models and connectivity</h3>
       </div>
       <div className="model-connection-row">
-        <span className={`status-pill ${connection?.success ? "status-success" : "status-danger"}`}>
-          <span className="connection-dot" aria-hidden="true" />
-          {connection?.success ? "Ollama connected" : "Ollama unavailable"}
-        </span>
+        {connection ? (
+          <span className={`status-pill ${connection.success ? "status-success" : "status-danger"}`}>
+            <span className="connection-dot" aria-hidden="true" />
+            {connection.success ? "Ollama connected" : "Ollama unavailable"}
+          </span>
+        ) : <span className="muted-note">Ollama status unknown</span>}
         <a href={setupUrl} target="_blank" rel="noreferrer" className="setup-link">
           Ollama setup <ExternalLink aria-hidden="true" size={14} />
         </a>
@@ -99,17 +101,15 @@ export function ModelsPanel({ models, busy, modelsBusy = busy, progress, onCance
           <RefreshCw aria-hidden="true" size={15} /> Rescan local models
         </button>
       </div>
-      <p className="muted-note">
-        {connection?.message ?? "Checking the local Ollama service."} Cortex lists models installed through
-        Ollama and any .gguf files in your local models folder.
-      </p>
-      <div className="model-list" aria-label="Installed models">
-        {(models.models ?? []).length ? (models.models ?? []).map((model) => (
-          <ModelInfoPanel model={model} key={model.name} />
-        )) : (models.installed_models ?? []).length ? (models.installed_models ?? []).map((installed) => (
-          <span className="model-chip" key={installed}>{installed}</span>
-        )) : <span className="empty-state">No installed models reported.</span>}
-      </div>
+      {connection?.message && <p className="muted-note">{connection.message}</p>}
+      <h4 className="model-list-heading" id="installed-models-title">Installed models</h4>
+      {inventory.length > 0 ? (
+        <ul className="model-list" aria-labelledby="installed-models-title">
+          {inventory.map((name) => (
+            <li key={name}><ModelInfoPanel model={details.get(name) ?? { name }} /></li>
+          ))}
+        </ul>
+      ) : <p className="empty-state">No installed models reported.</p>}
       {missing.length > 0 && (
         <div className="model-missing">
           <strong>Required tags missing</strong>
@@ -146,9 +146,14 @@ function ModelProgressRow({ progress, busy, secondary = false, onCancel }: { pro
           {busy && <span className="loading-spinner model-progress-spinner" aria-hidden="true" />}
           {progress.model}
         </span>
-        <span>{progress.percent === null ? progress.status : `${progress.percent}%`}</span>
+        {progress.percent !== null && <span>{progress.percent}%</span>}
       </div>
-      <div className="progress-track"><span style={{ width: `${progress.percent ?? 8}%` }} /></div>
+      {progress.percent !== null && (
+        <div className="progress-track" role="progressbar" aria-label={progress.model} aria-valuenow={progress.percent}
+          aria-valuemin={0} aria-valuemax={100}>
+          <span style={{ width: `${progress.percent}%` }} />
+        </div>
+      )}
       <div className="model-progress-footer">
         <small>{progress.status}</small>
         {busy && onCancel && (
@@ -171,7 +176,6 @@ function GGUFRuntimeSection({ llamacppStatus, gguf, runtime }: { llamacppStatus:
   return (
     <div className="gguf-runtime">
       <div className="section-heading">
-        <p className="eyebrow">GGUF MODELS</p>
         <h3>Local models folder</h3>
       </div>
       <p className="muted-note">

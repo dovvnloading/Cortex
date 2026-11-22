@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Archive, ChevronRight, Folder, FolderInput, FolderPlus, Pencil, Search, Trash2 } from "lucide-react";
+import { ChevronRight, FolderInput, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { parseMessageTimestamp } from "../../lib/messageTime";
@@ -103,12 +103,11 @@ export function ChatLibrary({
   // matches are omitted above and must not suppress the empty search state.
   const hasAnything = searching ? filtered.length > 0 : filtered.length > 0 || groups.length > 0;
   const countNoun = searching ? "result" : "thread";
-  const EmptyIcon = searching ? Search : Archive;
 
   return (
     <div className="chat-library">
       <div className="chat-library-heading">
-        <h3>{searching ? "Search results" : "Library"}</h3>
+        <h2>{searching ? "Search results" : "Library"}</h2>
         <span className="chat-library-count" role="status">
           {filtered.length}<span className="sr-only"> {countNoun}{filtered.length === 1 ? "" : "s"}</span>
         </span>
@@ -147,7 +146,6 @@ export function ChatLibrary({
                   onClick={() => onToggleGroup(group.id, !collapsed)}
                 >
                   <ChevronRight className="chat-group-chevron" aria-hidden="true" size={13} />
-                  <Folder className="chat-group-icon" aria-hidden="true" size={15} />
                   <span className="chat-group-name">{group.name}</span>
                   <span className="chat-group-count">{groupChats.length}</span>
                 </button>
@@ -185,14 +183,13 @@ export function ChatLibrary({
 
         {searching ? byGroup.ungrouped.map(renderRow) : months.map(([key, month]) => (
           <section className="chat-month" key={key}>
-            <h4 className="chat-month-heading">{month.label}</h4>
+            <h3 className="chat-month-heading">{month.label}</h3>
             {month.entries.map(renderRow)}
           </section>
         ))}
 
         {!hasAnything && (
           <p className="sidebar-empty">
-            <EmptyIcon aria-hidden="true" size={24} />
             {searching ? "No chats match your search." : "No threads yet."}
           </p>
         )}

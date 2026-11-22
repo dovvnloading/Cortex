@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowRight, Bot, PanelLeft, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { PanelLeft, Plus, Search, Settings, X } from "lucide-react";
 import type { ChatGroup, ChatSummary, CodeExecutionSourceResponse, ExecutionApprovalDecisionRequest, ExecutionTaskSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { chatPath, parseAppRoute, useNavigate, usePathname } from "../../lib/navigation";
 import { AlertDialog, Dialog, DialogContent } from "../../shared/ui/Dialog";
+import { useUiStore } from "../../stores/useUiStore";
 import { InlineBoundary } from "../../app/ErrorBoundary";
 import { ExecutionTaskTray, type ExecutionArtifactResult } from "./ExecutionTaskTray";
 import { ChatLibrary } from "./ChatLibrary";
@@ -53,6 +54,7 @@ export function AppShell({
   children,
 }: Props) {
   const navigate = useNavigate();
+  const setCommandPaletteOpen = useUiStore((state) => state.setCommandPaletteOpen);
   const pathname = usePathname();
   const [sidebarVisible, setSidebarVisible] = useState(() => !isCompactWindow());
   const [renameTarget, setRenameTarget] = useState<ChatSummary | null>(null);
@@ -61,15 +63,13 @@ export function AppShell({
   const searchRef = useRef<HTMLInputElement>(null);
   const previousPathnameRef = useRef(pathname);
 
-  const isSettings = parseAppRoute(pathname).kind === "settings";
-  const isAgent = parseAppRoute(pathname).kind === "agent";
-  const activeTitle = isAgent
-    ? "Agent mode"
-    : isSettings
-      ? "Settings"
-    : activeChatId
-      ? displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title, "Cortex")
-      : "New thread";
+  const route = parseAppRoute(pathname);
+  const isSettings = route.kind === "settings";
+  const isAgent = route.kind === "agent";
+  const activeTitle = activeChatId && !isAgent && !isSettings
+    ? displayChatTitle(chats.find((chat) => chat.id === activeChatId)?.title)
+    : null;
+  const Brand = activeTitle ? "span" : "h1";
 
   const closeSidebarOnCompactLayout = () => {
     if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches) {
@@ -118,7 +118,8 @@ export function AppShell({
   return (
     <div className={`app-shell theme-${theme} ${sidebarVisible ? "" : "sidebar-collapsed"}`}>
       <header className="window-bar">
-        <div className="window-bar-leading">
+        <div className="window-brand">
+          <Brand className="wordmark"><img src="/cortex.svg" alt="" />Cortex</Brand>
           <button
             className="window-control sidebar-toggle"
             type="button"
@@ -129,22 +130,20 @@ export function AppShell({
           >
             <PanelLeft aria-hidden="true" size={17} />
           </button>
-          <div className="window-title-group">
-            <span className="window-kicker">Cortex</span>
-            <h1 className="window-title">{activeTitle}</h1>
-          </div>
         </div>
+        {activeTitle && <h1 className="window-title">{activeTitle}</h1>}
         <div className="window-actions">
           <NavigationLink to="/agent"
-            className={"window-control" + (isAgent ? " window-control-active" : "")}
+            className={"agent-nav-link" + (isAgent ? " window-control-active" : "")}
             aria-label="Agent mode" aria-current={isAgent ? "page" : undefined}
             title="Opt-in coding agent">
-            <Bot aria-hidden="true" size={17} />
+            Agent mode
           </NavigationLink>
           <NavigationLink
             to="/settings"
-            className={`window-control settings-control ${isSettings ? "window-control-active" : ""}`}
+            className={`window-control ${isSettings ? "window-control-active" : ""}`}
             aria-label="Settings"
+            aria-description={modelConnection?.message ?? undefined}
             aria-current={isSettings ? "page" : undefined}
             title={modelConnection?.message ?? "Settings"}
             onClick={onOpenSettings}
@@ -164,14 +163,10 @@ export function AppShell({
           aria-hidden={!sidebarVisible}
           inert={!sidebarVisible ? true : undefined}
         >
-          <header className="archive-cover">
-            <div className="archive-imprint"><img src="/cortex.svg" alt="" />Cortex</div>
-            <h2>Thread <em>archive</em></h2>
-          </header>
           <div className="archive-tools">
             <button className="new-chat-button" type="button" onClick={createChat}>
+              <Plus aria-hidden="true" size={16} />
               New thread
-              <Plus aria-hidden="true" size={18} />
             </button>
             {(chats.length > 0 || chatQuery.length > 0) && (
               <div className="sidebar-search">
@@ -213,11 +208,11 @@ export function AppShell({
             />
           </InlineBoundary>
           <footer className="archive-footer">
-            <NavigationLink to="/agent" className="archive-workspace" aria-current={isAgent ? "page" : undefined}>
-              <span className="archive-workspace-icon"><Bot aria-hidden="true" size={17} /></span>
-              Agent mode
-              <ArrowRight aria-hidden="true" size={15} />
-            </NavigationLink>
+            <button className="palette-trigger" type="button" aria-haspopup="dialog"
+              aria-keyshortcuts="Control+k Meta+k" onClick={() => setCommandPaletteOpen(true)}>
+              Command palette
+              <kbd aria-hidden="true">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
+            </button>
           </footer>
         </aside>
 
@@ -313,10 +308,7 @@ function DeleteChatDialog({ chat, onClose, onConfirm }: { chat: ChatSummary; onC
   return (
     <AlertDialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
       <DialogContent className="dialog delete-dialog">
-        <div className="delete-dialog-heading">
-          <div className="delete-dialog-icon" aria-hidden="true"><Trash2 size={18} /></div>
-          <AlertDialog.Title>Delete this chat?</AlertDialog.Title>
-        </div>
+        <AlertDialog.Title>Delete this chat?</AlertDialog.Title>
         <AlertDialog.Description className="delete-dialog-description">This removes the conversation and all of its messages. You can undo it for a few seconds afterwards.</AlertDialog.Description>
         <div className="delete-dialog-target"><span>Chat to delete</span><strong>{title}</strong></div>
         <div className="dialog-actions">

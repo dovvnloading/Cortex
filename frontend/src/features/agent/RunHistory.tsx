@@ -171,9 +171,9 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
   };
 
   return (
-    <section aria-label="Agent run history" style={{ border: "1px solid var(--line)", borderRadius: "var(--radius-md)", padding: 16 }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0, fontSize: "1.15rem" }}>Agent run history</h2>
+    <section className="coding-panel" aria-labelledby="agent-history-title">
+      <header className="agent-section-heading">
+        <h3 id="agent-history-title">Agent run history</h3>
         <button
           type="button"
           className="button button-secondary"
@@ -196,29 +196,28 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
       {notice && <p role="status">{notice}</p>}
 
       {state.phase === "ready" && state.runs.length > 0 && (
-        <ul aria-label="Agent runs" style={{ listStyle: "none", padding: 0, margin: "16px 0 0", display: "grid", gap: 12 }}>
+        <ul className="agent-history" aria-label="Agent runs">
           {state.runs.map((run) => {
             const goal = run.goal?.trim() || "Goal unavailable";
             const status = STATUS_LABELS[run.status] ?? "Unknown status";
             return (
-              <li key={run.id} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, borderBottom: "1px solid var(--line)", paddingBottom: 12 }}>
-                <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+              <li key={run.id}>
+                <div className="agent-history-entry">
                   <button
                     type="button"
-                    className="button button-quiet"
-                    style={{ display: "block", textAlign: "left", padding: "6px 0", height: "auto", maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }}
+                    className="agent-history-open"
                     onClick={() => onOpen(run.id)}
                     aria-label={`Open run: ${goal}`}
                   >
                     <strong>{goal}</strong>
                   </button>
-                  <div style={{ color: "var(--text-muted)", fontSize: "0.84rem", display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  <div className="agent-history-meta">
                     <span>{status}</span>
                     <span>{projectFolder(run.project_root)}</span>
                     <time dateTime={run.created}>{runDate(run.created)}</time>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <div className="coding-row">
                   {run.status === "interrupted" && (
                     <button
                       type="button"

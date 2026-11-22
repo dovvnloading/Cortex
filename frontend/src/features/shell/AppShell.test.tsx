@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary, ModelResponse } from "../../../../contracts/cortex-api";
 import { registerNavigationGuard } from "../../lib/navigation";
+import { useUiStore } from "../../stores/useUiStore";
 import { AppShell } from "./AppShell";
 
 const CONNECTED = { success: true, status: "connected", message: "Connected." } satisfies NonNullable<ModelResponse["connection"]>;
@@ -45,6 +46,12 @@ describe("AppShell", () => {
     expect(screen.queryByText("**AI Purpose Explained**")).not.toBeInTheDocument();
     expect(screen.queryByText("Ollama online")).not.toBeInTheDocument();
     expect(screen.queryByText("Connected locally")).not.toBeInTheDocument();
+  });
+
+  it.each(["/settings", "/agent", "/chat/new"])("uses the wordmark as the shell heading on %s", (path) => {
+    window.history.replaceState({}, "", path);
+    renderShell();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Cortex");
   });
 
   it("navigates to a new thread without maintaining a second selection state", async () => {
@@ -94,6 +101,30 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "Show chat history" }));
     expect(sidebar).toHaveAttribute("aria-hidden", "false");
     expect(sidebar).not.toHaveAttribute("inert");
+  });
+
+  it("keeps one labeled Agent link available when the library is closed", async () => {
+    const user = userEvent.setup();
+    renderShell();
+    const agent = screen.getByRole("link", { name: "Agent mode" });
+    expect(agent).toHaveTextContent("Agent mode");
+
+    await user.click(screen.getByRole("button", { name: "Hide chat history" }));
+    await user.click(agent);
+    expect(window.location.pathname).toBe("/agent");
+    expect(agent).toHaveAttribute("aria-current", "page");
+  });
+
+  it("opens the command palette from the library footer", async () => {
+    const user = userEvent.setup();
+    renderShell();
+
+    try {
+      await user.click(screen.getByRole("button", { name: "Command palette" }));
+      expect(useUiStore.getState().commandPaletteOpen).toBe(true);
+    } finally {
+      useUiStore.getState().setCommandPaletteOpen(false);
+    }
   });
 
   it("captures the routed thread before opening settings", async () => {

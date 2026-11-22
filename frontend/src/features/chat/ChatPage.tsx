@@ -1006,7 +1006,7 @@ export function ChatPage({
 
   // A new thread has nothing to show yet, so it shows a short guide until the
   // first message starts (a starting or streaming first turn has its own bubble).
-  const showNewChatGuide = threadId === null && messages.length === 0 && !starting;
+  const showNewChatGuide = threadId === null && messages.length === 0 && !starting && !activeJobForCurrentThread;
 
   if (chatLoad.threadId !== threadId || chatLoad.loading) return <div className="chat-empty-state" aria-live="polite"><span className="loading-spinner" />Loading conversation...</div>;
   if (chatLoad.error) return (
@@ -1020,13 +1020,13 @@ export function ChatPage({
   );
 
   return (
-    <section className="chat-page" aria-labelledby="chat-title" {...pageDrop.handlers}>
+    <section className={showNewChatGuide ? "chat-page chat-page-new" : "chat-page"} aria-labelledby="chat-title" {...pageDrop.handlers}>
       {pageDrop.active && (
         <div className="drop-overlay chat-drop-overlay" aria-hidden="true">
           <Paperclip size={20} /> Drop to attach
         </div>
       )}
-      <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>
+      {!showNewChatGuide && <h2 id="chat-title" className="sr-only">{displayChatTitle(currentChat?.title, "New Chat")}</h2>}
       <ResponseAnnouncer threadId={displayedThreadId} />
       {pendingElsewhere && pendingRecoveryAction}
       <MessageList

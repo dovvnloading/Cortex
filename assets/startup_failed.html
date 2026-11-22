@@ -24,7 +24,7 @@
     --muted: #aaa69f;
     --line: rgba(240, 237, 231, 0.18);
     --fill: #b0512a;
-    --code: #25272a;
+    --code: #272724;
   }
 }
 html, body { height: 100%; margin: 0; }
@@ -36,13 +36,13 @@ body {
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 main { max-width: 34rem; padding: 0 24px; }
-h1 { margin: 0 0 12px; font-size: 1.25rem; font-weight: 600; }
+h1 { margin: 0 0 20px; font: 400 clamp(2rem, 5vw, 2.8rem)/1.1 Georgia, "Times New Roman", serif; letter-spacing: -0.035em; }
 p { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; line-height: 1.5; }
 .detail, .log {
   margin: 0 0 12px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--code);
   color: var(--text);
   font: 0.8rem/1.45 Consolas, "Cascadia Mono", monospace;
@@ -52,7 +52,7 @@ p { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; line-height: 1.5; 
 button {
   padding: 8px 18px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 5px;
   background: var(--fill);
   color: #fff;
   font: inherit;
@@ -65,11 +65,10 @@ button[hidden] { display: none; }
 <body>
 <main role="alert">
   <h1>Cortex could not start</h1>
-  <p>Something went wrong while Cortex was starting.</p>
   <div class="detail">{{message}}</div>
-  <p>A privacy-safe diagnostic log was written to:</p>
+  <p>Diagnostic log</p>
   <div class="log">{{log}}</div>
-  <p>Close this window and start Cortex again. If it keeps happening, that log says what failed.</p>
+  <p>Close this window and start Cortex again. If startup fails again, check the log for details.</p>
   <button id="close" type="button" hidden>Close</button>
 </main>
 <script>

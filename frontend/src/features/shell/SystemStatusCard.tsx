@@ -6,10 +6,7 @@ export function SystemStatusCard({ system }: { system: SystemResponse }) {
   return (
     <section className="panel status-panel" aria-labelledby="system-status-title">
       <div className="panel-heading">
-        <div>
-          <p className="eyebrow">SYSTEM STATUS</p>
-          <h2 id="system-status-title">Local runtime</h2>
-        </div>
+        <h2 id="system-status-title">Local runtime</h2>
         <span className={`status-pill ${healthy ? "status-success" : "status-danger"}`}>
           {healthy ? <CheckCircle2 aria-hidden="true" size={15} /> : <CircleAlert aria-hidden="true" size={15} />}
           {healthy ? "Ready" : "Attention"}
@@ -25,9 +22,6 @@ export function SystemStatusCard({ system }: { system: SystemResponse }) {
           <span><strong>Runtime</strong><small>{system.preview ? "Preview mode" : "Local mode"}</small></span>
         </div>
       </div>
-      <p className="muted-note">
-        The web path is the active local launcher.
-      </p>
     </section>
   );
 }

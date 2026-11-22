@@ -8,7 +8,7 @@ export const Dialog = { Root: BaseDialog.Root, Title: BaseDialog.Title, Descript
 /** Destructive-confirmation dialog (role="alertdialog"), e.g. delete. */
 export const AlertDialog = { Root: BaseAlertDialog.Root, Title: BaseDialog.Title, Description: BaseDialog.Description };
 
-type DialogContentProps = ComponentProps<typeof BaseDialog.Popup> & { children: ReactNode };
+type DialogContentProps = ComponentProps<typeof BaseDialog.Popup> & { children: ReactNode; backdropClassName?: string };
 
 /**
  * Portal + backdrop + popup, shared by both Dialog and AlertDialog — Popup
@@ -18,10 +18,10 @@ type DialogContentProps = ComponentProps<typeof BaseDialog.Popup> & { children: 
  * restoration on close, and Escape-to-close automatically — none of which
  * the previous hand-rolled dialogs implemented for tab-trapping.
  */
-export function DialogContent({ children, ...props }: DialogContentProps) {
+export function DialogContent({ children, backdropClassName = "dialog-backdrop", ...props }: DialogContentProps) {
   return (
     <BaseDialog.Portal>
-      <BaseDialog.Backdrop className="dialog-backdrop" />
+      <BaseDialog.Backdrop className={backdropClassName} />
       <BaseDialog.Popup className="dialog" {...props}>
         {children}
       </BaseDialog.Popup>

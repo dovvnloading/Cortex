@@ -89,8 +89,8 @@ test("Agent mode remains opt-in and exposes confirmed legacy recovery after reti
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect.poll(() => savedSettings.agent.enabled).toBe(true);
   await page.getByRole("link", { name: "Agent mode" }).first().click();
-  await expect(page.getByRole("heading", { name: "Agent mode", level: 2 })).toBeVisible();
-  await page.getByRole("button", { name: "Fix failing tests" }).click();
+  await expect(page.getByRole("heading", { name: "Project runs", level: 2 })).toBeVisible();
+  await page.getByRole("combobox", { name: "Example goals" }).selectOption("Fix failing tests");
   await page.getByRole("textbox", { name: "Project folder" }).fill("C:\\dev\\sample");
   await expect(page.getByRole("button", { name: "Start Agent" })).toBeDisabled();
   expect(started).toEqual([]);
@@ -118,6 +118,6 @@ test("Agent mode remains opt-in and exposes confirmed legacy recovery after reti
   await page.goto("/workspace#bootstrap=launcher-token");
   await expect(page).toHaveURL(/\/agent$/);
   // This route lands on Agent mode, not a new chat: wait for its real destination UI.
-  await expect(page.getByRole("heading", { name: "Agent mode", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Project runs", level: 2 })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Saved recovery checkpoints" })).toBeVisible();
 });

@@ -29,6 +29,19 @@ function mount(api: ReturnType<typeof fakeApi>) {
 describe("saved recovery checkpoints in Agent mode", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("keeps the storage and undo explanation available when there are no checkpoints", async () => {
+    const api = fakeApi();
+    api.workspaceCheckpoints.mockResolvedValue({ checkpoints: [] });
+    mount(api);
+    expect(await screen.findByText("No saved recovery checkpoints.")).toBeVisible();
+    const summary = screen.getByText("Checkpoint storage and undo");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    await userEvent.setup().click(summary);
+    expect(summary.closest("details")).toHaveAttribute("open");
+    expect(screen.getByText(/private SQLite journal/)).toBeVisible();
+    expect(api.restoreWorkspaceCheckpoint).not.toHaveBeenCalled();
+  });
+
   it("loads pending legacy checkpoints without starting a run or restoring files", async () => {
     const api = fakeApi();
     mount(api);

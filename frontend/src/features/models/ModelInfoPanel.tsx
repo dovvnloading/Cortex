@@ -1,5 +1,5 @@
 import type { InstalledModel } from "../../../../contracts/cortex-api";
-import { displayModelName, formatModelSize } from "../../lib/localModels";
+import { displayModelName, formatModelSize, modelSource } from "../../lib/localModels";
 
 function modelDetailSummary(model: InstalledModel): string | null {
   const parts: string[] = [];
@@ -15,8 +15,8 @@ export function ModelInfoPanel({ model }: { model: InstalledModel }) {
   const detail = modelDetailSummary(model);
   return (
     <div className="model-info-row">
-      <span className="model-chip">{displayModelName(model.name)}</span>
-      <span className="model-info-source">{model.source === "gguf" ? "GGUF" : "Ollama"}</span>
+      <span className="model-info-name">{displayModelName(model.name)}</span>
+      <span className="model-info-source">{modelSource(model.name, model) === "gguf" ? "GGUF" : "Ollama"}</span>
       {detail && <span className="model-info-detail">{detail}</span>}
     </div>
   );

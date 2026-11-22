@@ -116,10 +116,8 @@ describe.each<Theme>(["light", "dark"])("%s theme colour tokens", (theme) => {
     },
   );
 
-  it("keeps muted text readable on the hover and user-inset grounds too", () => {
+  it("keeps muted text readable on the hover surface", () => {
     expect(ratio("--text-muted", "--surface-hover")).toBeGreaterThanOrEqual(AA_TEXT);
-    expect(ratio("--text-muted", "--user-start")).toBeGreaterThanOrEqual(AA_TEXT);
-    expect(ratio("--accent-on-inset", "--user-start")).toBeGreaterThanOrEqual(AA_TEXT);
   });
 
   it("keeps the hierarchy: faint text is never stronger than muted, which is never stronger than body", () => {

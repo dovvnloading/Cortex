@@ -9,7 +9,7 @@ const settings = {
   translation: { enabled: false },
 };
 
-async function stubWorkspace(page: Page, groups: unknown) {
+async function stubWorkspace(page: Page, groups: unknown, title = "Grouped chat") {
   await page.route("**/api/v1/session/exchange", async (route) => {
     await route.fulfill({ json: { session_token: "session-groups", expires_at: "2099-01-01T00:00:00Z" } });
   });
@@ -17,7 +17,7 @@ async function stubWorkspace(page: Page, groups: unknown) {
     await route.fulfill({ json: { api_version: "v1", status: "ok", preview: true, session_required: true, started_at: "2026-01-01T00:00:00Z" } });
   });
   await page.route("**/api/v1/chats", async (route) => {
-    await route.fulfill({ json: [{ id: "grouped-chat", title: "Grouped chat", timestamp: "2026-01-01T00:00:00Z", group_id: "group-one" }] });
+    await route.fulfill({ json: [{ id: "grouped-chat", title, timestamp: "2026-01-01T00:00:00Z", group_id: "group-one" }] });
   });
   await page.route("**/api/v1/settings", async (route) => {
     await route.fulfill({ json: { source: "defaults", settings } });
@@ -48,20 +48,27 @@ async function stubWorkspace(page: Page, groups: unknown) {
   });
 }
 
-test("loads chat groups successfully and files their chats", async ({ page }) => {
+test("files chats under their group and leaves room for actions on a wrapped title", async ({ page }) => {
+  const title = "Comparing the storage costs of several archived research projects";
   await stubWorkspace(page, [{
     id: "group-one",
     name: "Research",
     collapsed: false,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
-  }]);
+  }], title);
 
   await page.goto("/#bootstrap=launcher-token");
   await waitForNewChatComposer(page);
   await expect(page.getByRole("button", { name: "Collapse Research" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Grouped chat", exact: true })).toBeVisible();
-  await expect(page.getByText("Research")).toBeVisible();
+  await expect(page.getByText("Research", { exact: true })).toBeVisible();
+  const thread = page.getByRole("button", { name: title, exact: true });
+  const row = page.locator(".chat-row").filter({ has: thread });
+  await thread.hover();
+  const titleRight = await thread.evaluate((button) => button.getBoundingClientRect().right);
+  const actionsLeft = await row.locator(".chat-row-actions").evaluate((actions) => actions.getBoundingClientRect().left);
+  expect(titleRight).toBeLessThanOrEqual(actionsLeft);
+  await expect(row.getByRole("time", { includeHidden: true })).toBeHidden();
 });
 
 test("keeps every move destination reachable above the footer in a short drawer", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 
-test("opens the command palette with Ctrl+K, filters, and navigates to settings", async ({ page }) => {
+test("opens the palette from the library or keyboard, restores focus, and navigates to settings", async ({ page }) => {
   const chats = [{ id: "thread-a", title: "Weekend plans", timestamp: "2026-01-01T00:00:00Z" }];
 
   await page.route("**/api/v1/session/exchange", async (route) => {
@@ -29,8 +29,14 @@ test("opens the command palette with Ctrl+K, filters, and navigates to settings"
   await page.goto("/chat/thread-a#bootstrap=launcher-token");
   await expect(page.getByLabel("Message Cortex")).toBeVisible();
 
-  await page.keyboard.press("Control+k");
+  const libraryTrigger = page.getByRole("button", { name: "Command palette" });
   const paletteInput = page.getByPlaceholder("Search commands, models, and chats…");
+  await libraryTrigger.click();
+  await expect(paletteInput).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(libraryTrigger).toBeFocused();
+
+  await page.keyboard.press("Control+k");
   await expect(paletteInput).toBeVisible();
 
   await paletteInput.fill("settings");

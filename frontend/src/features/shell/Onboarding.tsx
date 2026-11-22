@@ -23,18 +23,13 @@ export function Onboarding({ initialToken, error, busy, onSubmit, onRetry }: Pro
   return (
     <main className="onboarding" aria-labelledby="onboarding-title">
       <section className="onboarding-card">
-        <div className="brand-mark" aria-hidden="true"><img src="/cortex.svg" alt="" /></div>
-        <p className="eyebrow">LOCAL WORKSPACE</p>
+        <div className="wordmark"><img src="/cortex.svg" alt="" />Cortex</div>
         <h1 id="onboarding-title">{canAutoConnect ? "Opening local workspace" : "Start local workspace"}</h1>
-        <p className="lede">
-          {canAutoConnect
-            ? "Starting your private workspace."
-            : "Launch the desktop app to open this local workspace."}
-        </p>
+        {!canAutoConnect && !error && <p className="lede">Open the Cortex desktop app to connect.</p>}
         {canAutoConnect ? (
           <div className="onboarding-auto-connect" role="status" aria-live="polite">
             <span className="loading-spinner" />
-            <span>{busy ? "Connecting securely..." : "Preparing local workspace..."}</span>
+            <span>{busy ? "Connecting to the local service…" : "Waiting for the local service…"}</span>
           </div>
         ) : (
           <div className="stack-lg">

@@ -1,5 +1,4 @@
 import { Command, defaultFilter } from "cmdk";
-import { Moon, Plus, Settings, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatSummary } from "../../../../contracts/cortex-api";
 import { cloudModelProvider, displayModelName } from "../../lib/localModels";
@@ -7,6 +6,7 @@ import { displayChatTitle } from "../../lib/chatTitle";
 import { nextThemePreference, THEME_LABELS, type ThemePreference } from "../../lib/theme";
 import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useHotkey } from "../../hooks/useHotkey";
+import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 import { useUiStore } from "../../stores/useUiStore";
 
 type Props = {
@@ -39,8 +39,8 @@ const MODEL_VALUE_PREFIX = "model:";
 const MODEL_PREVIEW_LIMIT = 8;
 const MAX_MODEL_RESULTS = 50;
 
-function modelCommand(model: string): string {
-  return cloudModelProvider(model) ? `Switch to ${displayModelName(model)} (cloud)` : `Switch to ${model}`;
+function modelLabel(model: string): string {
+  return cloudModelProvider(model) ? `${displayModelName(model)} (cloud)` : model;
 }
 
 function searchModels(models: readonly string[], current: string | null, query: string): string[] {
@@ -49,7 +49,7 @@ function searchModels(models: readonly string[], current: string | null, query: 
     if (current && models.includes(current) && !preview.includes(current)) preview[preview.length - 1] = current;
     return preview;
   }
-  return models.map((model) => ({ model, score: defaultFilter(modelCommand(model), query) }))
+  return models.map((model) => ({ model, score: defaultFilter(`Switch to ${modelLabel(model)}`, query) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_MODEL_RESULTS)
@@ -102,29 +102,25 @@ export function CommandPalette({
   };
 
   return (
-    <Command.Dialog
-      open={open}
-      onOpenChange={setOpen}
-      label="Command palette"
-      filter={paletteFilter}
-      className="command-palette-root"
-      overlayClassName="command-palette-overlay"
-      contentClassName="command-palette-content"
-    >
-      <PaletteBody
-        chats={chats}
-        localModels={localModels}
-        selectedModel={selectedModel}
-        theme={theme}
-        onNewChat={() => execute(onNewChat)}
-        onOpenSettings={() => execute(onOpenSettings)}
-        onToggleTheme={() => execute(onToggleTheme)}
-        onSelectModel={onSelectModel}
-        modelSelectionDisabled={modelSelectionDisabled}
-        onSelectChat={(id) => execute(() => onSelectChat(id))}
-        onClose={() => setOpen(false)}
-      />
-    </Command.Dialog>
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <DialogContent className="command-palette-content" backdropClassName="command-palette-overlay" aria-label="Command palette">
+        <Command label="Search commands, models, and chats" filter={paletteFilter}>
+          <PaletteBody
+            chats={chats}
+            localModels={localModels}
+            selectedModel={selectedModel}
+            theme={theme}
+            onNewChat={() => execute(onNewChat)}
+            onOpenSettings={() => execute(onOpenSettings)}
+            onToggleTheme={() => execute(onToggleTheme)}
+            onSelectModel={onSelectModel}
+            modelSelectionDisabled={modelSelectionDisabled}
+            onSelectChat={(id) => execute(() => onSelectChat(id))}
+            onClose={() => setOpen(false)}
+          />
+        </Command>
+      </DialogContent>
+    </Dialog.Root>
   );
 }
 
@@ -191,29 +187,28 @@ function PaletteBody({
       />
       <Command.List className="command-palette-list">
         {!searchPending && <Command.Empty className="command-palette-empty">No results.</Command.Empty>}
-        <Command.Group heading="Chat" className="command-palette-group">
+        <Command.Group heading="Actions" className="command-palette-group">
           <Command.Item className="command-palette-item" onSelect={onNewChat}>
-            <Plus size={15} aria-hidden="true" /> New chat
+            New chat
           </Command.Item>
           <Command.Item className="command-palette-item" onSelect={onOpenSettings}>
-            <Settings size={15} aria-hidden="true" /> Open settings
+            Open settings
           </Command.Item>
           <Command.Item
             className="command-palette-item"
             keywords={["theme", "appearance", "light", "dark", "system"]}
             onSelect={onToggleTheme}
           >
-            <Moon size={15} aria-hidden="true" /> Change theme
+            Change theme
             <span className="command-palette-current">Next: {THEME_LABELS[nextThemePreference(theme)]}</span>
           </Command.Item>
         </Command.Group>
         {visibleModels.length > 0 && (
-          <Command.Group heading="Model" className="command-palette-group">
+          <Command.Group heading="Switch model" className="command-palette-group">
             {visibleModels.map((model) => (
               <Command.Item key={model} className="command-palette-item" value={`${MODEL_VALUE_PREFIX}${model}`}
-                keywords={[modelCommand(model)]} disabled={modelSelectionDisabled} onSelect={() => void chooseModel(model)}>
-                <Sparkles size={15} aria-hidden="true" />
-                <span className="command-palette-model-name">{modelCommand(model)}</span>
+                keywords={[`Switch to ${modelLabel(model)}`]} disabled={modelSelectionDisabled} onSelect={() => void chooseModel(model)}>
+                <span className="command-palette-model-name">{modelLabel(model)}</span>
                 {model === selectedModel && <span className="command-palette-current">Current</span>}
               </Command.Item>
             ))}

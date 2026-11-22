@@ -128,14 +128,7 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
     void onReplace(draft.filter((row) => !row.removed).map((row) => row.value)).catch(() => undefined);
   };
 
-  const heading = (
-    <div className="panel-heading">
-      <div>
-        <p className="eyebrow">PERMANENT MEMORY</p>
-        <h2 id="memory-title">Remembered facts</h2>
-      </div>
-    </div>
-  );
+  const heading = <h4 className="memory-list-heading" id="memory-title">Remembered facts</h4>;
 
   // With nothing loaded there is no list to edit, and an empty one would read
   // as "no memories" -- and invite a save that replaces the real ones.

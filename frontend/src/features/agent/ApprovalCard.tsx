@@ -111,22 +111,19 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, allowAlways 
           {request.plain_text}
         </AlertDialog.Description>
 
-        <div role="group" aria-label="Execution context" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <span
-            className={`status-pill status-${badge.tone}`}
-            style={{
-              padding: "0 8px",
-              borderRadius: 999,
-              background: `var(--${badge.tone}-soft)`,
-            }}
-          >
-            {badge.label}
-          </span>
-          {request.network && (
-            <span className="status-pill status-danger" style={{ padding: "0 8px", borderRadius: 999, background: "var(--danger-soft)" }}>
-              Uses the internet
-            </span>
-          )}
+        <div role="group" aria-label="Execution context">
+          <dl className="agent-approval-context">
+            <div>
+              <dt>Execution</dt>
+              <dd className={`status-pill status-${badge.tone}`}>{badge.label}</dd>
+            </div>
+            {request.network && (
+              <div>
+                <dt>Network</dt>
+                <dd className="status-pill status-danger">Uses the internet</dd>
+              </div>
+            )}
+          </dl>
         </div>
 
         <div style={{ marginTop: 16 }}>

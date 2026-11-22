@@ -1,4 +1,4 @@
-import { RotateCcw, Save, X } from "lucide-react";
+import { RotateCcw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   CortexSettings,
@@ -119,12 +119,12 @@ const mergeChangedValues = <T,>(draft: T, baseline: T, current: T): T => {
   return merged as T;
 };
 
-const sections: { id: SettingsSection; label: string; detail: string }[] = [
-  { id: "general", label: "General", detail: "Appearance and behavior" },
-  { id: "model", label: "AI Model", detail: "Chat model and generation" },
-  { id: "memory", label: "Memory", detail: "Saved local context" },
-  { id: "translation", label: "Translation", detail: "Optional response translation" },
-  { id: "system", label: "System", detail: "Runtime and installed models" },
+const sections: { id: SettingsSection; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "model", label: "AI Model" },
+  { id: "memory", label: "Memory" },
+  { id: "translation", label: "Translation" },
+  { id: "system", label: "System" },
 ];
 
 export function SettingsPanel({
@@ -323,7 +323,7 @@ export function SettingsPanel({
         <div className="settings-title-group">
           <h2 id="settings-title">Settings</h2>
           <span aria-live="polite">
-            {dirty && <span className="settings-dirty-pill">Unsaved changes</span>}
+            {dirty && <span className="settings-dirty-note">Unsaved changes</span>}
           </span>
         </div>
         <button className="icon-button icon-button-small" type="button" aria-label="Close settings" onClick={onClose}>
@@ -333,25 +333,23 @@ export function SettingsPanel({
 
       <div className="settings-dialog-body">
         <nav className="settings-nav" aria-label="Settings categories">
-          {sections.map((item) => {
-            return <button
+          {sections.map((item) => (
+            <button
               className={`settings-tab ${section === item.id ? "settings-tab-active" : ""}`}
               type="button"
               key={item.id}
-              aria-label={item.label}
               aria-current={section === item.id ? "page" : undefined}
               onClick={() => setSection(item.id)}
             >
-              <span><strong>{item.label}</strong><small>{item.detail}</small></span>
+              {item.label}
             </button>
-          })}
+          ))}
         </nav>
 
         <div className="settings-pane">
           {section === "general" && (
             <section className="settings-section" aria-labelledby="general-settings-title">
               <div className="section-heading">
-                <p className="eyebrow">GENERAL</p>
                 <h3 id="general-settings-title">Appearance and responses</h3>
               </div>
               <div className="settings-form">
@@ -393,7 +391,6 @@ export function SettingsPanel({
           {section === "model" && (
             <section className="settings-section" aria-labelledby="model-settings-title">
               <div className="section-heading">
-                <p className="eyebrow">AI MODEL</p>
                 <h3 id="model-settings-title">Model and generation</h3>
               </div>
               <div className="settings-form">
@@ -482,7 +479,6 @@ export function SettingsPanel({
             style={section !== "memory" ? { display: "none" } : undefined}
           >
               <div className="section-heading">
-                <p className="eyebrow">MEMORY</p>
                 <h3 id="memory-settings-title">Permanent memory</h3>
               </div>
               <label className="toggle-row" htmlFor="memory-enabled">
@@ -495,7 +491,6 @@ export function SettingsPanel({
           {section === "translation" && (
             <section className="settings-section" aria-labelledby="translation-settings-title">
               <div className="section-heading">
-                <p className="eyebrow">TRANSLATION</p>
                 <h3 id="translation-settings-title">Response translation</h3>
               </div>
               <div className="settings-form">
@@ -575,7 +570,7 @@ export function SettingsPanel({
       <footer className="settings-dialog-footer">
         <button className="button button-secondary" type="button" onClick={onClose}>Close</button>
         <button className="button button-primary" type="button" onClick={() => void saveDraft()} disabled={saving || !settingsDirty}>
-          <Save aria-hidden="true" size={16} /> {saving ? "Saving..." : "Save settings"}
+          {saving ? "Saving..." : "Save settings"}
         </button>
       </footer>
 

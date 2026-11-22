@@ -52,7 +52,7 @@ function page(api = fakeClient(), enabled = true) {
 }
 
 async function prepare(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole("button", { name: "Explain this project" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Example goals" }), "Explain this project");
   await user.type(screen.getByRole("textbox", { name: "Project folder" }), "C:\\dev\\sample");
   await user.click(screen.getByRole("checkbox", { name: /I approve Cortex reading and copying/i }));
 }
@@ -75,7 +75,8 @@ describe("AgentPage", () => {
     const api = fakeClient();
     page(api);
     const start = screen.getByRole("button", { name: "Start Agent" });
-    await user.click(screen.getByRole("button", { name: "Fix failing tests" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Example goals" }), "Fix failing tests");
+    expect(screen.getByRole("textbox", { name: "Run goal" })).toHaveValue("Fix failing tests");
     await user.type(screen.getByRole("textbox", { name: "Project folder" }), "C:\\dev\\sample");
     expect(start).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: /I approve Cortex reading and copying/i }));

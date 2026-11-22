@@ -57,7 +57,7 @@ describe("ChatLibrary", () => {
       ],
     });
 
-    const headings = screen.getAllByRole("heading", { level: 4 });
+    const headings = screen.getAllByRole("heading", { level: 3 });
     expect(headings.map((heading) => heading.textContent)).toEqual([
       month.format(june), month.format(earlierYear), "Date unavailable",
     ]);
@@ -83,7 +83,7 @@ describe("ChatLibrary", () => {
     view.rerender(<ChatLibrary {...view.props} query="plan" />);
     expect(screen.getByRole("heading", { name: "Search results" })).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent("2 results");
-    expect(screen.queryByRole("heading", { level: 4 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3 })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Plan for May" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Plan for June" })).toBeVisible();
     view.rerender(<ChatLibrary {...view.props} query="may" />);

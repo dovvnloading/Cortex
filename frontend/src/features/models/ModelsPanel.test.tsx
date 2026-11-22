@@ -37,6 +37,7 @@ const listing: HuggingFaceFileListResponse = {
 };
 
 type PanelOptions = {
+  inventory?: ModelResponse;
   onListFiles?: ListGGUFFiles | null;
   onDownload?: (request: unknown) => Promise<void>;
   busy?: boolean;
@@ -54,7 +55,7 @@ function renderPanel(options: PanelOptions = {}) {
   const onCancel = options.onCancel === null ? undefined : options.onCancel ?? vi.fn();
   const view = render(
     <ModelsPanel
-      models={models}
+      models={options.inventory ?? models}
       busy={options.busy ?? false}
       progress={options.progress ?? null}
       onCancel={onCancel}
@@ -83,8 +84,32 @@ async function browse(user: ReturnType<typeof userEvent.setup>, repo = "owner/na
   await user.click(screen.getByRole("button", { name: /Browse files/ }));
 }
 
+describe("installed model inventory", () => {
+  it("shows each local model once, including legacy names with no metadata", () => {
+    renderPanel({ inventory: {
+      ...models,
+      installed_models: ["gguf:nested/model.gguf", "qwen3:8b"],
+      models: [{ name: "qwen3:8b", parameter_size: "8B" }],
+    } });
+    const list = screen.getByRole("list", { name: "Installed models" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getByText("nested/model.gguf")).toBeVisible();
+    expect(within(list).getByText("GGUF")).toBeVisible();
+    expect(within(list).getByText("8B params")).toBeVisible();
+  });
+});
+
 describe("the progress row's Cancel control", () => {
   const progress = { model: "demo.Q4_K_M.gguf", status: "Downloading (1.0 GB of 4.0 GB)", percent: 25 };
+
+  it("shows the reported percentage and only the status when it is unknown", () => {
+    const first = renderPanel({ busy: true, progress });
+    expect(screen.getByRole("progressbar", { name: progress.model })).toHaveAttribute("aria-valuenow", "25");
+    first.unmount();
+    renderPanel({ busy: true, progress: { ...progress, percent: null, status: "Connecting…" } });
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByText("Connecting…")).toBeVisible();
+  });
 
   it("stops the operation that is running", async () => {
     const { user, onCancel } = renderPanel({ busy: true, progress });
@@ -539,7 +564,7 @@ describe("concurrent backend model operations", () => {
     });
 
     expect(screen.getAllByRole("status", { name: /Model operation progress/ })).toHaveLength(2);
-    expect(screen.getAllByText("Scanning models")).toHaveLength(2);
+    expect(screen.getByRole("status", { name: "Model operation progress: local model inventory" })).toHaveTextContent("Scanning models");
     await user.click(screen.getByRole("button", { name: "Cancel local model inventory" }));
     expect(cancel).toHaveBeenCalledWith("rescan-1");
     await user.click(screen.getByRole("button", { name: "Cancel large.gguf" }));

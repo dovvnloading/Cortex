@@ -9,6 +9,22 @@ const settings: CortexSettings = {
 };
 
 describe("LocalSetup", () => {
+  it("reports scanning only while an empty inventory is being refreshed", () => {
+    const props = {
+      models: { required_models: [], optional_models: [], installed_models: [], models: [] },
+      settings,
+      setupUrl: "https://ollama.com/download",
+      onRescan: vi.fn<() => Promise<void>>(),
+      onSelectModel: vi.fn<(model: string) => Promise<boolean>>(),
+    };
+    const view = render(<LocalSetup {...props} busy />);
+    expect(screen.getByRole("status")).toHaveTextContent("Scanning local models…");
+
+    view.rerender(<LocalSetup {...props} busy={false} />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No local models found" })).toBeVisible();
+  });
+
   it("requires an explicit choice from the locally scanned inventory", async () => {
     const user = userEvent.setup();
     const onSelectModel = vi.fn<(model: string) => Promise<boolean>>().mockResolvedValue(true);

@@ -59,10 +59,10 @@ describe("CommandPalette", () => {
     useUiStore.getState().setCommandPaletteOpen(true);
     const user = userEvent.setup();
 
-    const currentModelItem = await screen.findByText("Switch to qwen3:8b");
+    const currentModelItem = await screen.findByText("qwen3:8b");
     expect(currentModelItem.closest(".command-palette-item")).toHaveTextContent("Current");
 
-    await user.click(screen.getByText("Switch to granite4:tiny-h"));
+    await user.click(screen.getByText("granite4:tiny-h"));
     expect(props.onSelectModel).toHaveBeenCalledWith("granite4:tiny-h");
   });
 
@@ -73,10 +73,10 @@ describe("CommandPalette", () => {
     renderPalette({ localModels: models, selectedModel: models[1249], onSelectModel });
     act(() => useUiStore.getState().setCommandPaletteOpen(true));
     const search = await screen.findByRole("combobox");
-    expect(screen.getAllByText(/^Switch to/)).toHaveLength(8);
-    expect(screen.getByText("Switch to lab / variant-1249 (cloud)").parentElement).toHaveTextContent("Current");
+    expect(screen.getAllByRole("option", { name: /lab \/ variant/ })).toHaveLength(8);
+    expect(screen.getByText("lab / variant-1249 (cloud)").parentElement).toHaveTextContent("Current");
     await user.type(search, "variant-1199");
-    const model = await screen.findByText("Switch to lab / variant-1199 (cloud)");
+    const model = await screen.findByText("lab / variant-1199 (cloud)");
     await user.click(model);
     expect(search).toHaveValue("variant-1199");
     expect(onSelectModel).toHaveBeenCalledWith(models[1199]);
@@ -87,7 +87,7 @@ describe("CommandPalette", () => {
   it("disables model switching in the palette while generation or another save owns the selection", async () => {
     const props = renderPalette({ modelSelectionDisabled: true });
     act(() => useUiStore.getState().setCommandPaletteOpen(true));
-    const option = await screen.findByRole("option", { name: /Switch to granite/ });
+    const option = await screen.findByRole("option", { name: /granite/ });
     expect(option).toHaveAttribute("aria-disabled", "true");
     await userEvent.click(option);
     expect(props.onSelectModel).not.toHaveBeenCalled();

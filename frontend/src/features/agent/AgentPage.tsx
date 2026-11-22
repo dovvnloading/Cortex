@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { Bot, FolderOpen, Square } from "lucide-react";
+import { FolderOpen, Square } from "lucide-react";
 import type { StartAgentRun } from "../../../../contracts/cortex-api";
 import type { CortexApi } from "../../api/client";
 import { cloudModelProvider, displayModelName } from "../../lib/localModels";
@@ -120,7 +120,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
     return (
       <div className="coding-workspace">
         <header className="coding-header">
-          <div><span className="coding-eyebrow"><Bot size={15} aria-hidden="true" /> Agent mode</span><h2>Agent mode is off</h2></div>
+          <h2>Agent mode is off</h2>
         </header>
         <section className="coding-panel" role="status">
           <p>Agent mode is disabled by default. To use it, open Settings, turn on <strong>Enable Agent mode</strong> under General, and save your settings.</p>
@@ -135,72 +135,87 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
     <div className="coding-workspace">
       <header className="coding-header">
         <div>
-          <span className="coding-eyebrow"><Bot size={15} aria-hidden="true" /> Opt-in coding agent</span>
-          <h2>Agent mode</h2>
-          <p>Tell Cortex what you want done. It works in a separate copy of your chosen project; changes to your original files require a separate review and acceptance.</p>
+          <h2>Project runs</h2>
+          <p>Cortex works in a copy of your project. Review and accept the edits before they reach your original files.</p>
         </div>
       </header>
 
       <form className="coding-panel coding-open" onSubmit={(event) => void start(event)}>
-        <label htmlFor="agent-goal">What would you like to accomplish?</label>
-        <textarea
-          id="agent-goal"
-          placeholder="Describe your goal in everyday language…"
-          value={goal}
-          maxLength={20000}
-          rows={4}
-          disabled={active || Boolean(agent.busy)}
-          onChange={(event) => setGoal(event.target.value)}
-        />
-        <div className="coding-row agent-starters" role="group" aria-label="Starter goals">
-          {STARTERS.map((starter) => (
-            <button key={starter} className="coding-quiet" type="button" disabled={active || Boolean(agent.busy)}
-              onClick={() => setGoal(starter)}>{starter}</button>
-          ))}
+        <div className="agent-field">
+          <label htmlFor="agent-goal">Run goal</label>
+          <div className="agent-field-body">
+            <textarea
+              id="agent-goal"
+              placeholder="Describe the change or question for this project"
+              value={goal}
+              maxLength={20000}
+              rows={3}
+              disabled={active || Boolean(agent.busy)}
+              onChange={(event) => setGoal(event.target.value)}
+            />
+            <select
+              className="agent-examples"
+              aria-label="Example goals"
+              value={STARTERS.find((starter) => starter === goal) ?? ""}
+              disabled={active || Boolean(agent.busy)}
+              onChange={(event) => setGoal(event.target.value)}
+            >
+              <option value="" disabled>Example goals</option>
+              {STARTERS.map((starter) => <option key={starter} value={starter}>{starter}</option>)}
+            </select>
+          </div>
         </div>
 
-        <label htmlFor="agent-folder">Project folder</label>
-        <div className="coding-row">
-          <input id="agent-folder" type="text" placeholder="C:\src\my-project"
-            autoComplete="off" maxLength={4096} value={root} disabled={active || Boolean(agent.busy)}
-            onChange={(event) => { setRoot(event.target.value); setFolderConsent(false); setCloudConsent(false); }} />
-          <button type="button" className="coding-quiet" disabled={active || Boolean(agent.busy)}
-            onClick={() => void chooseFolder()}><FolderOpen size={16} aria-hidden="true" /> Browse</button>
-        </div>
-        {pickerError && <p role="alert" className="coding-error">{pickerError}</p>}
-        <label className="coding-consent">
-          <input type="checkbox" checked={folderConsent} disabled={active || Boolean(agent.busy)}
-            onChange={(event) => setFolderConsent(event.target.checked)} />
-          I approve Cortex reading and copying eligible files from this trusted folder for this run. It will not apply proposed edits to my original files without a separate review.
-        </label>
-
-        <label htmlFor="agent-model">Model</label>
-        <select id="agent-model" value={model} disabled={active || Boolean(agent.busy)}
-          onChange={(event) => { setModelChoice(event.target.value); setCloudConsent(false); }}>
-          {availableModels.length === 0 && <option value="">No models available — configure a model in Settings</option>}
-          {availableModels.map((name) => (
-            <option key={name} value={name}>{displayModelName(name)}{cloudModelProvider(name) ? " (cloud)" : " (local)"}</option>
-          ))}
-        </select>
-
-        {provider && (
-          <div className="coding-panel" role="group" aria-label="Cloud model warning">
-            <p><strong>Cloud model warning:</strong> Your files will be sent to {provider}. The goal and eligible project context may leave your computer and be processed by this provider.</p>
+        <div className="agent-field">
+          <label htmlFor="agent-folder">Project folder</label>
+          <div className="agent-field-body">
+            <div className="coding-row">
+              <input id="agent-folder" type="text" placeholder="C:\src\my-project"
+                autoComplete="off" maxLength={4096} value={root} disabled={active || Boolean(agent.busy)}
+                onChange={(event) => { setRoot(event.target.value); setFolderConsent(false); setCloudConsent(false); }} />
+              <button type="button" className="coding-quiet" disabled={active || Boolean(agent.busy)}
+                onClick={() => void chooseFolder()}><FolderOpen size={16} aria-hidden="true" /> Browse</button>
+            </div>
+            {pickerError && <p role="alert" className="coding-error">{pickerError}</p>}
             <label className="coding-consent">
-              <input type="checkbox" checked={cloudConsent} disabled={active || Boolean(agent.busy)}
-                onChange={(event) => setCloudConsent(event.target.checked)} />
-              I understand and explicitly approve sending project context to {provider} for this run.
+              <input type="checkbox" checked={folderConsent} disabled={active || Boolean(agent.busy)}
+                onChange={(event) => setFolderConsent(event.target.checked)} />
+              I approve Cortex reading and copying eligible files from this trusted folder for this run. It will not apply proposed edits to my original files without a separate review.
             </label>
           </div>
-        )}
+        </div>
+
+        <div className="agent-field">
+          <label htmlFor="agent-model">Model</label>
+          <div className="agent-field-body">
+            <select id="agent-model" value={model} disabled={active || Boolean(agent.busy)}
+              onChange={(event) => { setModelChoice(event.target.value); setCloudConsent(false); }}>
+              {availableModels.length === 0 && <option value="">No models available — configure a model in Settings</option>}
+              {availableModels.map((name) => (
+                <option key={name} value={name}>{displayModelName(name)}{cloudModelProvider(name) ? " (cloud)" : " (local)"}</option>
+              ))}
+            </select>
+
+            {provider && (
+              <div className="agent-cloud-warning" role="group" aria-label="Cloud model warning">
+                <p><strong>Cloud model warning:</strong> Your files will be sent to {provider}. The goal and eligible project context may leave your computer and be processed by this provider.</p>
+                <label className="coding-consent">
+                  <input type="checkbox" checked={cloudConsent} disabled={active || Boolean(agent.busy)}
+                    onChange={(event) => setCloudConsent(event.target.checked)} />
+                  I understand and explicitly approve sending project context to {provider} for this run.
+                </label>
+              </div>
+            )}
+          </div>
+        </div>
 
         <fieldset className="agent-modes" disabled={active || Boolean(agent.busy)}>
-          <legend>How should Agent mode work?</legend>
+          <legend>Command permissions</legend>
           {MODES.map((choice) => (
             <label className="coding-consent" key={choice.value}>
               <input type="radio" name="agent-mode" value={choice.value} checked={mode === choice.value}
                 onChange={() => setMode(choice.value)} />
-              <span><strong>{choice.label}</strong> — {choice.explanation}</span>
+              <span><strong>{choice.label}</strong><small>{choice.explanation}</small></span>
             </label>
           ))}
         </fieldset>
@@ -208,7 +223,6 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           <button type="submit" className="coding-primary" disabled={!canStart}>
             {agent.busy === "starting" ? "Starting…" : "Start Agent"}
           </button>
-          <p className="coding-muted">No command or file change is approved by this page automatically.</p>
         </div>
       </form>
 
