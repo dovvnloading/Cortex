@@ -94,6 +94,8 @@ export function ChangesReview({
   // The signature keeps a confirmation tied to the exact displayed changes,
   // rather than accidentally approving a later workcopy snapshot.
   const signature = JSON.stringify(changes);
+  // With nothing left to review, discarding only removes the work copy.
+  const discardLabel = changes.length === 0 ? "Discard work copy" : "Discard all";
   const reviewKey = JSON.stringify([summary, signature, accepted]);
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
   const [selection, setSelection] = useState<{ signature: string; unchecked: string[] }>({
@@ -294,7 +296,9 @@ export function ChangesReview({
                 ? "Apply changes to " + confirmation.paths.length + " " + (confirmation.paths.length === 1 ? "file" : "files") + " in your project?"
                 : confirmation.action === "undo"
                   ? "Restore the original project files from this run? Undo will be refused if any file has unexpected changes."
-                  : "Discard all " + changes.length + " pending " + (changes.length === 1 ? "file change" : "file changes") + "? No project files will be updated."}
+                  : changes.length === 0
+                    ? "Discard this run's work copy? It has no pending file changes. No project files will be updated."
+                    : "Discard all " + changes.length + " pending " + (changes.length === 1 ? "file change" : "file changes") + "? No project files will be updated."}
             </p>
             {!confirmationCurrent && <p role="alert">Changes or selection changed. Cancel and review again.</p>}
             <div className="dialog-actions" style={{ marginTop: 16 }}>
@@ -332,7 +336,7 @@ export function ChangesReview({
             </button>
             <button ref={discardButtonRef} type="button" className="button button-secondary"
               disabled={busy} onClick={() => setConfirmation({ action: "discard", signature, paths: [] })}>
-              Discard all
+              {discardLabel}
             </button>
           </div>
         ) : (
@@ -350,7 +354,7 @@ export function ChangesReview({
               disabled={busy}
               onClick={() => setConfirmation({ action: "discard", signature, paths: [] })}
             >
-              Discard all
+              {discardLabel}
             </button>
             <button
               ref={acceptButtonRef}
