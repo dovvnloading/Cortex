@@ -141,6 +141,20 @@ describe("AgentPage", () => {
     await waitFor(() => expect(api.cancelAgentRun).toHaveBeenCalledWith("run-1"));
     expect(await screen.findByText("Run stopped")).toBeInTheDocument();
   });
+
+  it("explains why a run stopped in plain language instead of a reason code", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.startAgentRun.mockResolvedValue({ ...run, status: "failed", stop_reason: "wall_clock_budget" });
+    api.agentRun.mockResolvedValue({ ...run, status: "failed", stop_reason: "wall_clock_budget" });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const current = await screen.findByRole("region", { name: "Current agent run", hidden: true });
+    expect(await within(current).findByText("The run reached its time limit.")).toBeInTheDocument();
+    expect(within(current).queryByText(/wall_clock_budget/)).not.toBeInTheDocument();
+  });
+
   it("loads the changeset and renders the merged review for a finished run", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
