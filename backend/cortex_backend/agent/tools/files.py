@@ -575,6 +575,12 @@ class _Files:
 
 
 _READ_ONLY_TOOLS: Final = frozenset({"list_dir", "glob", "grep", "read_file"})
+_PREVIEW_CHARS: Final = 4000
+
+
+def _preview(value: object) -> tuple[str, bool]:
+    text = value if isinstance(value, str) else ""
+    return text[:_PREVIEW_CHARS], len(text) > _PREVIEW_CHARS
 
 
 def register_file_tools(
@@ -602,6 +608,18 @@ def register_file_tools(
                 request["destination"] = str(call.arguments.get("destination", ""))
             else:
                 request["path"] = str(call.arguments.get("path", ""))
+            # The person approving sees the proposed text itself, bounded. It
+            # travels only in the in-memory approval event, never SQLite.
+            if call.name == "edit_file":
+                old, old_cut = _preview(call.arguments.get("old"))
+                new, new_cut = _preview(call.arguments.get("new"))
+                request["preview"] = {
+                    "old": old, "new": new, "replace_all": call.arguments.get("replace_all") is True,
+                    "truncated": old_cut or new_cut,
+                }
+            elif call.name == "write_file":
+                content, cut = _preview(call.arguments.get("content"))
+                request["preview"] = {"content": content, "truncated": cut}
             return NeedsApproval(request)
         return files.handle(call, context)
 
