@@ -24,7 +24,7 @@ import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { prunePersistedGenerationOptions } from "../lib/persistedGenerationOptions";
 import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
-import { cloudModelProvider, displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
+import { agentModelNames, cloudModelProvider, displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { persistLatestWrite, type LatestWrite } from "../lib/latestWrite";
 import {
@@ -1180,6 +1180,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const inventoryLoading = models === null;
   const inventory = models ?? LOADING_MODELS;
   const localModels = localModelNames(inventory);
+  const agentModels = agentModelNames(inventory);
   const chatModels = [...localModels, ...cloud.models];
   const hasLocalInventory = Array.isArray(inventory.installed_models) || Array.isArray(inventory.models);
   const selectedModel = settings.models?.chat?.trim() || null;
@@ -1256,7 +1257,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
           {route.kind === "settings"
             ? <RouteBoundary key="settings" name="Settings" scope="settings" resetKey={pathname} onRetry={SettingsPanel.reload}><SettingsRoute activeChatId={settingsReturnChatId} settings={settings} memos={memos} memoryLoad={memoryLoad} onLoadMemories={loadMemories} saving={saving} memoryBusy={memoryBusy} onSave={saveSettings} onAddMemory={addMemory} onReplaceMemory={replaceMemory} onClearMemory={clearMemory} models={inventory} cloud={cloud} modelBusy={modelBusy} activeModelJobKind={activeModelJobKind} modelProgress={modelProgress} secondaryModelJobs={secondaryModelJobs} secondaryModelProgress={secondaryModelProgress} onCancelModelJob={modelJobs.cancel} setupUrl={system.ollama_setup_url ?? "https://ollama.com/download"} onCheckModels={checkModels} onPullModel={pullModel} llamacppStatus={llamacppStatus} onDownloadGGUF={downloadGGUFModel} onListHuggingFaceFiles={listHuggingFaceFiles} onUnloadModel={unloadLocalModel} /></RouteBoundary>
             : route.kind === "agent"
-              ? <RouteBoundary key="agent" name="Agent mode" scope="agent" resetKey={pathname} onRetry={AgentPage.reload}><AgentPage api={api} enabled={settings.agent?.enabled ?? false} localModels={localModels} cloudModels={cloud.models} selectedModel={selectedModel} /></RouteBoundary>
+              ? <RouteBoundary key="agent" name="Agent mode" scope="agent" resetKey={pathname} onRetry={AgentPage.reload}><AgentPage api={api} enabled={settings.agent?.enabled ?? false} localModels={agentModels} cloudModels={cloud.models} selectedModel={selectedModel} /></RouteBoundary>
             : <RouteBoundary key="chat" name="Chat" scope="chat" resetKey={pathname} onRetry={ChatPage.reload}><ChatRoute threadId={routeChatId} api={api} runtimeReady={runtimeAvailability.ready} runtimeMessage={runtimeAvailability.message} localModels={chatModels} selectedModel={selectedModel} selectedModelSupportsVision={selectedModelSupportsVision} modelBusy={saving} onSelectModel={chooseChatModel} onRescanModels={refreshChatModels} onOpenModelSettings={openModelSettings} onForked={upsertChatSummary} onClearMemory={clearMemory} /></RouteBoundary>}
         </Suspense>
       </AppShell>

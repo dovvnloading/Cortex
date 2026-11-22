@@ -19,6 +19,18 @@ export function localModelNames(models: Pick<ModelResponse, "installed_models" |
   return Array.from(new Set(names)).sort((left, right) => left.localeCompare(right));
 }
 
+/**
+ * Local models an Agent run can use: every installed model except those whose
+ * reported capabilities rule out chat, such as embedding-only models. A model
+ * with no capability report (an older server, a GGUF file) stays listed.
+ */
+export function agentModelNames(models: Pick<ModelResponse, "installed_models" | "models">): string[] {
+  const cannotChat = new Set((models.models ?? [])
+    .filter((model) => (model.capabilities?.length ?? 0) > 0 && !model.capabilities?.includes("completion"))
+    .map((model) => model.name.trim()));
+  return localModelNames(models).filter((name) => !cannotChat.has(name));
+}
+
 /** Ollama tags never contain this prefix, so it unambiguously identifies a
  * locally-scanned GGUF model id (see backend `llamacpp/model_directory.py`). */
 export function isGGUFModel(name: string | null | undefined): boolean {
