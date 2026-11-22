@@ -78,6 +78,28 @@ describe("useAgentRun", () => {
     expect(result.current.pendingApproval).toBeNull();
   });
 
+  it.each([
+    [{ tool: "run_command", command: "git status", level: "appcontainer" }, "appcontainer"],
+    [{ tool: "run_command", command: "git status", level: "unsandboxed" }, "unsandboxed"],
+    [{ tool: "run_command", command: "git status" }, "unsandboxed"],
+    [{ tool: "run_command", command: "git status", level: "AppContainer" }, "unsandboxed"],
+    [{ tool: "run_command", command: "git status", sandbox_level: "appcontainer" }, "unsandboxed"],
+    [{ tool: "run_command", command: "git status", scope: "workcopy" }, "unsandboxed"],
+    [{ tool: "edit_file", path: "app.py", scope: "workcopy" }, "workcopy"],
+    [{ tool: "edit_file", path: "app.py", level: "appcontainer" }, "unsandboxed"],
+    [{ tool: "git_commit" }, "unsandboxed"],
+  ])("reads the execution context the backend sends: %j", async (request, expected) => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "approval", { seq: 4, request }));
+      onEvent(sse(2, "status", { status: "waiting_approval" }));
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.pendingApproval?.seq).toBe(4));
+    expect(result.current.pendingApproval?.request.sandbox_level).toBe(expected);
+  });
+
   it("sends Stop to the backend rather than treating an abort as server cancellation", async () => {
     const api = fakeApi();
     vi.mocked(api.events).mockImplementation(async () => new Promise<void>(() => undefined));

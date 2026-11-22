@@ -82,6 +82,25 @@ describe("ApprovalCard", () => {
     expect(onAlwaysAllow).not.toHaveBeenCalled();
   });
 
+  it("labels a staged file change as work-copy only, not as a command that runs as you", async () => {
+    const user = userEvent.setup();
+    renderApproval(makeRequest({
+      command: "Requested tool: edit_file\nProject file: app.py",
+      cls: "ask",
+      plain_text: "Stage this change in the disposable work copy.",
+      sandbox_level: "workcopy",
+    }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByRole("heading", { name: "Allow this change?" })).toBeVisible();
+    expect(within(dialog).getByText("Work copy only")).toHaveClass("status-success");
+    expect(within(dialog).queryByText("Runs as you")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Sandboxed")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Always allow in this project" })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Show details" }));
+    expect(dialog.querySelector("pre code")).toHaveTextContent("Project file: app.py");
+    expect(within(dialog).getByRole("button", { name: "Hide details" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("shows both warnings for an unsandboxed network request", () => {
     renderApproval(makeRequest({ cls: "network", sandbox_level: "unsandboxed", network: true }));
     expect(screen.getByText("Runs as you")).toHaveClass("status-danger");
