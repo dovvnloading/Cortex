@@ -594,6 +594,8 @@ def register_file_tools(
             request: dict[str, object] = {
                 "tool": call.name,
                 "summary": "Stage this change in the disposable work copy.",
+                # No process runs: the UI shows this, not a sandbox level.
+                "scope": "workcopy",
             }
             if call.name == "move_file":
                 request["source"] = str(call.arguments.get("source", ""))

@@ -141,7 +141,13 @@ def _hook_environment(tmp_path: Path, *, exit_code: int) -> tuple[dict[str, str]
     bin_dir.mkdir()
     record = tmp_path / "pwsh-arguments.txt"
     stub = bin_dir / "pwsh"
-    stub.write_text('#!/bin/sh\necho "$@" > "$PWSH_RECORD"\nexit "$PWSH_EXIT"\n', encoding="utf-8", newline="\n")
+    stub.write_text(
+        '#!/bin/sh\necho "$@" > "$PWSH_RECORD"\n'
+        'echo "GIT_DIR=${GIT_DIR-unset} GIT_WORK_TREE=${GIT_WORK_TREE-unset} '
+        'GIT_INDEX_FILE=${GIT_INDEX_FILE-unset}" >> "$PWSH_RECORD"\n'
+        'exit "$PWSH_EXIT"\n',
+        encoding="utf-8", newline="\n",
+    )
     stub.chmod(0o755)
     environment = {
         **os.environ,
@@ -232,6 +238,60 @@ def test_pre_push_treats_an_empty_ref_list_as_a_reason_to_check(tmp_path: Path) 
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert record.exists()
+
+
+def test_pre_push_clears_repository_local_git_variables_before_the_checks(tmp_path: Path) -> None:
+    """Git hands hooks GIT_DIR, absolute from a linked worktree; checks must not inherit it.
+
+    A test that runs ``git init`` and ``git commit`` in a temporary folder once
+    acted on the pushing checkout instead: it set ``core.bare`` and a test
+    identity in its config and committed onto the branch being pushed.
+    """
+
+    elsewhere = tmp_path / "elsewhere"
+    result, record = _run_hook(
+        tmp_path,
+        _push_line("refs/heads/topic", SOME_SHA, "refs/heads/topic"),
+        extra_environment={
+            "GIT_DIR": str(elsewhere / ".git"),
+            "GIT_WORK_TREE": str(elsewhere),
+            "GIT_INDEX_FILE": str(elsewhere / "index"),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert record.exists(), "the hook did not run the check script"
+    assert "GIT_DIR=unset GIT_WORK_TREE=unset GIT_INDEX_FILE=unset" in record.read_text(encoding="utf-8")
+
+
+def test_a_test_repository_never_touches_the_repository_named_by_git_dir(tmp_path: Path) -> None:
+    """End to end: run a git-using test with GIT_DIR pointing at a decoy repository."""
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not available")
+    decoy = tmp_path / "decoy"
+    subprocess.run([git, "init", "-q", str(decoy)], check=True)
+    config_before = (decoy / ".git" / "config").read_bytes()
+    environment = {**os.environ, "GIT_DIR": str(decoy / ".git")}
+    environment.pop("PYTEST_ADDOPTS", None)
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "--basetemp", str(tmp_path / "inner"),
+            "tests/test_agent_workcopy.py::"
+            "test_git_worktree_includes_dirty_and_untracked_files_without_hooks_or_filters",
+        ],
+        cwd=REPOSITORY_ROOT, env=environment, capture_output=True, text=True, timeout=300, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    assert (decoy / ".git" / "config").read_bytes() == config_before
+    head = subprocess.run(
+        [git, "-C", str(decoy), "rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True, text=True, check=False,
+    )
+    assert head.returncode != 0, "the test committed into the decoy repository"
 
 
 def test_cortex_skip_hook_skips_even_a_branch_push(tmp_path: Path) -> None:

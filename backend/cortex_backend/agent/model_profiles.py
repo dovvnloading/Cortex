@@ -101,13 +101,18 @@ def _expect_call(turn: ModelTurn, name: str, arguments: dict[str, str]) -> ToolC
 
 
 def _fake_result(messages: list[dict[str, Any]], call: ToolCall, canned_text: str) -> None:
-    """Append a synthetic tool response; no tool implementation is ever called."""
+    """Append a synthetic tool response; no tool implementation is ever called.
+
+    The history uses Cortex's chat shape (Ollama's): arguments are an object.
+    The ollama client rejects a JSON string there, which used to fail every
+    native-tools check; the llama.cpp adapter encodes objects for its server.
+    """
     messages.append({
         "role": "assistant",
         "content": "",
         "tool_calls": [{
             "id": call.id, "type": "function",
-            "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+            "function": {"name": call.name, "arguments": dict(call.arguments)},
         }],
     })
     messages.append({

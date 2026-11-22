@@ -113,7 +113,7 @@ describe("AgentPage", () => {
     api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
       onEvent({
         event_id: 1, run_id: "run-1", event: "approval",
-        data: { seq: 3, request: { cls: "inspect", sandbox_level: "appcontainer", network: false, command: "echo hello", plain_text: "Review the command." } },
+        data: { seq: 3, request: { tool: "run_command", level: "appcontainer", network: false, command: "echo hello", plain_text: "Review the command." } },
       });
       onEvent({ event_id: 2, run_id: "run-1", event: "status", data: { status: "waiting_approval" } });
     });
@@ -122,6 +122,9 @@ describe("AgentPage", () => {
     await user.click(screen.getByRole("button", { name: "Start Agent" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText("Review the command.")).toBeVisible();
+    // The shell tool's field is "level"; a sandboxed command must not read "Runs as you".
+    expect(within(dialog).getByText("Sandboxed")).toHaveClass("status-success");
+    expect(within(dialog).queryByText("Runs as you")).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Always allow in this project" })).not.toBeInTheDocument();
     expect(api.decideAgentApproval).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole("button", { name: "Allow once" }));
