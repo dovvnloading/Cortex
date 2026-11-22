@@ -267,7 +267,9 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         api={agentApi}
         onOpen={openHistory}
         onDiscarded={(runId) => agent.forget(runId)}
-        refreshKey={agent.run?.id}
+        // Status is part of the key so the list refetches when the active run
+        // finishes, instead of keeping the "Running" it read at the start.
+        refreshKey={agent.run ? `${agent.run.id}:${agent.run.status}` : undefined}
       />
       <SavedRecoveryPanel api={api} refreshKey={recoveryRefreshKey} />
     </div>

@@ -302,6 +302,48 @@ def test_approval_parks_until_one_shot_decision_then_executes_once(tmp_path: Pat
     assert len(client.requests) == 2 and store.list_steps(run_id, owner=OWNER)[-2].ended is not None
 
 
+def test_time_waiting_for_a_person_is_not_charged_to_the_wall_clock_budget(tmp_path: Path) -> None:
+    store, run_id = _store(tmp_path)
+    clock = FakeClock()
+    def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+        if not context.approved:
+            return NeedsApproval({"summary": "Synthetic write requires consent"})
+        # The tool's own deadline carries the same credit as the loop's.
+        assert not context.stopped()
+        return ToolResult("Approved operation succeeded")
+    client = ScriptedClient(_calls("write"), _final(), on_chat=lambda: clock.advance(2))
+    loop = _loop(store, client, _registry(handle), clock=clock, budgets={"max_seconds": 5})
+    assert loop.run(run_id).status == "waiting_approval"
+    clock.advance(60)
+    # A resume before any decision is still parked; the wait keeps not counting.
+    assert loop.resume(run_id).status == "waiting_approval"
+    clock.advance(60)
+    step = store.list_steps(run_id, owner=OWNER)[-1]
+    store.decide_approval(run_id, owner=OWNER, step_seq=step.seq, decision="approved")
+    finished = loop.resume(run_id)
+    assert finished.status == "completed" and finished.stop_reason == "final_answer"
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_working_time_around_an_approval_still_counts(tmp_path: Path, decision: str) -> None:
+    store, run_id = _store(tmp_path)
+    clock = FakeClock()
+    def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
+        if not context.approved:
+            return NeedsApproval({"summary": "Synthetic write requires consent"})
+        return ToolResult("Approved operation succeeded")
+    client = ScriptedClient(_calls("write"), _final(), on_chat=lambda: clock.advance(3))
+    loop = _loop(store, client, _registry(handle), clock=clock, budgets={"max_seconds": 5})
+    assert loop.run(run_id).status == "waiting_approval"
+    clock.advance(600)
+    step = store.list_steps(run_id, owner=OWNER)[-1]
+    store.decide_approval(run_id, owner=OWNER, step_seq=step.seq, decision=decision)
+    # 3 s before parking plus 3 s for the next model reply exceeds 5 s of work.
+    result = loop.resume(run_id)
+    assert result.status == "failed" and result.stop_reason == "wall_clock_budget"
+    assert len(client.requests) == 2
+
+
 def test_rejected_approval_never_invokes_handler_again(tmp_path: Path) -> None:
     store, run_id = _store(tmp_path)
     approvals: list[bool] = []
