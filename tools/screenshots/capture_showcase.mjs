@@ -153,13 +153,16 @@ console.log(`Capturing to ${outDir}`);
 await page.goto(`${base}/#bootstrap=${encodeURIComponent(browserToken)}`);
 await page.getByLabel("Message Cortex").waitFor({ state: "visible" });
 await page.waitForTimeout(500);
+await shot("new-thread");
 
 await openChat("Reading a 4 GB CSV without exhausting memory");
-await frameFinalExchange();
-// Per-message controls are opacity:0 until the card is hovered or focused, so
-// a plain screenshot would omit them entirely.
-await page.locator(".message-assistant").last().hover();
-await page.waitForTimeout(400); // 140ms opacity transition
+// Start both theme captures at the question. At the end of the transcript a
+// short final answer can leave the top edge halfway through an earlier reply.
+const frameOpeningQuestion = async () => {
+  await page.locator(".transcript").evaluate((list) => list.scrollTo({ top: 0, behavior: "instant" }));
+  await page.mouse.move(0, 0);
+};
+await frameOpeningQuestion();
 await shot("workspace");
 
 await page.evaluate(() => document.querySelector(".message-assistant")?.scrollIntoView({ block: "start" }));
@@ -300,9 +303,7 @@ await changeTheme(); // dark -> system
 await page.emulateMedia({ colorScheme: "light" });
 
 await openChat("Reading a 4 GB CSV without exhausting memory");
-await frameFinalExchange();
-await page.locator(".message-assistant").last().hover();
-await page.waitForTimeout(400);
+await frameOpeningQuestion();
 await shot("workspace-light");
 
 await page.keyboard.press("Control+k");
@@ -322,6 +323,9 @@ await page.waitForTimeout(500);
 // ---------------------------------------------------------------------------
 const staged = await fetch(`${base}/showcase/execution/stage`, { method: "POST" });
 if (!staged.ok) throw new Error(`Could not stage execution tasks: ${staged.status}`);
+// The newly staged approval expires five minutes from now on this machine.
+// The frozen chat-history date would produce a misleading countdown.
+await page.clock.setFixedTime(new Date());
 
 await openChat("Monthly payment on a car loan");
 await frameFinalExchange();

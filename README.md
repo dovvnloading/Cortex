@@ -9,9 +9,9 @@ frontend process; Cortex does not open the user's installed browser.
 
 ## The workspace
 
-The interface is deliberately small: a chat library, a focused transcript, a
-composer with a model picker, and settings for model, memory, appearance,
-and execution controls.
+Start a thread from the library, choose a model in the composer, and write a
+message or attach a file. Keyboard shortcuts are available beside the message
+box in a new thread. [New thread screenshot](.github/images/new-thread.png)
 
 ![The Cortex workspace: a chat library filed into Engineering, Research, and
 Decisions groups on the left, a transcript rendering Markdown and a
