@@ -54,6 +54,18 @@ describe("RunTimeline", () => {
     expect(screen.getByLabelText("Agent response text")).toHaveTextContent("Final answer");
   });
 
+  it("shows Cortex's own notices open, labelled apart from command output and the agent", () => {
+    render(<RunTimeline events={[
+      event(1, "output", { source: "cortex", text: "The sandbox cannot use python from C:\\Python314." }),
+      event(2, "output", { source: "command", text: "python: not recognized" }),
+    ]} />);
+    expect(screen.getByText("Cortex notice")).toBeInTheDocument();
+    expect(screen.getByLabelText("Cortex notice text")).toBeVisible();
+    expect(screen.getByLabelText("Cortex notice text")).toHaveTextContent("The sandbox cannot use python");
+    expect(screen.getByText("Command output")).toBeInTheDocument();
+    expect(screen.queryByText("Agent response")).not.toBeInTheDocument();
+  });
+
   it("does not attribute unmarked or unknown output to the agent", () => {
     render(<RunTimeline events={[
       event(1, "output", { text: "legacy shell output" }),

@@ -38,6 +38,10 @@ class AutoLauncher:
     def level(self) -> SandboxLevel:
         return self._selected.level
 
+    @property
+    def unavailable_toolchains(self) -> dict[str, tuple[str, ...]]:
+        return dict(getattr(self._selected, "unavailable_toolchains", {}))
+
     def start(
         self, argv: Sequence[str], cwd: str | Path, env: Mapping[str, str] | None = None,
         network: bool = False, limits: JobLimits | None = None,

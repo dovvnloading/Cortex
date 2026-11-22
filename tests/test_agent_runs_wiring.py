@@ -567,3 +567,29 @@ def test_protocol_choice_never_claims_unsupported_adapter_capabilities() -> None
         tools=[spec], options={}, protocol_path="native_tools",
     )
     assert "tools" not in client.request and "format" not in client.request
+
+
+def test_shell_notices_reach_the_user_as_cortex_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    real_register = agent_runs.register_shell_tools
+
+    def register(*args: Any, **kwargs: Any) -> Any:
+        captured["on_notice"] = kwargs["on_notice"]
+        return real_register(*args, **kwargs)
+
+    class NoticeLoop(_CaptureLoop):
+        def run(self, run_id: str, *, goal: str | None = None) -> LoopResult:
+            captured["on_notice"]("The sandbox cannot use python from a synthetic folder.")
+            return super().run(run_id, goal=goal)
+
+    monkeypatch.setattr(agent_runs, "register_shell_tools", register)
+    _CaptureLoop.created = []
+    manager = AgentRuns(data_dir=tmp_path / "data", chat_client=object(), loop_factory=NoticeLoop)
+    try:
+        run = _start(manager, _project(tmp_path), mode="ask")
+        _await_status(manager, run.id, "completed")
+        events, _ = manager.events(run.id, owner=OWNER, after_id=0)
+        outputs = [event.data for event in events if event.kind == "output"]
+        assert {"text": "The sandbox cannot use python from a synthetic folder.", "source": "cortex"} in outputs
+    finally:
+        manager.close()

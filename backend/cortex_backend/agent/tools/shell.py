@@ -63,6 +63,18 @@ SHELL_TOOLS: Final[tuple[ToolSpec, ...]] = (
 )
 
 
+def _toolchain_notice(folder: str, names: tuple[str, ...]) -> str:
+    """Plain text for the user (never the model) about a folder the sandbox cannot read."""
+    tools = ", ".join(names) if names else "programs"
+    return (
+        f"The sandbox cannot use {tools} from {folder}: Windows does not let sandboxed programs "
+        "read that folder, so commands that need it will fail in this run. To allow it, an "
+        f'administrator can run once: icacls "{folder}" /grant "*S-1-15-2-1:(OI)(CI)(RX)" '
+        "(S-1-15-2-1 is ALL APPLICATION PACKAGES, read and execute only). Or install the tool "
+        "for your user only and put it first on PATH."
+    )
+
+
 def _shell_argv(command: str, shell: str) -> list[str]:
     """Use pinned Windows system binaries, not PATH or a modified ComSpec."""
     if shell == "powershell":
@@ -164,6 +176,7 @@ class ShellTools:
     def __init__(
         self, workcopy: str | os.PathLike[str], run_id: str, *, mode: str,
         on_output: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
         launcher_factory: Callable[[Path, str], Launcher] = AutoLauncher,
         jobonly_factory: Callable[[Path], Launcher] = JobOnlyLauncher,
     ) -> None:
@@ -177,6 +190,8 @@ class ShellTools:
         self.run_id = run_id
         self.mode = cast(Mode, mode)
         self._output = on_output
+        self._notice = on_notice
+        self._reported_toolchains: set[str] = set()
         self._launcher_factory = launcher_factory
         self._jobonly_factory = jobonly_factory
         self._lock = Lock()
@@ -213,6 +228,21 @@ class ShellTools:
 
     def _error(self, code: str) -> ToolResult:
         return ToolResult(json.dumps({"error": code}), summary="Shell tool refused", success=False)
+
+    def _report_toolchains(self, launcher: Launcher) -> None:
+        """Tell the user once per run about each toolchain folder the sandbox lacks."""
+        unavailable = getattr(launcher, "unavailable_toolchains", None)
+        if self._notice is None or not isinstance(unavailable, dict):
+            return
+        with self._lock:
+            fresh = [(folder, names) for folder, names in unavailable.items()
+                     if folder not in self._reported_toolchains]
+            self._reported_toolchains.update(folder for folder, _names in fresh)
+        for folder, names in fresh:
+            try:
+                self._notice(_toolchain_notice(str(folder), tuple(names)))
+            except Exception:
+                return
 
     def _launcher(self) -> Launcher:
         with self._lock:
@@ -297,7 +327,10 @@ class ShellTools:
         try:
             # The launcher must construct its *own* environment; env is never
             # supplied, and cwd is never selected from model/tool arguments.
-            process = launcher.start(argv, self.workcopy, network=network)
+            try:
+                process = launcher.start(argv, self.workcopy, network=network)
+            finally:
+                self._report_toolchains(launcher)
         except UnsandboxedFallbackRequired:
             with self._lock:
                 self._jobonly = True
@@ -489,9 +522,10 @@ class ShellTools:
 def register_shell_tools(
     registry: ToolRegistry, workcopy: str | os.PathLike[str], run_id: str, *, mode: str,
     on_output: Callable[[str, str], None] | None = None,
+    on_notice: Callable[[str], None] | None = None,
 ) -> ShellTools:
     """Register all four shell operations on an opted-in run, returning cleanup owner."""
-    shell = ShellTools(workcopy, run_id, mode=mode, on_output=on_output)
+    shell = ShellTools(workcopy, run_id, mode=mode, on_output=on_output, on_notice=on_notice)
     for spec in SHELL_TOOLS:
         registry.register(spec, shell.handle)
     return shell
