@@ -362,6 +362,162 @@ def test_profile_selects_wire_format_and_narrows_limits_unknown_uses_safe_defaul
         manager.close()
 
 
+class _ProbeClient:
+    """Answers the capability probe's seven scripted exchanges on native tools."""
+
+    tool_protocol_capabilities = RuntimeCapabilities(native_tools=True, json_schema=True)
+
+    def __init__(self, *, injection_answer: str = "HARBOR-17", fail: bool = False) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._fail = fail
+        self._replies = [
+            ("probe_read", {"key": "single"}), "CORAL-7",
+            ("probe_read", {"key": "ordered"}), ("probe_verify", {"marker": "LILAC-29"}), "verified",
+            ("probe_read", {"key": "injection"}), injection_answer,
+        ]
+        self.on_request: Any = None
+
+    def chat(self, **kwargs: Any) -> dict[str, object]:
+        self.requests.append(kwargs)
+        if self.on_request is not None:
+            self.on_request()
+        if self._fail:
+            raise ConnectionError("runtime unavailable")
+        reply = self._replies[(len(self.requests) - 1) % len(self._replies)]
+        if isinstance(reply, str):
+            return {"message": {"content": reply, "tool_calls": []}, "done_reason": "stop"}
+        name, arguments = reply
+        return {"message": {"content": "", "tool_calls": [{
+            "id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments},
+        }]}, "done_reason": "stop"}
+
+
+def _profiling(tmp_path: Path, client: object, *, enabled: bool = True) -> AgentRuns:
+    _CaptureLoop.created = []
+    return AgentRuns(
+        data_dir=tmp_path / "data", chat_client=client, loop_factory=_CaptureLoop,
+        profile_models=enabled,
+    )
+
+
+def _status_events(manager: AgentRuns, run_id: str) -> list[dict[str, object]]:
+    events, _ = manager.events(run_id, owner=OWNER, after_id=0)
+    return [event.data for event in events if event.kind == "status"]
+
+
+def test_unmeasured_local_model_is_probed_once_then_cached(tmp_path: Path) -> None:
+    client = _ProbeClient()
+    manager = _profiling(tmp_path, client)
+    try:
+        project = _project(tmp_path)
+        first = _start(manager, project, model="local-model")
+        _await_status(manager, first.id, "completed")
+        assert len(client.requests) == 7
+        assert _CaptureLoop.created[-1].protocol_path == "native_tools"
+        statuses = _status_events(manager, first.id)
+        assert {"status": "pending", "phase": "model_check"} in statuses
+        assert {"status": "running", "model_check": {"recommended": True, "failed_checks": []}} in statuses
+        (saved,) = ProfileStore(tmp_path / "data").load()
+        assert saved.model == "local-model" and saved.recommended is True
+
+        second = _start(manager, project, model="local-model")
+        _await_status(manager, second.id, "completed")
+        assert len(client.requests) == 7, "a cached profile must not be measured again"
+        assert _CaptureLoop.created[-1].protocol_path == "native_tools"
+        assert {"status": "pending", "phase": "model_check"} not in _status_events(manager, second.id)
+    finally:
+        manager.close()
+
+
+def test_unrecommended_model_runs_on_its_measured_format_with_a_warning(tmp_path: Path) -> None:
+    client = _ProbeClient(injection_answer="OVERRIDDEN")
+    manager = _profiling(tmp_path, client)
+    try:
+        run = _start(manager, _project(tmp_path), model="obedient-model")
+        _await_status(manager, run.id, "completed")
+        assert _CaptureLoop.created[-1].protocol_path == "native_tools"
+        assert {"status": "running", "model_check": {
+            "recommended": False, "failed_checks": ["injection_resistance"],
+        }} in _status_events(manager, run.id)
+        (saved,) = ProfileStore(tmp_path / "data").load()
+        assert saved.recommended is False and saved.failed_checks == ("injection_resistance",)
+    finally:
+        manager.close()
+
+
+def test_a_probe_that_fails_every_check_is_not_cached(tmp_path: Path) -> None:
+    client = _ProbeClient(fail=True)
+    manager = _profiling(tmp_path, client)
+    try:
+        project = _project(tmp_path)
+        run = _start(manager, project, model="offline-model")
+        _await_status(manager, run.id, "completed")
+        assert _CaptureLoop.created[-1].protocol_path == "plain_json"
+        assert {"status": "running", "model_check": {
+            "recommended": False,
+            "failed_checks": ["single_call", "ordered_calls", "injection_resistance"],
+        }} in _status_events(manager, run.id)
+        assert ProfileStore(tmp_path / "data").load() == []
+        calls = len(client.requests)
+        again = _start(manager, project, model="offline-model")
+        _await_status(manager, again.id, "completed")
+        assert len(client.requests) > calls, "an uncached failure is measured again"
+    finally:
+        manager.close()
+
+
+def test_profiling_off_cloud_models_and_unreadable_stores_never_probe(tmp_path: Path) -> None:
+    client = _ProbeClient()
+    for name in ("off", "cloud", "corrupt"):
+        (tmp_path / name).mkdir()
+    off = _profiling(tmp_path / "off", client, enabled=False)
+    try:
+        run = _start(off, _project(tmp_path / "off"), model="local-model")
+        _await_status(off, run.id, "completed")
+    finally:
+        off.close()
+    cloud = _profiling(tmp_path / "cloud", client)
+    try:
+        run = cloud.start(
+            owner=OWNER, project_root=str(_project(tmp_path / "cloud")), goal="Inspect.",
+            mode="ask", model="cloud:openai:gpt-4o", budgets={},
+            confirmed_project=True, confirmed_cloud=True,
+        )
+        _await_status(cloud, run.id, "completed")
+    finally:
+        cloud.close()
+    corrupt_dir = tmp_path / "corrupt"
+    store = ProfileStore(corrupt_dir / "data")
+    store.path.parent.mkdir(parents=True)
+    store.path.write_text('{"schema_version":999,"profiles":[]}', encoding="utf-8")
+    corrupt = _profiling(corrupt_dir, client)
+    try:
+        run = _start(corrupt, _project(corrupt_dir), model="local-model")
+        _await_status(corrupt, run.id, "completed")
+        assert store.path.read_text(encoding="utf-8") == '{"schema_version":999,"profiles":[]}'
+    finally:
+        corrupt.close()
+    assert client.requests == []
+    assert all(loop.protocol_path == "plain_json" for loop in _CaptureLoop.created)
+
+
+def test_stop_during_the_probe_ends_it_without_saving_a_profile(tmp_path: Path) -> None:
+    client = _ProbeClient()
+    manager = _profiling(tmp_path, client)
+    run_ids: list[str] = []
+    client.on_request = lambda: manager.cancel(run_ids[0], owner=OWNER) if len(client.requests) == 1 else None
+    try:
+        run = _start(manager, _project(tmp_path), model="local-model")
+        run_ids.append(run.id)
+        wait_until(lambda: not manager._live[run.id].driving, describe="worker finished")
+        # The first check finishes its two exchanges; nothing after the stop.
+        assert len(client.requests) == 2
+        assert ProfileStore(tmp_path / "data").load() == []
+        assert _CaptureLoop.created[-1].protocol_path == "plain_json"
+    finally:
+        manager.close()
+
+
 def test_corrupt_profile_store_falls_back_without_widening(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     path = ProfileStore(data_dir).path
@@ -411,3 +567,29 @@ def test_protocol_choice_never_claims_unsupported_adapter_capabilities() -> None
         tools=[spec], options={}, protocol_path="native_tools",
     )
     assert "tools" not in client.request and "format" not in client.request
+
+
+def test_shell_notices_reach_the_user_as_cortex_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    real_register = agent_runs.register_shell_tools
+
+    def register(*args: Any, **kwargs: Any) -> Any:
+        captured["on_notice"] = kwargs["on_notice"]
+        return real_register(*args, **kwargs)
+
+    class NoticeLoop(_CaptureLoop):
+        def run(self, run_id: str, *, goal: str | None = None) -> LoopResult:
+            captured["on_notice"]("The sandbox cannot use python from a synthetic folder.")
+            return super().run(run_id, goal=goal)
+
+    monkeypatch.setattr(agent_runs, "register_shell_tools", register)
+    _CaptureLoop.created = []
+    manager = AgentRuns(data_dir=tmp_path / "data", chat_client=object(), loop_factory=NoticeLoop)
+    try:
+        run = _start(manager, _project(tmp_path), mode="ask")
+        _await_status(manager, run.id, "completed")
+        events, _ = manager.events(run.id, owner=OWNER, after_id=0)
+        outputs = [event.data for event in events if event.kind == "output"]
+        assert {"text": "The sandbox cannot use python from a synthetic folder.", "source": "cortex"} in outputs
+    finally:
+        manager.close()

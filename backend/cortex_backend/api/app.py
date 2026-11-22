@@ -233,6 +233,7 @@ def create_app(
     agent_run_store: AgentRunStore | None = None,
     agent_chat_client: object | None = None,
     agent_loop_factory: LoopFactory | None = None,
+    agent_profile_models: bool = False,
     default_gguf_models_dir: Path | None = None,
     closeables: Iterable[object] = (),
 ) -> FastAPI:
@@ -402,6 +403,7 @@ def create_app(
         data_dir=agent_data_dir, run_store=agent_run_store,
         chat_client=agent_chat_client if agent_chat_client is not None else workspace_chat_client,
         loop_factory=agent_loop_factory, checkpoint_store=workspace_checkpoint_store,
+        profile_models=agent_profile_models,
     )
     app.state.execution_lifecycle = execution_lifecycle
     # The ordinary/demo API accepts protocol-compatible fakes in tests.  The

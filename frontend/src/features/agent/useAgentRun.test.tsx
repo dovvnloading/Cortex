@@ -135,6 +135,42 @@ describe("useAgentRun", () => {
     expect(result.current.pendingApproval?.request.command).toBe(details);
   });
 
+  it("reports the one-time model check while it runs and the result it ends with", async () => {
+    const api = fakeApi();
+    let emit: ((event: AgentSSEEvent) => void) | null = null;
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      emit = onEvent;
+      onEvent(sse(1, "status", { status: "pending", phase: "model_check" }));
+      return new Promise<void>(() => undefined);
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.checkingModel).toBe(true));
+    expect(result.current.modelCheck).toBeNull();
+
+    act(() => emit?.(sse(2, "status", {
+      status: "running", model_check: { recommended: false, failed_checks: ["injection_resistance", 7] },
+    })));
+    await waitFor(() => expect(result.current.checkingModel).toBe(false));
+    expect(result.current.modelCheck).toEqual({ recommended: false, failedChecks: ["injection_resistance"] });
+
+    // A later status without a result keeps it; a malformed one is ignored.
+    act(() => emit?.(sse(3, "status", { status: "running", model_check: { recommended: "yes" } })));
+    expect(result.current.modelCheck).toEqual({ recommended: false, failedChecks: ["injection_resistance"] });
+  });
+
+  it("never reports a model as recommended when a failed check is listed", async () => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "status", { status: "running", model_check: { recommended: true, failed_checks: ["ordered_calls"] } }));
+      onEvent(sse(2, "status", { status: "completed" }));
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.modelCheck).not.toBeNull());
+    expect(result.current.modelCheck?.recommended).toBe(false);
+  });
+
   it("sends Stop to the backend rather than treating an abort as server cancellation", async () => {
     const api = fakeApi();
     vi.mocked(api.events).mockImplementation(async () => new Promise<void>(() => undefined));

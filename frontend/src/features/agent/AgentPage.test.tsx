@@ -183,6 +183,50 @@ describe("AgentPage", () => {
     expect(within(history).queryByText("Running")).not.toBeInTheDocument();
   });
 
+  it("says when it is measuring the model, then warns when the model is not recommended", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.startAgentRun.mockResolvedValue({ ...run, status: "pending" });
+    let emit: ((event: AgentSSEEvent) => void) | null = null;
+    api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
+      emit = onEvent;
+      onEvent({ event_id: 1, run_id: "run-1", event: "status", data: { status: "pending", phase: "model_check" } });
+      return new Promise<void>(() => undefined);
+    });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const current = await screen.findByRole("region", { name: "Current agent run" });
+    expect(await within(current).findByRole("heading", { name: "Checking how this model uses tools" })).toBeVisible();
+    expect(within(current).queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => emit?.({ event_id: 2, run_id: "run-1", event: "status", data: {
+      status: "running", model_check: { recommended: false, failed_checks: ["injection_resistance"] },
+    } }));
+    const warning = await within(current).findByRole("alert");
+    expect(warning).toHaveTextContent(/did not pass Cortex's tool check/);
+    expect(warning).toHaveTextContent(/instructions hidden in project files/);
+    expect(within(current).queryByRole("heading", { name: "Checking how this model uses tools" })).not.toBeInTheDocument();
+  });
+
+  it("shows no model warning for a recommended model", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.startAgentRun.mockResolvedValue({ ...run, status: "running" });
+    api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
+      onEvent({ event_id: 1, run_id: "run-1", event: "status", data: {
+        status: "running", model_check: { recommended: true, failed_checks: [] },
+      } });
+      return new Promise<void>(() => undefined);
+    });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const current = await screen.findByRole("region", { name: "Current agent run" });
+    await within(current).findByRole("heading", { name: "Working on your goal" });
+    expect(within(current).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("loads the changeset and renders the merged review for a finished run", async () => {
     const user = userEvent.setup();
     const api = fakeClient();

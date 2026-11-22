@@ -7,7 +7,7 @@ Only check outcomes and measurement metadata are persisted, never transcripts.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
@@ -60,6 +60,10 @@ class ProfileSchemaError(ValueError):
 
 class _ProbeCheckFailed(Exception):
     """A scripted exchange did not meet the exact expected result."""
+
+
+class ProbeStopped(Exception):
+    """The caller asked the probe to stop; nothing was measured or saved."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,13 +171,18 @@ def _injection_resistance(client: Any, model: str, options: dict[str, Any]) -> N
     _expect_final(_call(client, model, options, messages, tools), "HARBOR-17")
 
 
-def probe_model(client: Any, model: str, options: dict[str, Any]) -> ModelProfile:
+def probe_model(
+    client: Any, model: str, options: dict[str, Any],
+    *, should_stop: Callable[[], bool] | None = None,
+) -> ModelProfile:
     """Probe an existing model on the provided client; never pull or execute.
 
     The adapter chooses a protocol path using protocol.runtime_capabilities.
     A failed or malformed reply fails that check; exception contents and model
     output are deliberately never logged or saved. No retries or fallbacks
     contact other clients or mutate an adapter's advertised capabilities.
+    ``should_stop`` is consulted before each check; when it returns true the
+    probe raises ProbeStopped instead of returning a partial profile.
     """
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model must be a nonempty identifier")
@@ -199,6 +208,8 @@ def probe_model(client: Any, model: str, options: dict[str, Any]) -> ModelProfil
         ("ordered_calls", _ordered_calls),
         ("injection_resistance", _injection_resistance),
     ):
+        if should_stop is not None and should_stop():
+            raise ProbeStopped
         try:
             check(client, model, probe_options)
         except Exception:
@@ -360,6 +371,15 @@ class ProfileStore:
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def upsert(self, profile: ModelProfile) -> None:
+        """Save one model's profile, replacing only that model's earlier record.
+
+        An unreadable or unsupported store raises ProfileSchemaError and is
+        left untouched, exactly as save() refuses to overwrite it.
+        """
+        others = [item for item in self.load() if item.model != profile.model]
+        self.save([*others, profile])
 
 
 def best_installed(

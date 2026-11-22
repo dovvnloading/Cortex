@@ -273,6 +273,22 @@ def test_the_composition_root_places_caches_where_the_launcher_resolved_them(
     assert not (paths.data_dir / "gguf_models").exists()
 
 
+def test_the_launched_app_measures_unprofiled_models_but_test_apps_do_not(tmp_path: Path) -> None:
+    """Only the real composition root turns on first-run model profiling."""
+
+    paths = AppPaths(
+        data_dir=(tmp_path / "data").resolve(),
+        cache_root=(tmp_path / "local").resolve(),
+    )
+    paths.data_dir.mkdir()
+    app = app_factory.build_app(paths=paths, serve_frontend=False)
+    assert app.state.agent_workflow._profile_models is True
+
+    from cortex_backend.services.agent_runs import AgentRuns
+
+    assert AgentRuns()._profile_models is False
+
+
 def test_the_download_manager_and_the_routes_agree_on_the_gguf_folder_for_the_whole_run(
     tmp_path: Path,
 ) -> None:

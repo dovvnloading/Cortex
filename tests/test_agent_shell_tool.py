@@ -172,6 +172,60 @@ def test_output_events_and_head_tail_cap(tmp_path: Path):
         shell.close()
 
 
+def test_unavailable_toolchain_is_explained_to_the_user_once_per_run(tmp_path: Path):
+    """A folder the sandbox could not be granted is named once, outside the model's view."""
+
+    class BlockedLauncher(FakeLauncher):
+        unavailable_toolchains = {r"C:\Python314": ("python",)}
+
+    launcher = BlockedLauncher()
+    notices: list[str] = []
+    registry = ToolRegistry()
+    shell = ShellTools(
+        tmp_path, "synthetic-run", mode="auto_sandboxed",
+        launcher_factory=lambda _root, _id: launcher, jobonly_factory=lambda _root: launcher,
+        on_notice=notices.append,
+    )
+    for spec in SHELL_TOOLS:
+        registry.register(spec, shell.handle)
+    try:
+        for _ in range(2):
+            launcher.process = FakeProcess()
+            result = registry.execute(_call("run_command", command="dir", shell="cmd", timeout_s=1), _context())
+            assert isinstance(result, ToolResult)
+            assert "Python314" not in result.content, "the host folder is for the user, not the model"
+        assert len(notices) == 1
+        assert r"C:\Python314" in notices[0] and "python" in notices[0]
+        assert r'icacls "C:\Python314" /grant "*S-1-15-2-1:(OI)(CI)(RX)"' in notices[0]
+    finally:
+        shell.close()
+
+
+def test_toolchain_notice_is_reported_even_when_the_launch_fails(tmp_path: Path):
+    class FailingLauncher(FakeLauncher):
+        unavailable_toolchains = {r"C:\Program Files\nodejs": ("node", "npm")}
+
+        def start(self, argv, cwd, env=None, network=False, limits=None):
+            raise PermissionError("toolchain unavailable to AppContainer")
+
+    launcher = FailingLauncher()
+    notices: list[str] = []
+    shell = ShellTools(
+        tmp_path, "synthetic-run", mode="auto_sandboxed",
+        launcher_factory=lambda _root, _id: launcher, jobonly_factory=lambda _root: launcher,
+        on_notice=notices.append,
+    )
+    registry = ToolRegistry()
+    for spec in SHELL_TOOLS:
+        registry.register(spec, shell.handle)
+    try:
+        result = _result(registry.execute(_call("run_command", command="npm test", shell="cmd", timeout_s=1), _context()))
+        assert result == {"error": "launch_failed"}
+        assert len(notices) == 1 and "node, npm" in notices[0]
+    finally:
+        shell.close()
+
+
 def test_timeout_kills_process_tree_and_reports_timeout(tmp_path: Path):
     process = FakeProcess(hang=True)
     registry, shell, _ = _registry(tmp_path, process=process)
