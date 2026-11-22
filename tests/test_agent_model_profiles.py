@@ -15,6 +15,7 @@ from cortex_backend.agent.model_profiles import (
     DEFAULT_PROBE_CONTEXT_SIZE,
     PROFILE_SCHEMA_VERSION,
     ModelProfile,
+    ProbeStopped,
     ProfileSchemaError,
     ProfileStore,
     ProtocolPath,
@@ -214,6 +215,40 @@ def test_native_probe_passes_through_the_real_ollama_client() -> None:
         for call in message.get("tool_calls") or []
     ]
     assert replayed and all(isinstance(arguments, dict) for arguments in replayed)
+
+
+def test_should_stop_ends_the_probe_between_checks_without_a_profile() -> None:
+    client = _ScriptedClient("native_tools", _success_replies("native_tools"))
+    with pytest.raises(ProbeStopped):
+        probe_model(client, "installed-model", {}, should_stop=lambda: True)
+    assert client.requests == []
+
+    client = _ScriptedClient("native_tools", _success_replies("native_tools"))
+    with pytest.raises(ProbeStopped):
+        probe_model(client, "installed-model", {}, should_stop=lambda: len(client.requests) >= 2)
+    assert len(client.requests) == 2
+
+
+def test_upsert_replaces_only_that_models_record(tmp_path: Path) -> None:
+    store = ProfileStore(tmp_path)
+    first = _profile()
+    other = replace(_profile(), model="other-model")
+    store.save([first, other])
+    updated = replace(first, recommended=False, passed={**ALL_PASSED, "injection_resistance": False},
+                      failed_checks=("injection_resistance",))
+    store.upsert(updated)
+    assert {profile.model: profile for profile in store.load()} == {
+        "installed-model": updated, "other-model": other,
+    }
+
+
+def test_upsert_never_overwrites_an_unreadable_store(tmp_path: Path) -> None:
+    store = ProfileStore(tmp_path)
+    store.path.parent.mkdir(parents=True)
+    store.path.write_bytes(b'{"schema_version": 999, "profiles": []}')
+    with pytest.raises(ProfileSchemaError):
+        store.upsert(_profile())
+    assert store.path.read_bytes() == b'{"schema_version": 999, "profiles": []}'
 
 
 @pytest.mark.parametrize("num_ctx", [0, -1, True, "4096", None])

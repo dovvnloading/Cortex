@@ -11,6 +11,7 @@ import { createAgentApi } from "./agentApi";
 import { RunHistory } from "./RunHistory";
 import { SavedRecoveryPanel } from "./SavedRecoveryPanel";
 import { RunTimeline } from "./RunTimeline";
+import { modelCheckWarning } from "./modelCheck";
 import { stopReasonText } from "./stopReasons";
 import { useAgentRun } from "./useAgentRun";
 
@@ -216,8 +217,14 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         <section aria-label="Current agent run">
           <div className="coding-panel coding-row">
             <div>
-              <h3>{statusLabel(agent.run.status)}</h3>
+              <h3>{agent.checkingModel && agent.run.status === "pending" ? "Checking how this model uses tools" : statusLabel(agent.run.status)}</h3>
               <p className="coding-muted">Model: {displayModelName(agent.run.model)} · Mode: {MODES.find((choice) => choice.value === agent.run?.mode)?.label ?? agent.run.mode}</p>
+              {agent.checkingModel && agent.run.status === "pending" && (
+                <p role="status">Cortex measures each local model once, on its first Agent run. This can take a minute or two.</p>
+              )}
+              {agent.modelCheck && !agent.modelCheck.recommended && (
+                <div className="coding-error" role="alert">{modelCheckWarning(agent.modelCheck.failedChecks)}</div>
+              )}
               {stopReason && <p className="coding-muted">{stopReason}</p>}
               {agent.connection === "reconnecting" && <p role="status">Connection interrupted — reconnecting to the run…</p>}
             </div>
