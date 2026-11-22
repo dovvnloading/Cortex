@@ -13,6 +13,9 @@ const APPROVAL_CLASSES = new Set<ApprovalRequest["cls"]>([
 
 export type PendingAgentApproval = { seq: number; request: ApprovalRequest };
 
+/** The backend's one-time capability probe result for the run's model. */
+export type ModelCheck = { recommended: boolean; failedChecks: string[] };
+
 function objectData(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
@@ -62,6 +65,27 @@ function latestApproval(events: readonly AgentSSEEvent[]): PendingAgentApproval 
     if (request) pending = { seq, request };
   }
   return pending;
+}
+
+function parseModelCheck(value: unknown): ModelCheck | null {
+  const data = objectData(value);
+  if (!data || typeof data.recommended !== "boolean" || !Array.isArray(data.failed_checks)) return null;
+  const failedChecks = data.failed_checks.filter((item): item is string => typeof item === "string");
+  // Never show a model as recommended when the backend also listed a failure.
+  return { recommended: data.recommended && failedChecks.length === 0, failedChecks };
+}
+
+/** Whether the probe is running now, and the latest result the run reported. */
+function modelCheckState(events: readonly AgentSSEEvent[]): { checking: boolean; check: ModelCheck | null } {
+  let checking = false;
+  let check: ModelCheck | null = null;
+  for (const event of events) {
+    if (event.event !== "status") continue;
+    const data = objectData(event.data);
+    checking = data?.status === "pending" && data?.phase === "model_check";
+    check = parseModelCheck(data?.model_check) ?? check;
+  }
+  return { checking, check };
 }
 
 function retryDelay(signal: AbortSignal, ms: number): Promise<void> {
@@ -172,6 +196,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     () => run?.status === "waiting_approval" ? latestApproval(events) : null,
     [events, run?.status],
   );
+  const { checking: checkingModel, check: modelCheck } = useMemo(() => modelCheckState(events), [events]);
 
   const start = async (payload: StartAgentRun): Promise<boolean> => {
     if (!enabled || busy || payload.confirmed_project !== true
@@ -286,5 +311,8 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     }
   };
 
-  return { run, events, pendingApproval, error, connection, busy, resumeRequired, start, open, forget, decide, resume, stop };
+  return {
+    run, events, pendingApproval, modelCheck, checkingModel, error, connection, busy, resumeRequired,
+    start, open, forget, decide, resume, stop,
+  };
 }
