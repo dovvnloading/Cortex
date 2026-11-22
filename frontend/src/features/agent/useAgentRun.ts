@@ -22,6 +22,30 @@ function stringField(data: Record<string, unknown>, key: string): string | null 
   return typeof data[key] === "string" ? data[key] as string : null;
 }
 
+/** What a file-tool approval will change, as plain text for the details view. */
+function fileChangeDetails(request: Record<string, unknown>, tool: string, path: string | null): string {
+  const lines = ["Requested tool: " + tool];
+  if (path) lines.push("Project file: " + path);
+  const source = stringField(request, "source");
+  const destination = stringField(request, "destination");
+  if (source) lines.push("Move from: " + source);
+  if (destination) lines.push("Move to: " + destination);
+  const preview = objectData(request.preview);
+  if (preview) {
+    const before = stringField(preview, "old");
+    const after = stringField(preview, "new");
+    const content = stringField(preview, "content");
+    if (before !== null && after !== null) {
+      lines.push("", preview.replace_all === true ? "Replace every occurrence of:" : "Replace this text:", before,
+        "", "With:", after);
+    } else if (content !== null) {
+      lines.push("", "File content:", content);
+    }
+    if (preview.truncated === true) lines.push("", "(Shortened here. The review shows the full change after it is staged.)");
+  }
+  return lines.join("\n");
+}
+
 /** Unrecognized approvals are shown conservatively as unsandboxed, never as safe. */
 function parseApproval(value: unknown): ApprovalRequest | null {
   const request = objectData(value);
@@ -31,8 +55,7 @@ function parseApproval(value: unknown): ApprovalRequest | null {
   const path = stringField(request, "path");
   const command = stringField(request, "command");
   return {
-    command: command
-      ?? ("Requested tool: " + tool + (path ? "\nProject file: " + path : "")),
+    command: command ?? fileChangeDetails(request, tool, path),
     cls: cls && APPROVAL_CLASSES.has(cls as ApprovalRequest["cls"])
       ? cls as ApprovalRequest["cls"] : "ask",
     plain_text: stringField(request, "plain_text")

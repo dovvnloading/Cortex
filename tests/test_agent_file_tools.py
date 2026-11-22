@@ -387,3 +387,36 @@ def test_directory_enumeration_result_cap(workcopy: tuple[Path, ToolRegistry]) -
     _, matched = _call(registry, "glob", path="many", pattern="*.py")
     assert len(matched["paths"]) == files.MAX_RESULTS
     assert matched["truncated"] is True
+
+
+def test_gated_edits_show_the_proposed_text_bounded_for_display(tmp_path: Path) -> None:
+    root = tmp_path / "copy"
+    root.mkdir()
+    registry = ToolRegistry()
+    register_file_tools(registry, root, require_approval=True)
+    context = ToolContext(Event(), monotonic() + 60)
+
+    edit = registry.execute(ToolCall("gate", "edit_file", {
+        "path": "calc.py", "old": "return left - right", "new": "return left + right",
+    }), context)
+    assert isinstance(edit, NeedsApproval)
+    assert edit.request["preview"] == {
+        "old": "return left - right", "new": "return left + right", "replace_all": False, "truncated": False,
+    }
+
+    long_text = "x" * 5000
+    write = registry.execute(ToolCall("gate", "write_file", {"path": "big.txt", "content": long_text}), context)
+    assert isinstance(write, NeedsApproval)
+    assert write.request["preview"] == {"content": "x" * 4000, "truncated": True}
+
+    every = registry.execute(ToolCall("gate", "edit_file", {
+        "path": "calc.py", "old": "a", "new": "b", "replace_all": True,
+    }), context)
+    assert isinstance(every, NeedsApproval)
+    assert every.request["preview"]["replace_all"] is True  # type: ignore[index]
+
+    for name, arguments in (("delete_file", {"path": "calc.py"}),
+                            ("move_file", {"source": "calc.py", "destination": "new.py"})):
+        outcome = registry.execute(ToolCall("gate", name, arguments), context)
+        assert isinstance(outcome, NeedsApproval) and "preview" not in outcome.request
+    assert list(root.iterdir()) == []

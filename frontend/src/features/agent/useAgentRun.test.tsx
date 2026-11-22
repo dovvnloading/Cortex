@@ -100,6 +100,41 @@ describe("useAgentRun", () => {
     expect(result.current.pendingApproval?.request.sandbox_level).toBe(expected);
   });
 
+  it.each([
+    [
+      { tool: "edit_file", path: "calc.py", scope: "workcopy",
+        preview: { old: "return left - right", new: "return left + right", replace_all: false, truncated: false } },
+      ["Requested tool: edit_file", "Project file: calc.py", "", "Replace this text:", "return left - right", "", "With:", "return left + right"].join("\n"),
+    ],
+    [
+      { tool: "edit_file", path: "calc.py", scope: "workcopy",
+        preview: { old: "a", new: "b", replace_all: true, truncated: true } },
+      ["Requested tool: edit_file", "Project file: calc.py", "", "Replace every occurrence of:", "a", "", "With:", "b", "", "(Shortened here. The review shows the full change after it is staged.)"].join("\n"),
+    ],
+    [
+      { tool: "write_file", path: "new.py", scope: "workcopy", preview: { content: "print(1)", truncated: false } },
+      ["Requested tool: write_file", "Project file: new.py", "", "File content:", "print(1)"].join("\n"),
+    ],
+    [
+      { tool: "move_file", source: "old.py", destination: "new.py", scope: "workcopy" },
+      ["Requested tool: move_file", "Move from: old.py", "Move to: new.py"].join("\n"),
+    ],
+    [
+      { tool: "edit_file", path: "calc.py", scope: "workcopy", preview: { old: 1, new: ["x"] } },
+      ["Requested tool: edit_file", "Project file: calc.py"].join("\n"),
+    ],
+  ])("shows what a file change will do: %j", async (request, details) => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "approval", { seq: 5, request }));
+      onEvent(sse(2, "status", { status: "waiting_approval" }));
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.pendingApproval?.seq).toBe(5));
+    expect(result.current.pendingApproval?.request.command).toBe(details);
+  });
+
   it("sends Stop to the backend rather than treating an abort as server cancellation", async () => {
     const api = fakeApi();
     vi.mocked(api.events).mockImplementation(async () => new Promise<void>(() => undefined));
