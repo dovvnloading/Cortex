@@ -627,6 +627,26 @@ def test_profile_creation_failure_is_not_relabelled_as_generic_launch_failure(
     assert events == ["journal", "create-profile", "cleanup:False:False"]
 
 
+def test_launcher_names_toolchain_folders_it_could_not_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    _fake_windows_launch(monkeypatch, tmp_path, policy="unavailable")
+    launcher = AppContainerLauncher(tmp_path, "unavailable-tool")
+    with pytest.raises(PermissionError, match="toolchain unavailable"):
+        launcher.start(["python"], tmp_path)
+    tool_dir = tmp_path.parent / f"{tmp_path.name}-toolchain"
+    assert launcher.unavailable_toolchains == {str(tool_dir): ("python",)}
+
+
+def test_launcher_reports_no_unavailable_toolchain_after_a_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    _fake_windows_launch(monkeypatch, tmp_path)
+    launcher = AppContainerLauncher(tmp_path, "granted-tool")
+    launcher.start(["python", "-c", "print(1)"], tmp_path)
+    assert launcher.unavailable_toolchains == {}
+
+
 def test_shared_all_app_packages_rx_skips_tool_acl_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):

@@ -11,9 +11,17 @@ function isAgentResponse(event: AgentSSEEvent): boolean {
   return event.event === "output" && event.data.source === "agent";
 }
 
+/** Cortex's own note to the user (for example, a tool the sandbox cannot use). */
+function isCortexNotice(event: AgentSSEEvent): boolean {
+  return event.event === "output" && event.data.source === "cortex";
+}
+
 function stepTitle(event: AgentSSEEvent): string {
   const { data } = event;
-  if (event.event === "output") return isAgentResponse(event) ? "Agent response" : "Command output";
+  if (event.event === "output") {
+    if (isAgentResponse(event)) return "Agent response";
+    return isCortexNotice(event) ? "Cortex notice" : "Command output";
+  }
   const summary = textField(data, "summary")?.trim();
   // The run store intentionally records generic operation labels. Translate
   // them without pretending to know file counts or test outcomes.
@@ -43,12 +51,13 @@ export function RunTimeline({ events }: RunTimelineProps) {
         <ol aria-label="Agent activity" aria-live="polite">
           {entries.map((event) => (
             <li key={event.event_id}>
-              <details>
+              <details open={isCortexNotice(event) || undefined}>
                 <summary>{stepTitle(event)}</summary>
                 {event.event === "output" ? (
                   <pre
                     className={isAgentResponse(event) ? "coding-source" : "coding-source agent-command-output"}
-                    aria-label={isAgentResponse(event) ? "Agent response text" : "Command output text"}
+                    aria-label={isAgentResponse(event) ? "Agent response text"
+                      : isCortexNotice(event) ? "Cortex notice text" : "Command output text"}
                   >{textField(event.data, "text") ?? (isAgentResponse(event) ? "(No response text)" : "(No command output)")}</pre>
                 ) : (
                   <div className="coding-muted">

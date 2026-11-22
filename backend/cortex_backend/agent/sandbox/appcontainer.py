@@ -279,6 +279,9 @@ class AppContainerLauncher:
         self.workcopy = canonical_workcopy(workcopy)
         self.name = win_appcontainer.PROFILE_PREFIX + run_id
         self._started = False
+        # Host toolchain folders the container could not be granted, with the
+        # allowed tool names found there, so callers can tell the user why.
+        self.unavailable_toolchains: dict[str, tuple[str, ...]] = {}
 
     def start(
         self, argv: Sequence[str], cwd: str | Path, env: Mapping[str, str] | None = None,
@@ -336,6 +339,10 @@ class AppContainerLauncher:
                         # An optional host tool must not require elevation to launch other tools.
                         _LOG.warning("Toolchain %s unavailable (RX grant refused): %s", path, exc)
                         unavailable.add(path)
+            self.unavailable_toolchains = {
+                str(folder): tuple(sorted(name for name, tool in tools.items() if tool.parent == folder))
+                for folder in sorted(unavailable)
+            }
             available_tools = {name: tool for name, tool in tools.items() if tool.parent not in unavailable}
             available_folders = tuple(folder for folder in folders if folder not in unavailable)
             try:

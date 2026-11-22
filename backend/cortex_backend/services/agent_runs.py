@@ -280,6 +280,13 @@ class AgentRuns:
                     "text": text, "source": "command", "tool_call_id": tool_call_id,
                 })
 
+    def _cortex_notice(self, run_id: str, text: str) -> None:
+        """Show the user Cortex's own note about the run; never sent to the model."""
+        with self._lock:
+            managed = self._live.get(run_id)
+            if managed is not None and not managed.terminal:
+                self._emit(managed, "output", {"text": text, "source": "cortex"})
+
     def _after_tool(self, run_id: str) -> Callable[[AgentStep], None]:
         def publish(_step: AgentStep) -> None:
             with self._lock:
@@ -343,6 +350,7 @@ class AgentRuns:
                     shell = register_shell_tools(
                         registry, prepared.path, run_id, mode=mode,
                         on_output=lambda text, tool_call_id: self._shell_output(run_id, text, tool_call_id),
+                        on_notice=lambda text: self._cortex_notice(run_id, text),
                     )
                     register_check_tools(registry, prepared.path, shell)
                 providers: Sequence[Callable[[AgentRun], str]] = (

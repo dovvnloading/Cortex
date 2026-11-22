@@ -298,9 +298,10 @@ def test_cancel_running_sandbox_command_kills_the_tree_and_never_passes(
     def wire_shell(
         registry: ToolRegistry, workcopy: str | Path, run_id: str, *, mode: str,
         on_output: Callable[[str, str], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> ShellTools:
         shell = ShellTools(
-            workcopy, run_id, mode=mode, on_output=on_output,
+            workcopy, run_id, mode=mode, on_output=on_output, on_notice=on_notice,
             launcher_factory=lambda _root, _profile: launcher,
             jobonly_factory=lambda _root: launcher,
         )
