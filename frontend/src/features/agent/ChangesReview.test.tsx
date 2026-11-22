@@ -394,6 +394,22 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
     expect(onUndo).not.toHaveBeenCalled();
   });
+  it.each([false, true])("names discard as removing the work copy when nothing is left to review (recovery %s)", async (allowRecovery) => {
+    const user = userEvent.setup();
+    const { onDiscard } = renderReview({ changes: [], allowRecovery });
+    expect(screen.getByText("No files to review.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Discard all" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Discard work copy" }));
+    const confirmation = screen.getByRole("group", { name: "Discard confirmation" });
+    expect(within(confirmation).getByText(
+      "Discard this run's work copy? It has no pending file changes. No project files will be updated.",
+    )).toBeVisible();
+    expect(screen.queryByText(/Discard all 0 pending/)).not.toBeInTheDocument();
+    expect(onDiscard).not.toHaveBeenCalled();
+    await user.click(within(confirmation).getByRole("button", { name: "Confirm discard" }));
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+  });
+
   it("offers Undo alongside staged changes when the backend says a checkpoint exists", async () => {
     const user = userEvent.setup();
     const { onUndo, onAccept, onDiscard } = renderReview({ allowRecovery: true });
