@@ -39,6 +39,13 @@ if [ ! -t 0 ]; then
     fi
 fi
 
+# Git runs this hook with GIT_DIR set, as an absolute path when pushing from a
+# linked worktree. Checks inherit it, so a test that runs `git init` or
+# `git commit` in a throwaway folder would act on this repository instead
+# (changing its config and committing onto the pushed branch). Clear every
+# repository-local variable so each git call finds its own repository.
+unset $(git rev-parse --local-env-vars)
+
 repo_root=$(git rev-parse --show-toplevel)
 script="$repo_root/scripts/check.ps1"
 
