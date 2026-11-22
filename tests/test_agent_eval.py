@@ -260,6 +260,7 @@ def test_invalid_model_name_or_task_is_rejected_without_running(capsys: pytest.C
 def test_model_transport_is_loopback_only_and_never_pulls(monkeypatch: pytest.MonkeyPatch) -> None:
     destinations: list[tuple[str, int]] = []
     requests: list[tuple[str, str]] = []
+    timeouts: list[int] = []
 
     class FakeResponse:
         status = 200
@@ -273,7 +274,7 @@ def test_model_transport_is_loopback_only_and_never_pulls(monkeypatch: pytest.Mo
     class FakeConnection:
         def __init__(self, host: str, port: int, *, timeout: int) -> None:
             destinations.append((host, port))
-            assert timeout > 0
+            timeouts.append(timeout)
 
         def request(self, method: str, path: str, **_kwargs: object) -> None:
             requests.append((method, path))
@@ -291,6 +292,9 @@ def test_model_transport_is_loopback_only_and_never_pulls(monkeypatch: pytest.Mo
     assert client.chat(messages=[], options={}) == {"message": {"content": "{}"}}
     assert destinations == [("127.0.0.1", 11434)] * 2
     assert requests == [("GET", "/api/tags"), ("POST", "/api/chat")]
+    # A non-streaming reply arrives only when generation ends, so one read
+    # must be allowed the task's whole budget, not a fixed 25 seconds.
+    assert timeouts == [agent_eval.TASK_SECONDS] * 2
 
 
 @pytest.mark.parametrize("name", ["fix-failing-test", "commit-the-change"])
