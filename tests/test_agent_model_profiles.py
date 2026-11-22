@@ -182,6 +182,40 @@ def test_wrong_call_order_and_extra_calls_fail_closed() -> None:
     assert profile.recommended is False
 
 
+def test_native_probe_passes_through_the_real_ollama_client() -> None:
+    # The real ollama library validates every outgoing message; tool-call
+    # arguments must be an object there. A JSON string used to raise on the
+    # second request of each check, so every Ollama model failed all three.
+    import httpx
+    import ollama
+
+    from cortex_backend.services.chat_client import OllamaChatClient
+
+    replies = iter(_success_replies("native_tools"))
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+        bodies.append(json.loads(request.content))
+        reply = cast(dict[str, Any], next(replies))
+        message = {"role": "assistant", **reply["message"]}
+        return httpx.Response(200, json={"model": "installed-model", "done": True, **reply, "message": message})
+
+    library_client = ollama.Client(host="http://127.0.0.1:11434", transport=httpx.MockTransport(handler))
+    profile = probe_model(OllamaChatClient(library_client), "installed-model", {"num_ctx": 2048})
+
+    assert profile.protocol_path == "native_tools"
+    assert profile.passed == ALL_PASSED
+    assert profile.recommended is True
+    assert len(bodies) == 7
+    replayed = [
+        call["function"]["arguments"]
+        for body in bodies for message in body["messages"]
+        for call in message.get("tool_calls") or []
+    ]
+    assert replayed and all(isinstance(arguments, dict) for arguments in replayed)
+
+
 @pytest.mark.parametrize("num_ctx", [0, -1, True, "4096", None])
 def test_invalid_context_size_never_contacts_client(num_ctx: object) -> None:
     client = _ScriptedClient("native_tools", _success_replies("native_tools"))
