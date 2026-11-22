@@ -29,16 +29,20 @@ function parseApproval(value: unknown): ApprovalRequest | null {
   const cls = stringField(request, "cls");
   const tool = stringField(request, "tool") ?? "a project action";
   const path = stringField(request, "path");
+  const command = stringField(request, "command");
   return {
-    command: stringField(request, "command")
+    command: command
       ?? ("Requested tool: " + tool + (path ? "\nProject file: " + path : "")),
     cls: cls && APPROVAL_CLASSES.has(cls as ApprovalRequest["cls"])
       ? cls as ApprovalRequest["cls"] : "ask",
     plain_text: stringField(request, "plain_text")
       ?? stringField(request, "summary")
       ?? "The agent requests permission for " + tool + ".",
-    // Never assert that a command is sandboxed if that claim was not supplied.
-    sandbox_level: request.sandbox_level === "appcontainer" ? "appcontainer" : "unsandboxed",
+    // The shell tool reports its launcher as "level". Never assert that a
+    // command is sandboxed, or that no process runs, unless that was supplied.
+    sandbox_level: command !== null
+      ? (request.level === "appcontainer" ? "appcontainer" : "unsandboxed")
+      : (request.scope === "workcopy" ? "workcopy" : "unsandboxed"),
     network: request.network === true,
   };
 }

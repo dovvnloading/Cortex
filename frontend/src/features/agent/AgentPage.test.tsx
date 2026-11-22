@@ -113,7 +113,7 @@ describe("AgentPage", () => {
     api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
       onEvent({
         event_id: 1, run_id: "run-1", event: "approval",
-        data: { seq: 3, request: { cls: "inspect", sandbox_level: "appcontainer", network: false, command: "echo hello", plain_text: "Review the command." } },
+        data: { seq: 3, request: { tool: "run_command", level: "appcontainer", network: false, command: "echo hello", plain_text: "Review the command." } },
       });
       onEvent({ event_id: 2, run_id: "run-1", event: "status", data: { status: "waiting_approval" } });
     });
@@ -122,6 +122,9 @@ describe("AgentPage", () => {
     await user.click(screen.getByRole("button", { name: "Start Agent" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText("Review the command.")).toBeVisible();
+    // The shell tool's field is "level"; a sandboxed command must not read "Runs as you".
+    expect(within(dialog).getByText("Sandboxed")).toHaveClass("status-success");
+    expect(within(dialog).queryByText("Runs as you")).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Always allow in this project" })).not.toBeInTheDocument();
     expect(api.decideAgentApproval).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole("button", { name: "Allow once" }));
@@ -141,6 +144,45 @@ describe("AgentPage", () => {
     await waitFor(() => expect(api.cancelAgentRun).toHaveBeenCalledWith("run-1"));
     expect(await screen.findByText("Run stopped")).toBeInTheDocument();
   });
+
+  it("explains why a run stopped in plain language instead of a reason code", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    api.startAgentRun.mockResolvedValue({ ...run, status: "failed", stop_reason: "wall_clock_budget" });
+    api.agentRun.mockResolvedValue({ ...run, status: "failed", stop_reason: "wall_clock_budget" });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const current = await screen.findByRole("region", { name: "Current agent run", hidden: true });
+    expect(await within(current).findByText("The run reached its time limit.")).toBeInTheDocument();
+    expect(within(current).queryByText(/wall_clock_budget/)).not.toBeInTheDocument();
+  });
+
+  it("refreshes run history when the active run finishes, without a manual Refresh", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    let listed: AgentRunResponse["status"] = "running";
+    api.agentRuns.mockImplementation(async () => ({ runs: [{ ...run, status: listed }] }));
+    api.startAgentRun.mockResolvedValue({ ...run, status: "running" });
+    let emit: ((event: AgentSSEEvent) => void) | null = null;
+    api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
+      emit = onEvent;
+      return new Promise<void>(() => undefined);
+    });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const history = screen.getByRole("region", { name: "Agent run history" });
+    expect(await within(history).findByText("Running")).toBeInTheDocument();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    listed = "completed";
+    act(() => emit?.({ event_id: 1, run_id: "run-1", event: "status", data: { status: "completed" } }));
+
+    expect(await within(history).findByText("Completed")).toBeInTheDocument();
+    expect(within(history).queryByText("Running")).not.toBeInTheDocument();
+  });
+
   it("loads the changeset and renders the merged review for a finished run", async () => {
     const user = userEvent.setup();
     const api = fakeClient();

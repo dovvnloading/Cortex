@@ -36,6 +36,20 @@ ALLOWED_HOSTS = ("testserver", "127.0.0.1", "localhost", "::1")
 # must independently enforce the same boundary.
 collect_ignore = ["fixtures/agent_tasks"]
 
+# Repository-local Git variables, as `git rev-parse --local-env-vars` lists
+# them. Git sets GIT_DIR for hooks (an absolute path from a linked worktree),
+# and a test that runs git in its own temporary repository would otherwise act
+# on the developer's checkout: its config, index and current branch. Clear
+# them for the whole session; the pre-push hook clears them as well.
+GIT_LOCAL_ENV_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+)
+for _name in GIT_LOCAL_ENV_VARS:
+    os.environ.pop(_name, None)
+
 # Hypothesis profiles for the property tests under tests/property/.
 #
 # ``ci`` is the default, so a plain run, the pre-push hook and CI all execute the
