@@ -1,14 +1,24 @@
 import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
 
-/** The command categories and sandbox levels reported by agent/policy.py. */
+/**
+ * The command categories reported by agent/policy.py and where the action
+ * runs: a sandboxed or unsandboxed process, or a file change staged in the
+ * work copy with no process at all.
+ */
 export type ApprovalRequest = {
   command: string;
   cls: "inspect" | "build_test" | "mutate_workcopy" | "network" | "dangerous" | "ask";
   plain_text: string;
-  sandbox_level: "appcontainer" | "unsandboxed";
+  sandbox_level: "appcontainer" | "unsandboxed" | "workcopy";
   network: boolean;
 };
+
+const CONTEXT_BADGES = {
+  appcontainer: { label: "Sandboxed", tone: "success" },
+  workcopy: { label: "Work copy only", tone: "success" },
+  unsandboxed: { label: "Runs as you", tone: "danger" },
+} as const;
 
 export type ApprovalCardProps = {
   request: ApprovalRequest;
@@ -49,6 +59,8 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, allowAlways 
   // A later request with identical text must still obtain fresh consent.
   const requestKey = request;
   const dangerous = request.cls === "dangerous";
+  const fileChange = request.sandbox_level === "workcopy";
+  const badge = CONTEXT_BADGES[request.sandbox_level] ?? CONTEXT_BADGES.unsandboxed;
   const commandVisible = visibleCommandFor === requestKey;
   const reviewingDangerous = reviewingDangerousFor === requestKey;
   const dangerousConfirmed = reviewingDangerous && acknowledgedDangerousFor === requestKey;
@@ -94,21 +106,21 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, allowAlways 
       onOpenChange={(open) => { if (!open) setDismissedFor(requestKey); }}
     >
       <DialogContent ref={dialogRef} initialFocus={initialFocus} finalFocus={true} onKeyDownCapture={trapTab}>
-        <AlertDialog.Title>Allow this command?</AlertDialog.Title>
+        <AlertDialog.Title>{fileChange ? "Allow this change?" : "Allow this command?"}</AlertDialog.Title>
         <AlertDialog.Description className="delete-dialog-description">
           {request.plain_text}
         </AlertDialog.Description>
 
         <div role="group" aria-label="Execution context" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <span
-            className={`status-pill ${request.sandbox_level === "appcontainer" ? "status-success" : "status-danger"}`}
+            className={`status-pill status-${badge.tone}`}
             style={{
               padding: "0 8px",
               borderRadius: 999,
-              background: request.sandbox_level === "appcontainer" ? "var(--success-soft)" : "var(--danger-soft)",
+              background: `var(--${badge.tone}-soft)`,
             }}
           >
-            {request.sandbox_level === "appcontainer" ? "Sandboxed" : "Runs as you"}
+            {badge.label}
           </span>
           {request.network && (
             <span className="status-pill status-danger" style={{ padding: "0 8px", borderRadius: 999, background: "var(--danger-soft)" }}>
@@ -126,7 +138,9 @@ export function ApprovalCard({ request, onAllowOnce, onAlwaysAllow, allowAlways 
             aria-controls={commandVisible ? commandId : undefined}
             onClick={() => setVisibleCommandFor(commandVisible ? null : requestKey)}
           >
-            {commandVisible ? "Hide command" : "Show command"}
+            {commandVisible
+              ? (fileChange ? "Hide details" : "Hide command")
+              : (fileChange ? "Show details" : "Show command")}
           </button>
           {commandVisible && <pre id={commandId} style={commandStyle}><code>{request.command}</code></pre>}
         </div>
