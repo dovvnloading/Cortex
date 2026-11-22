@@ -232,6 +232,28 @@ def test_llamacpp_request_passes_through_tools_and_json_schema() -> None:
     assert {key: value for key, value in result.items() if key not in ("tools", "response_format")} == original
 
 
+def test_llamacpp_request_encodes_tool_call_arguments_for_openai_endpoint() -> None:
+    from cortex_backend.llamacpp.chat_client import _build_request_body
+
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": {"key": "ü"}}},
+            {"id": "c2", "type": "function", "function": {"name": "lookup", "arguments": '{"key": "b"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "name": "lookup", "content": "data"},
+    ]
+    before = json.loads(json.dumps(history))
+
+    body = _build_request_body(history, {}, stream=False)
+
+    calls = body["messages"][1]["tool_calls"]
+    assert [call["function"]["arguments"] for call in calls] == ['{"key": "ü"}', '{"key": "b"}']
+    assert [call["id"] for call in calls] == ["c1", "c2"]
+    assert body["messages"][0] == history[0] and body["messages"][2] == history[2]
+    assert history == before
+
+
 def test_nested_extra_fields_are_rejected_even_without_additional_properties_keyword() -> None:
     nested = ToolSpec("lookup", "lookup", {
         "type": "object", "properties": {"metadata": {
