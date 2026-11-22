@@ -144,6 +144,32 @@ describe("AgentPage", () => {
     await waitFor(() => expect(api.cancelAgentRun).toHaveBeenCalledWith("run-1"));
     expect(await screen.findByText("Run stopped")).toBeInTheDocument();
   });
+
+  it("refreshes run history when the active run finishes, without a manual Refresh", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    let listed: AgentRunResponse["status"] = "running";
+    api.agentRuns.mockImplementation(async () => ({ runs: [{ ...run, status: listed }] }));
+    api.startAgentRun.mockResolvedValue({ ...run, status: "running" });
+    let emit: ((event: AgentSSEEvent) => void) | null = null;
+    api.streamAgentRun.mockImplementation(async (_id: string, onEvent: (event: AgentSSEEvent) => void) => {
+      emit = onEvent;
+      return new Promise<void>(() => undefined);
+    });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const history = screen.getByRole("region", { name: "Agent run history" });
+    expect(await within(history).findByText("Running")).toBeInTheDocument();
+    await waitFor(() => expect(emit).not.toBeNull());
+
+    listed = "completed";
+    act(() => emit?.({ event_id: 1, run_id: "run-1", event: "status", data: { status: "completed" } }));
+
+    expect(await within(history).findByText("Completed")).toBeInTheDocument();
+    expect(within(history).queryByText("Running")).not.toBeInTheDocument();
+  });
+
   it("loads the changeset and renders the merged review for a finished run", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
