@@ -652,7 +652,27 @@ def _strip_unsupported_fields(messages: list[dict]) -> list[dict]:
     # already disables image attachments for them) -- drop any Ollama-shaped
     # "images" field defensively rather than forwarding it to an endpoint
     # that doesn't understand it.
-    return [{key: value for key, value in message.items() if key != "images"} for message in messages]
+    return [
+        _openai_tool_calls({key: value for key, value in message.items() if key != "images"})
+        for message in messages
+    ]
+
+
+def _openai_tool_calls(message: dict) -> dict:
+    # Cortex history uses Ollama's shape, where a tool call's arguments are an
+    # object; the OpenAI-compatible endpoint takes them as a JSON string.
+    # Strings pass through, and the caller's message is never mutated.
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list):
+        return message
+    encoded: list[Any] = []
+    for call in calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        if isinstance(function, dict) and isinstance(function.get("arguments"), dict):
+            arguments = json.dumps(function["arguments"], ensure_ascii=False)
+            call = {**call, "function": {**function, "arguments": arguments}}
+        encoded.append(call)
+    return {**message, "tool_calls": encoded}
 
 
 def _as_count(value: object) -> int | None:
