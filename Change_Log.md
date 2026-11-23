@@ -15,6 +15,14 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Changed
 
+- Replace the Cortex icon with a new mark: one strip, paper on one face and
+  copper on the other, makes a single half-twist and lays its end over its own
+  beginning -- a Möbius band that closes like an ouroboros, and whose loop
+  reads as a speech bubble. `tools/cortex_mark.py` generates
+  `assets/cortex.svg` from that geometry. At 36 px and below the SVG switches
+  to bolder proportions so the mark stays legible in the title bar and
+  taskbar, and `assets/cortex.ico` now has an exact frame for every size
+  Windows asks for, from 16 to 256 px (#572).
 - The Agent task benchmark reports elapsed minutes and provider-reported prompt
   and completion tokens per task; unavailable model usage is unknown, while
   deterministic `--check` explicitly reports zero. Read-and-answer now

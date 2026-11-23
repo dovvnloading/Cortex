@@ -7,7 +7,10 @@ const ROOT = path.resolve(__dirname, "..");
 const SOURCE = path.join(ROOT, "assets", "cortex.svg");
 const FRONTEND_ICON = path.join(ROOT, "frontend", "public", "cortex.svg");
 const WINDOWS_ICON = path.join(ROOT, "assets", "cortex.ico");
-const SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
+// Every size the Windows shell asks for at 100-400% scale (title bar, taskbar,
+// Start), so Windows picks an exact frame instead of resampling a neighbour.
+// assets/cortex.svg swaps to its small-size drawing at 36px and below.
+const SIZES = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 128, 256];
 
 function buildIco(images) {
   const headerSize = 6;
