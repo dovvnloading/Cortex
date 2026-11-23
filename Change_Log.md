@@ -39,6 +39,9 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
+- Refresh the README with an animated workspace tour and a Windows quick start.
+  Move model setup, Agent permissions and recovery instructions into the
+  [user guide](docs/user-guide.md).
 - Clarify that Agent mode has no general disk quota: Job Object process,
   memory and CPU-time limits and work-copy acceptance size checks do not
   prevent a sandboxed command from filling available disk space (#554).
