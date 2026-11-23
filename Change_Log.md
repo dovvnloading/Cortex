@@ -39,6 +39,12 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 
 ### Documentation
 
+- Rebuild the README around five sharp tour GIFs of the redesigned workspace:
+  chat, the command palette, models and parameters, approval-gated code and
+  Agent mode. They replace the single demo GIF. `tools/screenshots/tour.ps1`
+  records them from the real frontend against a demo workspace in which only
+  the model replies are scripted; Agent mode's work copy, approvals and the
+  restricted interpreter are Cortex's own.
 - Refresh the README with an animated workspace tour and a Windows quick start.
   Move model setup, Agent permissions and recovery instructions into the
   [user guide](docs/user-guide.md).

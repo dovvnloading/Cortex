@@ -40,6 +40,7 @@ from demo_server import (  # noqa: E402
 
 from cortex_backend.api import BackendDependencies, create_app  # noqa: E402
 from cortex_backend.core.settings import (  # noqa: E402
+    AgentSettings,
     AppearanceSettings,
     CortexSettings,
     ExecutionSettings,
@@ -328,6 +329,27 @@ MEMORIES = [
     "Ships on Windows first; the team's build machines are all Windows 11.",
 ]
 
+# What each demo model reports about itself. Without this the fake runtime gives
+# every model the same 8B details, and a 4B model would be labelled 8B.
+MODEL_DETAILS = {
+    "qwen3:8b": {
+        "details": {"family": "qwen3", "parameter_size": "8.2B", "quantization_level": "Q4_K_M"},
+        "model_info": {"qwen3.context_length": 40960},
+    },
+    "granite4.1:8b": {
+        "details": {"family": "granite", "parameter_size": "8.2B", "quantization_level": "Q4_K_M"},
+        "model_info": {"granite.context_length": 131072},
+    },
+    "nemotron-3-nano:4b": {
+        "details": {"family": "nemotron", "parameter_size": "4.0B", "quantization_level": "Q4_K_M"},
+        "model_info": {"nemotron.context_length": 131072},
+    },
+    "translategemma:4b": {
+        "details": {"family": "gemma3", "parameter_size": "4.3B", "quantization_level": "Q4_K_M"},
+        "model_info": {"gemma3.context_length": 131072},
+    },
+}
+
 # The filed library: groups in sidebar order, then everything else ungrouped.
 GROUPS = [
     (
@@ -366,17 +388,26 @@ def _code_payload(source: str, intent: str, **capabilities: bool) -> dict:
     }
 
 
-def stage_execution_tasks(coordinator: DurableFakeCoordinator) -> None:
-    """Put one task in front of the approval gate and one behind it.
+def stage_execution_tasks(
+    coordinator: DurableFakeCoordinator, *, include_completed: bool = True
+) -> None:
+    """Put one task in front of the approval gate and, optionally, one behind it.
 
     Staged on demand rather than at startup: the tray is a fixed overlay, so
-    every other capture would otherwise have it sitting on top.
+    every other capture would otherwise have it sitting on top. The README tour
+    stages only the pending task, so the result it shows is the one approved
+    on camera.
     """
     repository = coordinator.repository
     owner = repository.installation_principal_id
     if repository.get_job("code-loan-payment", owner=owner) is not None:
         return  # already staged
+    if include_completed:
+        _stage_completed_task(repository, owner)
+    _stage_pending_task(repository, owner)
 
+
+def _stage_completed_task(repository: ExecutionRepository, owner: str) -> None:
     # Finished earlier: approved, ran, returned output.
     repository.create_job(
         job_id="code-orders-above-average",
@@ -410,6 +441,8 @@ def stage_execution_tasks(coordinator: DurableFakeCoordinator) -> None:
         },
     )
 
+
+def _stage_pending_task(repository: ExecutionRepository, owner: str) -> None:
     # Waiting on the user right now.
     repository.create_job(
         job_id="code-loan-payment",
@@ -430,8 +463,21 @@ def stage_execution_tasks(coordinator: DurableFakeCoordinator) -> None:
     )
 
 
-def build_showcase_app(*, frontend_dist: Path, execution_dir: Path):
-    """Create the API with a fixed, fully staged workspace."""
+def build_showcase_app(
+    *,
+    frontend_dist: Path,
+    execution_dir: Path,
+    engine_factory=None,
+    translation_enabled: bool = True,
+    agent_enabled: bool = False,
+    **app_options,
+):
+    """Create the API with a fixed, fully staged workspace.
+
+    The README tour (``tour_server.py``) passes its own generation engine, turns
+    translation off so answers stream in English, turns Agent mode on, and hands
+    ``create_app`` an isolated Agent data folder and a scripted Agent model.
+    """
     chats = InMemoryChatRepository(_with_message_timestamps(CHATS))
     for group_id, name, members in GROUPS:
         chats.create_group(group_id, name)
@@ -454,11 +500,16 @@ def build_showcase_app(*, frontend_dist: Path, execution_dir: Path):
             ),
             execution=ExecutionSettings(automatic_compute=True, code_execution_enabled=True),
             memory=MemorySettings(enabled=True),
-            translation=TranslationSettings(enabled=True, target_language="Japanese"),
+            translation=TranslationSettings(enabled=translation_enabled, target_language="Japanese"),
+            agent=AgentSettings(enabled=agent_enabled),
         )
     )
 
-    state = FakeOllamaState(installed_models=set(INSTALLED_MODELS))
+    state = FakeOllamaState(
+        installed_models=set(INSTALLED_MODELS), model_details=dict(MODEL_DETAILS)
+    )
+    if engine_factory is None:
+        engine_factory = lambda snapshot: FakeGenerationEngine(state)  # noqa: E731
     dependencies = BackendDependencies(
         settings=settings,
         chats=chats,
@@ -467,7 +518,7 @@ def build_showcase_app(*, frontend_dist: Path, execution_dir: Path):
         generation=GenerationService(
             history_loader=lambda thread_id: (chats.get_chat(thread_id) or {}).get("messages", []),
             memory_loader=memories.get_memos,
-            engine_factory=lambda snapshot: FakeGenerationEngine(state),
+            engine_factory=engine_factory,
         ),
         attachments=ChatAttachmentService(),
     )
@@ -483,14 +534,16 @@ def build_showcase_app(*, frontend_dist: Path, execution_dir: Path):
         frontend_dist=frontend_dist,
         readiness_check=lambda: True,
         execution_coordinator=coordinator,
+        **app_options,
     )
+    app.state.showcase_coordinator = coordinator
 
     # The SPA fallback is GET-only, so a POST route registered afterwards still
     # wins the match. The capture driver calls this immediately before the
     # task-tray shots.
     @app.post("/showcase/execution/stage", include_in_schema=False)
-    def stage() -> dict:
-        stage_execution_tasks(coordinator)
+    def stage(completed: bool = True) -> dict:
+        stage_execution_tasks(coordinator, include_completed=completed)
         return {"staged": True}
 
     return app
