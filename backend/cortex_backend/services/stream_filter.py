@@ -32,6 +32,7 @@ early; the authoritative cleaning stays on the complete reply.
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 
 
 # Every block the cleaner strips, as (opening, closing) literals, compared
@@ -71,11 +72,20 @@ def _longest_partial_opening(text: str, envelopes: tuple[tuple[str, str], ...]) 
     generic, a snippet of markup) flows through as soon as it can no longer
     become one.
     """
-    folded = text.lower()
-    for start in range(max(0, len(folded) - _MAX_OPENING + 1), len(folded)):
-        candidate = folded[start:]
-        if any(opening.lower().startswith(candidate) for opening, _ in envelopes):
-            return len(folded) - start
+    # Match against the original characters, just as the complete-reply
+    # parser does. Unicode lowercasing can expand a character (for example,
+    # U+0130), and its matching rules differ from re.IGNORECASE.
+    tail = text[-(_MAX_OPENING - 1):]
+    for start, char in enumerate(tail):
+        if char != "<":
+            continue
+        candidate = tail[start:]
+        if any(
+            len(candidate) < len(opening)
+            and re.fullmatch(re.escape(opening[:len(candidate)]), candidate, re.IGNORECASE)
+            for opening, _ in envelopes
+        ):
+            return len(candidate)
     return 0
 
 
@@ -122,11 +132,11 @@ class EnvelopeStreamFilter:
     def _drain(self) -> None:
         while True:
             if self._closing is not None:
-                end = self._pending.lower().find(self._closing.lower())
-                if end == -1:
+                end = re.search(re.escape(self._closing), self._pending, re.IGNORECASE)
+                if end is None:
                     # Still inside a block: hold everything.
                     return
-                self._pending = self._pending[end + len(self._closing):]
+                self._pending = self._pending[end.end():]
                 self._closing = None
                 continue
 
@@ -161,19 +171,22 @@ class EnvelopeStreamFilter:
 
     def _next_opening(self) -> tuple[int, str | None, str | None]:
         """Find the earliest opening in the pending buffer, if any."""
-        folded = self._pending.lower()
         best_at = -1
         best: tuple[str, str] | None = None
         for opening, closing in _ENVELOPES:
-            at = folded.find(opening.lower())
-            if at != -1 and (best_at == -1 or at < best_at):
-                best_at, best = at, (opening, closing)
+            match = re.search(re.escape(opening), self._pending, re.IGNORECASE)
+            if match is not None and (best_at == -1 or match.start() < best_at):
+                best_at, best = match.start(), (opening, closing)
         if not self._answer_started:
             for opening, closing in _LEADING_ENVELOPES:
-                at = folded.find(opening.lower())
+                match = re.search(re.escape(opening), self._pending, re.IGNORECASE)
                 # Leading means nothing but whitespace before it.
-                if at != -1 and not folded[:at].strip() and (best_at == -1 or at < best_at):
-                    best_at, best = at, (opening, closing)
+                if (
+                    match is not None
+                    and not self._pending[:match.start()].strip()
+                    and (best_at == -1 or match.start() < best_at)
+                ):
+                    best_at, best = match.start(), (opening, closing)
         if best is None:
             return -1, None, None
         return best_at, best[0], best[1]

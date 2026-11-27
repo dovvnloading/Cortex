@@ -100,6 +100,13 @@ def test_nothing_is_emitted_for_an_envelope_only_reply() -> None:
 # IGNORECASE is deliberate there -- so the case variants below are real inputs.
 _CLEANED_REPLIES = [
     "Hello world, nothing to strip here.",
+    # Unicode case matching must agree with the complete-reply parser without
+    # shifting the offsets used to slice the original text.
+    "İstanbul.<memo>example</memo> Done.",
+    "Before.<memo>İİ</memo> After.",
+    "Before.<code_executİon_request>{}</code_execution_request> After.",
+    "<think>İİ</think>Answer.",
+    "<thınK>example</thİnk>Answer.",
     'Saved.<memory_command>{"add":["x"],"clear":false}</memory_command> Done.',
     'Saved.<MEMORY_COMMAND>{"add":["x"],"clear":false}</MEMORY_COMMAND> Done.',
     'Saved.<Memory_Command>{"add":["x"],"clear":false}</Memory_Command> Done.',

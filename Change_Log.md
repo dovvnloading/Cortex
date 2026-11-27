@@ -144,6 +144,9 @@ are named where they apply.
 
 ### Fixed
 
+- Preserve Unicode answer text while streaming: envelope recognition now uses
+  the finished-answer parser's case-insensitive matching on original text,
+  avoiding stray tags or lost characters at chunk boundaries (issue #573).
 Chat and streaming
 
 - Stop keeps the part of the answer already on screen instead of erasing it
