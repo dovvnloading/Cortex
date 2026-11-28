@@ -29,8 +29,13 @@ type StreamEvent = { event_id: number; event: string; data?: Record<string, unkn
 function handFedStream() {
   const encoder = new TextEncoder();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
-  const body = new ReadableStream<Uint8Array>({ start: (started) => { controller = started; } });
   let connectionLost = false;
+  const body = new ReadableStream<Uint8Array>({
+    start: (started) => { controller = started; },
+    // The client lets go of the stream once the job's terminal event arrives;
+    // after that, like a real server, the test's writes go nowhere.
+    cancel: () => { connectionLost = true; },
+  });
   return {
     body,
     // What a real fetch does when its signal aborts: the body errors out.
