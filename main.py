@@ -99,6 +99,10 @@ GRACEFUL_SHUTDOWN_SECONDS = 5
 SECOND_LAUNCH_WAIT_SECONDS = 90.0
 SECOND_LAUNCH_POLL_SECONDS = 1.0
 SECOND_LAUNCH_RETRY_SECONDS = 0.25
+# How long a launch that finds the lock held waits for the holder's record to
+# appear. The holder takes the lock first and publishes the record after
+# writing and securing the handoff secret, which takes well under a second.
+RECORD_PUBLICATION_WAIT_SECONDS = 10.0
 # Closing the window while Cortex is still starting cannot interrupt every step
 # (a frontend build, a migration), so teardown waits this long for the worker to
 # notice before it stops whatever exists.
@@ -897,11 +901,20 @@ def _acquire_or_hand_off(
     which is a failure of this launch and not a running instance to look for.
     """
     deadline = time.monotonic() + SECOND_LAUNCH_WAIT_SECONDS
+    publication_deadline = time.monotonic() + RECORD_PUBLICATION_WAIT_SECONDS
     while True:
         record = instance.acquire(port=port)
         if record is not None:
             return record, 0
         existing = instance.read_record()
+        if existing is None and time.monotonic() < publication_deadline:
+            # The holder takes the lock before it publishes its record, so a
+            # launch at the same moment finds the lock held and no record
+            # yet. That used to fail at once, with an error dialog, while the
+            # first launch went on to start normally. Retrying also takes the
+            # lock if the holder died before publishing.
+            time.sleep(SECOND_LAUNCH_RETRY_SECONDS)
+            continue
         if existing is None:
             return None, _fail(
                 "instance lock",
