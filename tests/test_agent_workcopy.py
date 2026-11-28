@@ -61,6 +61,48 @@ def test_non_git_copy_excludes_secrets_dependencies_and_gitignore(tmp_path: Path
     assert (root / "src" / "app.py").is_file()
 
 
+def test_ignored_generated_files_do_not_count_against_the_copy_limits(tmp_path: Path) -> None:
+    """#608: the whole project was read before the ignore rules applied, so
+    2,050 tiny ignored files hit the 2,048-file limit and no run could start."""
+    root = tmp_path / "project"
+    (root / "generated").mkdir(parents=True)
+    (root / "app.py").write_bytes(b"print('tracked')\n")
+    (root / ".gitignore").write_bytes(b"generated/\n")
+    for index in range(2050):
+        (root / "generated" / f"item{index}.json").write_bytes(b"{}")
+
+    work = _copy(tmp_path, root)
+    try:
+        assert (work.path / "app.py").read_bytes() == b"print('tracked')\n"
+        assert not (work.path / "generated").exists()
+        assert work.changeset() == {}
+    finally:
+        work.discard()
+
+
+def test_nested_ignore_rules_apply_below_their_folder_and_ignored_folders_stay_ignored(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    (root / "pkg" / "build").mkdir(parents=True)
+    (root / "pkg" / ".gitignore").write_bytes(b"*.gen.py\n")
+    (root / "pkg" / "keep.py").write_bytes(b"keep = 1\n")
+    (root / "pkg" / "out.gen.py").write_bytes(b"generated = 1\n")
+    (root / "top.gen.py").write_bytes(b"not under pkg = 1\n")
+    (root / ".gitignore").write_bytes(b"pkg/build/\n!pkg/build/wanted.py\n")
+    (root / "pkg" / "build" / "wanted.py").write_bytes(b"inside an ignored folder\n")
+
+    work = _copy(tmp_path, root)
+    try:
+        assert (work.path / "pkg" / "keep.py").is_file()
+        assert not (work.path / "pkg" / "out.gen.py").exists()
+        assert (work.path / "top.gen.py").is_file(), "a nested rule reached outside its folder"
+        # As in Git, a file in an ignored folder cannot be re-included.
+        assert not (work.path / "pkg" / "build").exists()
+    finally:
+        work.discard()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
 def test_git_worktree_includes_dirty_and_untracked_files_without_hooks_or_filters(tmp_path: Path) -> None:
     root = _project(tmp_path)

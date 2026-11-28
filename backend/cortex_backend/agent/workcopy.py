@@ -9,7 +9,7 @@ all accepted bytes are journaled before the first write for confirmed undo.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import difflib
 import fnmatch
@@ -244,6 +244,9 @@ def _purge(directory: Path, *, keep_gitfile: bool = False) -> None:
                 _purge_onexc(path, exc)
 
 
+_MAX_IGNORE_RULES = 2048
+
+
 def _rules(files: Mapping[str, _File]) -> tuple[_IgnoreRule, ...]:
     rules: list[_IgnoreRule] = []
     for path, item in sorted(files.items()):
@@ -263,9 +266,49 @@ def _rules(files: Mapping[str, _File]) -> tuple[_IgnoreRule, ...]:
                     directory, pattern.lstrip("/"), negated,
                     pattern.endswith("/"), pattern.startswith("/"),
                 ))
-                if len(rules) > 2048:
+                if len(rules) > _MAX_IGNORE_RULES:
                     raise WorkCopyError("ignore_limit")
     return tuple(rules)
+
+
+class _IgnoreDiscovery:
+    """Prune .gitignore'd paths while the source is walked, before they count.
+
+    The work copy used to read the whole project first and apply the ignore
+    rules afterwards, so an ignored generated folder with a few thousand
+    small files hit the source-file limit and the run could not start (#608).
+    A directory's .gitignore is read when the walk first reaches something in
+    it, and its rules then apply to everything below it, as in Git.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._loaded: set[str] = set()
+        self.rules: tuple[_IgnoreRule, ...] = ()
+
+    def _load(self, directory: str) -> None:
+        if directory in self._loaded:
+            return
+        self._loaded.add(directory)
+        relative = f"{directory}/.gitignore" if directory else ".gitignore"
+        item = _file_at(self._root, relative)
+        if item is None:
+            return
+        try:
+            found = _rules({relative: item})
+        except UnicodeError as exc:
+            raise WorkCopyError("unsafe_file") from exc
+        if len(self.rules) + len(found) > _MAX_IGNORE_RULES:
+            raise WorkCopyError("ignore_limit")
+        self.rules = (*self.rules, *found)
+
+    def __call__(self, relative: str, is_directory: bool) -> bool:
+        parts = relative.split("/")[:-1]
+        for depth in range(len(parts) + 1):
+            self._load("/".join(parts[:depth]))
+        if is_directory:
+            return _directory_ignored(relative, self.rules)
+        return _ignored(relative, self.rules)
 
 
 def _git_glob(value: str, pattern: str) -> bool:
@@ -292,7 +335,22 @@ def _git_glob(value: str, pattern: str) -> bool:
     return re.fullmatch("".join(expression), value) is not None
 
 
+def _directory_ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
+    """Whether a directory, or one of the directories above it, is ignored."""
+    parts = relative.split("/")
+    return any(_ignored_as("/".join(parts[:index]), True, rules) for index in range(1, len(parts) + 1))
+
+
 def _ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
+    # Git refuses to re-include a file in a still-ignored parent directory.
+    parts = relative.split("/")
+    return _ignored_as(relative, False, rules) or any(
+        _ignored_as("/".join(parts[:index]), True, rules)
+        for index in range(1, len(parts))
+    )
+
+
+def _ignored_as(path: str, directory: bool, rules: tuple[_IgnoreRule, ...]) -> bool:
     def matches(path: str, directory: bool) -> bool:
         ignored = False
         for rule in rules:
@@ -316,17 +374,24 @@ def _ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
                 ignored = not rule.negated
         return ignored
 
-    # Git refuses to re-include a file in a still-ignored parent directory.
-    parts = relative.split("/")
-    return matches(relative, False) or any(
-        matches("/".join(parts[:index]), True)
-        for index in range(1, len(parts))
-    )
+    return matches(path, directory)
 
 
-def _snapshot(root: Path, ignores: tuple[_IgnoreRule, ...] = ()) -> dict[str, _File]:
+def _snapshot(
+    root: Path,
+    ignores: tuple[_IgnoreRule, ...] = (),
+    *,
+    prune: Callable[[str, bool], bool] | None = None,
+) -> dict[str, _File]:
+    if prune is None and ignores:
+        def by_rules(relative: str, is_directory: bool) -> bool:
+            if is_directory:
+                return _directory_ignored(relative, ignores)
+            return _ignored(relative, ignores)
+
+        prune = by_rules
     try:
-        captured, total, _scanned, _skipped, truncated = _capture_files(root)
+        captured, total, _scanned, _skipped, truncated = _capture_files(root, prune)
     except WorkspaceAccessError as exc:
         raise WorkCopyError("scan_failed") from exc
     if truncated:
@@ -565,9 +630,10 @@ class WorkCopy:
         _refuse_external_git_includes(root)
         root_info = root.lstat()
         root_identity = (root_info.st_dev, root_info.st_ino)
-        source = _snapshot(root)
+        discovery = _IgnoreDiscovery(root)
+        source = _snapshot(root, prune=discovery)
         _check_root(root, root_identity)
-        ignores = _rules(source)
+        ignores = discovery.rules
         source = {p: item for p, item in source.items() if not _ignored(p, ignores)}
         head = _head(root)
         _check_root(root, root_identity)
