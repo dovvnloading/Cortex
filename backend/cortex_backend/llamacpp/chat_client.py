@@ -16,10 +16,10 @@ import json
 import logging
 import ssl
 import time
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock
 from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import httpx
@@ -30,6 +30,7 @@ from cortex_backend.services.sse import sse_payloads
 from .errors import LlamaCppError
 from .model_directory import resolve_gguf_path
 from .server_manager import LlamaServerProvider
+from .stoppable_http import StoppedBeforeResponse, open_unless_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -38,75 +39,6 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
 # Counting tokens is a single short request; a server that does not answer it
 # quickly is not worth waiting for before the real one.
 _TOKENIZE_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=10.0, pool=2.0)
-
-class _StoppedBeforeResponse(Exception):
-    """Stop came while a request was still waiting for its response headers."""
-
-
-@contextmanager
-def _open_unless_stopped(
-    open_stream: Callable[[], AbstractContextManager[httpx.Response]],
-    cancellation_event: Event | None,
-    *,
-    name: str,
-) -> Iterator[httpx.Response]:
-    """Enter a streamed request while Stop can still end the wait for headers.
-
-    Entering ``httpx.Client.stream`` sends the request and blocks until the
-    response headers arrive. Until then there is no response for the Stop
-    watcher to close, so a busy or stalled server held the caller for the
-    whole read timeout (600 s for chat). The entry runs on a helper thread
-    instead: if Stop comes first this raises ``_StoppedBeforeResponse`` at
-    once, and the helper closes the response the moment its headers do
-    arrive, or simply ends with its error.
-    """
-
-    if cancellation_event is None:
-        with open_stream() as response:
-            yield response
-        return
-    lock = Lock()
-    entered = Event()
-    state: dict[str, Any] = {"abandoned": False}
-
-    def enter() -> None:
-        try:
-            manager = open_stream()
-            response = manager.__enter__()
-        except BaseException as exc:  # handed to the caller, or dropped if abandoned
-            state["error"] = exc
-            entered.set()
-            return
-        with lock:
-            state["manager"] = manager
-            state["response"] = response
-            abandoned = state["abandoned"]
-        entered.set()
-        if abandoned:
-            try:
-                manager.__exit__(None, None, None)
-            except Exception:
-                pass
-
-    Thread(target=enter, name=name, daemon=True).start()
-    while not entered.wait(0.05):
-        if cancellation_event.is_set():
-            with lock:
-                if "response" not in state and "error" not in state:
-                    state["abandoned"] = True
-            if state["abandoned"]:
-                raise _StoppedBeforeResponse()
-    if "error" in state:
-        raise state["error"]
-    manager = state["manager"]
-    try:
-        yield state["response"]
-    except BaseException as exc:
-        if not manager.__exit__(type(exc), exc, exc.__traceback__):
-            raise
-    else:
-        manager.__exit__(None, None, None)
-
 
 _Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
@@ -346,7 +278,7 @@ class LlamaCppChatClient:
         except Exception:
             return None
         try:
-            with _open_unless_stopped(
+            with open_unless_stopped(
                 lambda: self._http.stream(
                     "POST",
                     f"{handle.base_url}/tokenize",
@@ -354,7 +286,7 @@ class LlamaCppChatClient:
                     headers=_auth_headers(handle.api_key),
                     timeout=_TOKENIZE_TIMEOUT,
                 ),
-                cancellation_event,
+                cancellation_event.is_set if cancellation_event is not None else None,
                 name="llama-tokenize-open",
             ) as response:
                 # Closing the response is what unblocks a read in flight, the
@@ -371,7 +303,7 @@ class LlamaCppChatClient:
                     response.read()
                     tokens = response.json().get("tokens")
         except (
-            _StoppedBeforeResponse, httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError,
+            StoppedBeforeResponse, httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError,
         ):
             return None
         finally:
@@ -452,14 +384,14 @@ class LlamaCppChatClient:
         done_received = False
         self._begin_http_request()
         try:
-            with _open_unless_stopped(
+            with open_unless_stopped(
                 lambda: self._http.stream(
                     "POST",
                     f"{base_url}/v1/chat/completions",
                     json=body,
                     headers=_auth_headers(api_key),
                 ),
-                cancellation_event,
+                cancellation_event.is_set,
                 name="llama-chat-open",
             ) as response:
                 try:
@@ -556,7 +488,7 @@ class LlamaCppChatClient:
                         # surfacing.
                         if not cancellation_event.is_set():
                             raise
-        except _StoppedBeforeResponse:
+        except StoppedBeforeResponse:
             # Stopped before the server answered at all: nothing was received,
             # and the stopped reply below is simply empty.
             pass
