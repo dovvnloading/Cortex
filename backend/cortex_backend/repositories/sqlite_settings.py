@@ -67,6 +67,12 @@ _WRITE_LOCKS_GUARD = Lock()
 _WRITE_LOCKS: dict[str, RLock] = {}
 
 
+def _revision_conflict(expected: int, found: int) -> SettingsRevisionConflict:
+    return SettingsRevisionConflict(
+        f"Settings revision changed (expected {expected}, found {found})."
+    )
+
+
 def _without_retired_keys(payload: str) -> dict:
     """Decode a stored settings payload, dropping sections since removed."""
     decoded = json.loads(payload)
@@ -768,6 +774,19 @@ class SQLiteSettingsRepository:
                 raise
             self._ensure_schema()
 
+    def _stored_revision(self) -> int:
+        """The revision of the stored settings; 0 when nothing is stored yet."""
+        try:
+            with self.connect() as connection:
+                row = connection.execute(
+                    "SELECT revision FROM cortex_settings WHERE id = 1"
+                ).fetchone()
+        except SettingsRepositoryError:
+            raise
+        except Exception as exc:
+            raise SettingsRepositoryError("Could not save Cortex settings.") from exc
+        return int(row[0]) if row is not None else 0
+
     def _read_row(self) -> tuple[CortexSettings, str] | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -920,6 +939,18 @@ class SQLiteSettingsRepository:
         if expected_revision is not None and settings.revision != expected_revision + 1:
             raise ValueError("settings revision must be expected_revision + 1")
         with self._write_lock:
+            if expected_revision is not None:
+                # A stale save is refused before the backups rotate. Checking
+                # only in the write transaction below let every rejected save
+                # still publish a snapshot and push the older one out: two
+                # stale saves left both recovery slots holding the live
+                # settings, and the earlier generations were gone though
+                # nothing had changed. The write lock keeps this process's
+                # saves from moving the revision in between; the guarded
+                # UPDATE below still catches another process.
+                found = self._stored_revision()
+                if found != expected_revision:
+                    raise _revision_conflict(expected_revision, found)
             # Unlike the startup backup this stays fatal: a save is an explicit
             # user action with an error path, and writing without the rollback
             # copy the caller expects is not a safe default.
@@ -979,10 +1010,8 @@ class SQLiteSettingsRepository:
                     actual = connection.execute(
                         "SELECT revision FROM cortex_settings WHERE id = 1"
                     ).fetchone()
-                    found = int(actual[0]) if actual is not None else 0
-                    raise SettingsRevisionConflict(
-                        "Settings revision changed "
-                        f"(expected {expected_revision}, found {found})."
+                    raise _revision_conflict(
+                        expected_revision, int(actual[0]) if actual is not None else 0
                     )
             except SettingsRevisionConflict:
                 raise
