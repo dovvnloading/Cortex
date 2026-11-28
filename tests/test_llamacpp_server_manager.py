@@ -1034,6 +1034,63 @@ def test_known_bad_backend_marker_does_not_affect_a_different_model_or_context(t
     assert fetcher3.ensure_binary_calls == ["vulkan"]
 
 
+def test_known_bad_backend_marker_is_scoped_to_the_launch_options(tmp_path: Path) -> None:
+    """Changing the advanced options that broke the GPU build left Auto on cpu (#640)."""
+    model_path = tmp_path / "model.gguf"
+    failing = ("--cache-type-k", "q8_0")
+    working = ("--cache-type-k", "f16")
+
+    # Options A: the GPU build fails, cpu takes over, and that is remembered.
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(exit_immediately=True), _FakePopen()])
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient(),
+        gpu_backend="auto", extra_args=lambda: failing,
+    )
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher.ensure_binary_calls == ["vulkan", "cpu"]
+
+    # Options B: the GPU build is tried again.
+    fetcher_b = _FakeFetcher()
+    manager_b = _manager(
+        tmp_path, fetcher=fetcher_b, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto", extra_args=lambda: working,
+    )
+    manager_b.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher_b.ensure_binary_calls == ["vulkan"]
+
+    # Options A again (marker still in force): straight to cpu.
+    fetcher_a = _FakeFetcher()
+    manager_a = _manager(
+        tmp_path, fetcher=fetcher_a, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto", extra_args=lambda: failing,
+    )
+    manager_a.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher_a.ensure_binary_calls == ["cpu"]
+
+
+def test_a_marker_written_before_options_were_recorded_matches_nothing(tmp_path: Path) -> None:
+    (tmp_path / "preferred_gpu_backend.json").write_text(
+        json.dumps({
+            "known_bad": "vulkan",
+            "model": str(tmp_path / "model.gguf"),
+            "num_ctx": 4096,
+            "release": None,
+            "at": time.time(),
+        }),
+        encoding="utf-8",
+    )
+    fetcher = _FakeFetcher()
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto",
+    )
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
+
+
 def test_known_bad_backend_marker_expires(tmp_path: Path) -> None:
     """A stale marker (past the TTL) must not permanently pin cpu -- a
     driver update or freed VRAM deserves a retry rather than an indefinite,
