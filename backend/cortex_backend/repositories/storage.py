@@ -55,6 +55,22 @@ from cortex_backend.repositories.sqlite_schema import (
 )
 
 
+def _parse_stored_json(text: str | bytes) -> object:
+    """Parse JSON read from a file on disk; any parse failure is a ValueError.
+
+    The decoder recurses once per nesting level, so a few thousand ``[`` --
+    far under any byte ceiling -- raise RecursionError. No recovery path
+    expects that: a damaged memory file stopped startup before its intact
+    backup was tried, and one such legacy chat file aborted the migration
+    instead of being quarantined. As a ValueError it takes the path every
+    other unreadable file takes.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError:
+        raise ValueError("stored JSON nests too deeply") from None
+
+
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO string that says it is UTC.
 
@@ -1242,7 +1258,7 @@ class DatabaseManager:
             payload = stream.read(MAX_LEGACY_CHAT_FILE_BYTES + 1)
         if len(payload) > MAX_LEGACY_CHAT_FILE_BYTES:
             raise ValueError("legacy chat file exceeds the supported size")
-        return json.loads(payload.decode('utf-8'))
+        return _parse_stored_json(payload.decode('utf-8'))
 
     def _quarantine_legacy_file(self, file_path: str) -> str:
         quarantine_dir = os.path.join(self.legacy_history_dir, 'quarantine')
@@ -2161,7 +2177,7 @@ class PermanentMemoryManager:
     @classmethod
     def _read_memos(cls, path: str) -> list[str]:
         with open(path, encoding='utf-8') as stream:
-            return cls._validate_memo_data(json.load(stream))
+            return cls._validate_memo_data(_parse_stored_json(stream.read()))
 
     @classmethod
     def _atomic_copy_memos(cls, source: str, destination: str) -> None:
@@ -2367,7 +2383,7 @@ class PermanentMemoryManager:
                 os.fsync(stream.fileno())
 
             with open(temporary_path, encoding='utf-8') as stream:
-                self._validate_memo_data(json.load(stream))
+                self._validate_memo_data(_parse_stored_json(stream.read()))
             self._prepare_primary_for_save()
             if os.path.exists(self.memory_file_path):
                 self._atomic_copy_memos(self.memory_file_path, self.backup_file_path)
