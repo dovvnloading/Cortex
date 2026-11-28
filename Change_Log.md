@@ -37,6 +37,14 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   journals, authenticated recovery/workspace APIs and the read-only CLI
   remain available without data migration or automatic source writes.
 
+### Fixed
+
+- The release-signing script no longer deletes an existing `-WorkDirectory`:
+  it accepts only a new or empty directory and by default uses a fresh one per
+  run. It refuses a release that is not a draft before downloading anything,
+  and checks again right before upload that the tag still names the same draft
+  (#704, #705; #724).
+
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
