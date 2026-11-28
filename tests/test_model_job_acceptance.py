@@ -19,7 +19,7 @@ def test_replay_gguf_download_returns_the_original_job_without_a_second_transfer
     entered, release = Event(), Event()
     transfers: list[str] = []
 
-    def fake_download(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download(url, filename, directory, *, progress_callback=None, cancellation_event=None, commit=None):
         del url, progress_callback, cancellation_event
         transfers.append(filename)
         entered.set()

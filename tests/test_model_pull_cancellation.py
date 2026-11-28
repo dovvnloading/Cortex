@@ -140,3 +140,106 @@ def test_cancelled_model_pull_job_frees_models_slot_for_the_next_pull():
     finally:
         slow.close()
         fast.close()
+
+
+class _InventoryWithout:
+    """A shared client whose inventory never lists the pulled tag."""
+
+    def list(self):
+        return {"models": [{"name": "other:latest"}]}
+
+    def pull(self, *_args, **_kwargs):
+        raise AssertionError("The shared inventory client must not pull a model.")
+
+    def show(self, _model):
+        return {"capabilities": []}
+
+
+def test_a_pull_whose_tag_is_then_missing_fails_instead_of_succeeding():
+    """Verification failure returned the same False as Stop, and was recorded as success (#628)."""
+
+    dependencies = build_demo_dependencies()
+    dependencies.models = ModelService(
+        _InventoryWithout(), pull_client_factory=lambda: _DedicatedGateway(blocks=False)
+    )
+    app = create_app(dependencies, allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        accepted = client.post("/api/v1/models/pulls", json={"model": "example:latest"}, headers=headers)
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+
+        def finished():
+            body = client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()
+            return body if body["status"] in {"succeeded", "failed", "cancelled"} else None
+
+        wait_until(lambda: finished() is not None, describe="the pull job to finish")
+        body = finished()
+
+    assert body["status"] == "failed"
+    assert "does not list the requested tag" in (body.get("error") or "")
+
+
+class _StalledInventory:
+    """A shared client whose inventory read hangs until released."""
+
+    def __init__(self):
+        self.reading = Event()
+        self.release = Event()
+
+    def list(self):
+        self.reading.set()
+        self.release.wait(timeout=10)
+        return {"models": []}
+
+    def pull(self, *_args, **_kwargs):
+        raise AssertionError("The shared inventory client must not pull a model.")
+
+    def show(self, _model):
+        return {"capabilities": []}
+
+
+def test_stop_ends_a_model_check_stalled_on_the_inventory_read():
+    """The check's inventory read could not be interrupted by Stop (#629)."""
+
+    stalled = _StalledInventory()
+    service = ModelService(stalled)
+    cancel = Event()
+    result = []
+    worker = Thread(
+        target=lambda: result.append(
+            service.check(required_models=["fast:latest"], cancellation_event=cancel)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert stalled.reading.wait(timeout=5)
+        cancel.set()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), "Stop must end the check without waiting for the read"
+        assert result[0].details == "cancelled"
+    finally:
+        stalled.release.set()
+
+
+def test_stop_ends_a_pull_stalled_on_its_final_verification():
+    stalled = _StalledInventory()
+    service = ModelService(stalled, pull_client_factory=lambda: _DedicatedGateway(blocks=False))
+    cancel = Event()
+    result = []
+    worker = Thread(
+        target=lambda: result.append(
+            service.pull_model("fast:latest", cancellation_event=cancel, verify=True)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert stalled.reading.wait(timeout=5)
+        cancel.set()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive()
+        assert result == [False]
+    finally:
+        stalled.release.set()

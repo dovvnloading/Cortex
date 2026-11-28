@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 import logging
 from threading import Event, Thread
+import time
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,19 @@ def _field(item: object, name: str) -> Any:
     if isinstance(item, Mapping):
         return item.get(name)
     return getattr(item, name, None)
+
+
+# How long a turn waits to learn whether Ollama must load its model first. The
+# answer only decides whether a "Loading ..." notice is shown.
+_RESIDENCY_PROBE_SECONDS = 2.0
+
+
+def _cancelled_reply() -> dict[str, Any]:
+    return {
+        "message": {"content": "", "thinking": None},
+        "done": True,
+        "done_reason": "cancelled",
+    }
 
 
 def _resident_model_names(response: object) -> set[str] | None:
@@ -249,7 +263,7 @@ class OllamaChatClient:
         """
         self._status_callback = callback
 
-    def _announce_model_load(self, model: str) -> None:
+    def _announce_model_load(self, model: str, cancellation_event: Event | None = None) -> None:
         """Tell the status hook when ``model`` is not among the models Ollama has loaded.
 
         Best effort, and only when someone is listening: it costs one small
@@ -257,19 +271,46 @@ class OllamaChatClient:
         unreachable, an answer of an unexpected shape) reports nothing rather
         than guess. The chat call that follows is the one that reports a real
         failure.
+
+        The question goes through the shared client, whose read timeout is
+        long (ten minutes), and nothing watched Stop while it waited: a stalled
+        ``/api/ps`` held the turn in "cancelling" and the generation slot with
+        it. It now runs on a helper thread; this gives up waiting after
+        ``_RESIDENCY_PROBE_SECONDS``, or at once on Stop, and the turn carries
+        on (or ends) without the notice. The shared client is not closed: the
+        abandoned question finishes or times out on its own.
         """
         callback = self._status_callback
         ps = getattr(self._client, "ps", None)
         if callback is None or not callable(ps):
             return
-        try:
-            resident = _resident_model_names(ps())
-        except Exception as exc:
+        outcome: dict[str, Any] = {}
+        answered = Event()
+
+        def ask() -> None:
+            try:
+                outcome["resident"] = _resident_model_names(ps())
+            except Exception as exc:  # reported below, by type only
+                outcome["error"] = exc
+            finally:
+                answered.set()
+
+        Thread(target=ask, name="ollama-residency-probe", daemon=True).start()
+        deadline = time.monotonic() + _RESIDENCY_PROBE_SECONDS
+        while not answered.wait(0.05):
+            if cancellation_event is not None and cancellation_event.is_set():
+                return
+            if time.monotonic() >= deadline:
+                logger.info("Ollama did not say which models are loaded in time; carrying on.")
+                return
+        if "error" in outcome:
             # Only the type: a transport error can carry the address it used.
             logger.warning(
-                "Cortex could not ask Ollama which models are loaded (%s).", type(exc).__name__
+                "Cortex could not ask Ollama which models are loaded (%s).",
+                type(outcome["error"]).__name__,
             )
             return
+        resident = outcome.get("resident")
         if resident is None or any(_same_model_tag(model, name) for name in resident):
             return
         callback(f"Loading {model} into Ollama...")
@@ -305,12 +346,11 @@ class OllamaChatClient:
             # loop below can only check between chunks -- and on a cold or
             # large model that is seconds of the user staring at a Stop they
             # already pressed. LlamaCppChatClient answers the same way.
-            return {
-                "message": {"content": "", "thinking": None},
-                "done": True,
-                "done_reason": "cancelled",
-            }
-        self._announce_model_load(model)
+            return _cancelled_reply()
+        self._announce_model_load(model, cancellation_event)
+        if cancellation_event is not None and cancellation_event.is_set():
+            # Stop came while Ollama was being asked what it has loaded.
+            return _cancelled_reply()
         if cancellation_event is None and on_delta is None:
             return self._client.chat(model=model, messages=messages, options=options, **extra)
         # A call Stop can reach streams through a client of its own so that
@@ -393,6 +433,11 @@ class OllamaChatClient:
                         tool_calls.extend(chunk_calls)
                     if _field(chunk, "done"):
                         final = dict(chunk) if isinstance(chunk, Mapping) else chunk.model_dump()
+                        # The terminal frame completes the answer. Reading on
+                        # waited for the connection to close: one left open
+                        # held a finished answer until the read timed out,
+                        # and that timeout was then raised as a failure.
+                        break
             except Exception:
                 # Closing the client under a blocked read is how Stop reaches
                 # it, and the transport reports that however it chooses (a read
