@@ -242,6 +242,60 @@ def _frontend_build_lock(frontend_root: Path):
         handle.close()
 
 
+_DIST_BACKUP_PREFIX = ".cortex-dist-backup-"
+
+
+def _recover_stranded_dist(frontend_root: Path) -> None:
+    """Restore a bundle an interrupted publication set aside; call holding the build lock.
+
+    Publishing renames the live ``dist`` to a backup and then the new bundle
+    into place, putting the backup back only from the same process. One
+    killed between the two renames left no ``dist`` and the last working
+    bundle under a backup name nothing read again: ``--skip-build-check``,
+    or a launch whose rebuild then failed, could not start, and the backups
+    were never removed. The newest complete backup becomes ``dist`` again;
+    leftover backups are removed only once a complete ``dist`` is in place,
+    since until then one of them may be the only working bundle.
+    """
+    dist = frontend_root / "dist"
+    try:
+        backups = sorted(
+            (path for path in frontend_root.glob(f"{_DIST_BACKUP_PREFIX}*") if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        logger.warning("Could not look for frontend bundles set aside by a build: %s", exc)
+        return
+    if not backups:
+        return
+    if not dist.exists():
+        for candidate in backups:
+            if not (candidate / "index.html").is_file():
+                continue
+            try:
+                os.replace(candidate, dist)
+            except OSError as exc:
+                logger.warning("Could not restore the previous frontend bundle: %s", exc)
+                return
+            logger.warning("Restored the previous frontend bundle after an interrupted build.")
+            break
+    if not (dist / "index.html").is_file():
+        return
+    for candidate in backups:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _recover_stranded_dist_unless_building(frontend_root: Path) -> None:
+    """``_recover_stranded_dist`` under the build lock; a build in progress is left to finish its own."""
+    try:
+        with _frontend_build_lock(frontend_root):
+            _recover_stranded_dist(frontend_root)
+    except FrontendBuildError:
+        pass
+
+
 def _reclaim_stale_staging_directories(parent: Path, keep: Path) -> None:
     """Remove staging directories orphaned by a crashed or killed build."""
     try:
@@ -396,10 +450,11 @@ def build_frontend(
     if not (frontend_root / "package.json").is_file():
         raise FrontendBuildError("frontend/package.json is missing from the source checkout.")
     with _frontend_build_lock(frontend_root):
+        _recover_stranded_dist(frontend_root)
         build_root = _stage_frontend_source(frontend_root)
         staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
         dist = frontend_root / "dist"
-        backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
+        backup = frontend_root / f"{_DIST_BACKUP_PREFIX}{uuid.uuid4().hex}"
         try:
             lock = lock_digest(build_root)
             source = source_digest(build_root)
@@ -463,6 +518,7 @@ def ensure_frontend(
         if not (dist / "index.html").is_file():
             raise FrontendBuildError("Packaged Cortex is missing its frontend bundle.")
         return dist
+    _recover_stranded_dist_unless_building(frontend_root)
     if skip_check:
         if not (dist / "index.html").is_file():
             raise FrontendBuildError("--skip-build-check requested but frontend/dist is missing.")

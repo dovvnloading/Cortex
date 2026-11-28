@@ -2342,6 +2342,75 @@ def test_a_changed_imported_asset_invalidates_the_bundle(tmp_path: Path, asset: 
     assert frontend_module.source_digest(root) != before
 
 
+def _set_aside_bundle(root: Path, name: str, content: str | None, *, age: float = 0.0) -> Path:
+    """A bundle as a publication leaves it: renamed out of dist, maybe never put back."""
+    backup = root / f".cortex-dist-backup-{name}"
+    backup.mkdir()
+    if content is not None:
+        (backup / "index.html").write_text(content, encoding="utf-8")
+    stamp = time.time() - age
+    os.utime(backup, (stamp, stamp))
+    return backup
+
+
+def test_a_bundle_stranded_by_an_interrupted_publication_is_restored(tmp_path: Path):
+    """#669: killed between moving dist aside and moving the new bundle in,
+    a build left no dist and --skip-build-check could not start."""
+    root = _frontend_fixture(tmp_path)
+    backup = _set_aside_bundle(root, "a" * 32, "last working bundle")
+
+    dist = frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (dist / "index.html").read_text(encoding="utf-8") == "last working bundle"
+    assert not backup.exists()
+
+
+def test_leftover_bundles_are_removed_once_a_working_dist_is_in_place(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    (root / "dist").mkdir()
+    (root / "dist" / "index.html").write_text("current", encoding="utf-8")
+    leftover = _set_aside_bundle(root, "b" * 32, "older")
+
+    frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (root / "dist" / "index.html").read_text(encoding="utf-8") == "current"
+    assert not leftover.exists()
+
+
+def test_the_newest_complete_bundle_is_the_one_restored(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    _set_aside_bundle(root, "c" * 32, "oldest", age=300)
+    _set_aside_bundle(root, "d" * 32, None, age=0)  # newest, but never completed
+    _set_aside_bundle(root, "e" * 32, "newest complete", age=60)
+
+    dist = frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (dist / "index.html").read_text(encoding="utf-8") == "newest complete"
+    assert not list(root.glob(".cortex-dist-backup-*"))
+
+
+def test_an_incomplete_bundle_is_never_made_the_live_one(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    incomplete = _set_aside_bundle(root, "f" * 32, None)
+
+    with pytest.raises(FrontendBuildError, match="frontend/dist is missing"):
+        frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert incomplete.exists(), "a bundle set aside is kept while there is no working dist"
+    assert not (root / "dist").exists()
+
+
+def test_a_build_in_progress_is_left_to_finish_its_own_publication(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    in_flight = _set_aside_bundle(root, "0" * 32, "being replaced right now")
+
+    with frontend_module._frontend_build_lock(root):
+        with pytest.raises(FrontendBuildError, match="frontend/dist is missing"):
+            frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert in_flight.exists()
+
+
 def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _frontend_fixture(tmp_path)
     monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
