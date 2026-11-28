@@ -37,6 +37,12 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   journals, authenticated recovery/workspace APIs and the read-only CLI
   remain available without data migration or automatic source writes.
 
+### Fixed
+
+- The README tour recorder no longer deletes an existing `csv-importer`
+  folder under `-ProjectParent`: it refuses to start instead, and on exit it
+  removes only the sample project it created (#706; #726).
+
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
