@@ -2355,9 +2355,11 @@ class PermanentMemoryManager:
     def _save_memos(self):
         """Validate and atomically replace the memory file, retaining a backup."""
         directory = os.path.dirname(os.path.abspath(self.memory_file_path))
-        os.makedirs(directory, exist_ok=True)
         temporary_path = None
         try:
+            # Inside the try: a folder that cannot be created is a failed save
+            # like any other, so the caller restores the list it changed.
+            os.makedirs(directory, exist_ok=True)
             fd, temporary_path = tempfile.mkstemp(
                 prefix=f"{os.path.basename(self.memory_file_path)}.",
                 suffix='.tmp',
@@ -2413,7 +2415,8 @@ class PermanentMemoryManager:
             self.memos = normalized
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
 
@@ -2443,7 +2446,8 @@ class PermanentMemoryManager:
             self.memos = self.normalize_memos(memos)
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
             logging.info("Permanent memory updated with %s memos.", len(self.memos))
@@ -2455,6 +2459,7 @@ class PermanentMemoryManager:
             self.memos.clear()
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
