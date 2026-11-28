@@ -1109,3 +1109,65 @@ def test_expired_previous_document_refuses_uninformed_followup(
             },
         )
         assert recovered.status_code == 202, recovered.text
+
+
+# --- names and signatures classify documents and images correctly (#633-#635) --
+
+
+@pytest.mark.parametrize("name", [".gitignore", ".env", ".editorconfig", ".dockerignore", ".gitattributes"])
+def test_allowlisted_dotfiles_are_staged_under_their_own_name(name: str) -> None:
+    """The leading dot was stripped, so these names never reached their allowlist (#633)."""
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id=f"dot-{name.strip('.')}", filename=name, content=b"build/\n",
+    )
+
+    assert descriptor.filename == name
+    assert descriptor.kind == "document"
+
+
+def test_trailing_dots_and_spaces_are_still_trimmed() -> None:
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="trailing", filename="notes.txt. ", content=b"text\n",
+    )
+
+    assert descriptor.filename == "notes.txt"
+
+
+def test_a_text_file_that_starts_with_bm_is_a_document() -> None:
+    """Two letters were read as a BMP signature and the document rejected (#634)."""
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="bm-text", filename="notes.txt",
+        content=b"BMP image conversion notes\n",
+    )
+
+    assert descriptor.kind == "document"
+
+
+def test_a_real_bitmap_is_still_an_image() -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buffer, "BMP")
+
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="real-bmp", filename="picture.bmp", content=buffer.getvalue(),
+    )
+
+    assert descriptor.kind == "image"
+    assert descriptor.mime_type == "image/bmp"
+
+
+def test_a_truncated_jpeg_is_refused_at_upload() -> None:
+    """verify() passed a JPEG cut short; it failed later, at generation (#635)."""
+    buffer = BytesIO()
+    Image.new("RGB", (128, 128), "red").save(buffer, "JPEG")
+    # Without its last bytes (the end-of-image marker) verify() still passes;
+    # decoding the pixels does not.
+    truncated = buffer.getvalue()[:-2]
+    with Image.open(BytesIO(truncated)) as probe:
+        probe.verify()
+
+    with pytest.raises(ChatAttachmentError) as error:
+        ChatAttachmentService().stage(
+            owner="installation-a", request_id="truncated-jpeg", filename="image.jpg", content=truncated,
+        )
+
+    assert error.value.code == "attachment_image_invalid"

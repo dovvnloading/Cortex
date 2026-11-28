@@ -62,10 +62,13 @@ _IMAGE_SIGNATURES = (
     (b"\xff\xd8\xff", "image/jpeg", "jpeg"),
     (b"GIF87a", "image/gif", "gif"),
     (b"GIF89a", "image/gif", "gif"),
-    (b"BM", "image/bmp", "bmp"),
     (b"II*\x00", "image/tiff", "tiff"),
     (b"MM\x00*", "image/tiff", "tiff"),
 )
+# "BM" alone is two ordinary letters ("BMP conversion notes"), so a BMP is
+# recognised by its header: "BM", then at offset 14 the size of one of the DIB
+# headers a real bitmap uses.
+_BMP_DIB_HEADER_SIZES = frozenset({12, 40, 52, 56, 64, 108, 124})
 _TEXT_EXTENSIONS = frozenset(
     {
         ".asm", ".bash", ".bat", ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs",
@@ -170,7 +173,9 @@ def _safe_filename(value: str) -> str:
     normalized = normalize("NFKC", value).replace("\\", "/")
     name = PurePath(normalized).name
     name = "".join(character for character in name if ord(character) not in _CONTROL)
-    name = " ".join(name.split()).strip(" .")
+    # Trailing dots and spaces go (Windows drops them anyway); a leading dot
+    # stays, because it is the name: ".gitignore" and ".env" are documents.
+    name = " ".join(name.split()).rstrip(" .")
     if not name or name in {".", ".."} or len(name) > 180:
         raise ChatAttachmentError("attachment_filename_invalid")
     return name
@@ -203,6 +208,12 @@ def image_type(content: bytes) -> tuple[str, str] | None:
     for signature, mime_type, extension in _IMAGE_SIGNATURES:
         if content.startswith(signature):
             return mime_type, extension
+    if (
+        len(content) >= 18
+        and content[:2] == b"BM"
+        and int.from_bytes(content[14:18], "little") in _BMP_DIB_HEADER_SIZES
+    ):
+        return "image/bmp", "bmp"
     if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp", "webp"
     return None
@@ -222,6 +233,12 @@ def _validate_image(content: bytes) -> tuple[str, str]:
             with Image.open(BytesIO(content)) as image:
                 _validate_image_dimensions(image)
                 image.verify()
+            # verify() checks structure, not the compressed pixel data: a
+            # JPEG cut short passes it and then fails when a model's loader
+            # decodes it. Decode once here (the dimensions were bounded above)
+            # so a broken image is refused at upload, not at generation.
+            with Image.open(BytesIO(content)) as image:
+                image.load()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ChatAttachmentError("attachment_image_invalid") from None
     except Exception:
