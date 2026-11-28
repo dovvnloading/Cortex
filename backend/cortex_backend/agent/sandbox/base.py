@@ -203,7 +203,13 @@ class RunningProcess:
         self._finished = threading.Event()
         self._output_done = False
         self._condition = threading.Condition()
-        self._chunks: deque[bytes] = deque(maxlen=256)
+        # Unbounded in count on purpose: MAX_OUTPUT_BYTES already bounds what
+        # it can hold, and stops the tree when exceeded. A 256-entry limit
+        # dropped the oldest chunks without a word whenever output came in
+        # many small reads, so a caller that reads after the process exits
+        # (the Git tool does) lost the start of the output and reported it
+        # complete (#609).
+        self._chunks: deque[bytes] = deque()
         self._output_bytes = 0
         self._output_limit_exceeded = False
         self._result: int | None = None

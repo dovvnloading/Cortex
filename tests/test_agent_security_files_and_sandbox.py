@@ -382,6 +382,34 @@ def test_output_above_old_cap_completes_without_termination() -> None:
     assert not process.killed
 
 
+def test_output_read_after_exit_keeps_every_small_chunk() -> None:
+    """#609: the buffer kept only the last 256 chunks, so output written in
+    many small reads lost its beginning when it was read after the exit."""
+
+    class _OneByteAtATime:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self, _size: int) -> bytes:
+            piece, self._data = self._data[:1], self._data[1:]
+            return piece
+
+    class _TrickleProcess(_FloodingProcess):
+        def __init__(self) -> None:
+            self.stdout = _OneByteAtATime(bytes(range(48, 48 + 75)) * 4)  # 300 one-byte reads
+            self.terminated = Event()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    process = _TrickleProcess()
+    handle = base.RunningProcess(process, _RecordingJob(process), "appcontainer", lambda: None)  # type: ignore[arg-type]
+    assert handle.wait(timeout=5) == 0  # the caller waits first, then reads
+
+    assert b"".join(handle.stdout_chunks()) == bytes(range(48, 48 + 75)) * 4
+
+
 @pytest.fixture(scope="module")
 def _staged_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Staged stdlib in a pytest temp tree; never grant ACLs on installed Python."""
