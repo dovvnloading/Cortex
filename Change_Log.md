@@ -71,6 +71,27 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   relaunched (or finished as cancelled) instead of staying stuck until a later
   restart, and the recovery scan is no longer capped at 200 jobs (#577, #623;
   #737).
+- The Windows build's packaged smoke test, the release and Quality package
+  smoke steps, and the README tour recorder quote the arguments they pass to
+  `Start-Process`, so a path with a space (for example in `TEMP`) no longer
+  splits into extra arguments and fails the run (#707, #708; #731).
+- Git commands in the Agent's AppContainer sandbox start again: the launch
+  environment now admits the ten Git isolation variables the sandbox sets,
+  and still refuses every other name (#614; #732).
+- The scratch and typed calculators no longer return wrong results as
+  successes: decimal literals are read as written instead of through a
+  float, results are rounded in the calculator's own 34-digit context, and
+  `//` and `%` follow Python's floor semantics (#595, #616, #617; #733).
+- A code, scratch or image worker that stalls partway through sending a
+  message is stopped by its deadline or by Stop, instead of holding the
+  supervising thread indefinitely (#624; #734).
+- A scratch or image job is no longer marked failed by a second coordinator
+  that lost the race for its lease while the first was still running it
+  (#627; #735).
+- A shutdown whose worker or heartbeat threads outlive the deadline is
+  reported as incomplete and keeps its supervisor lease, so Cortex does not
+  start a second coordinator beside a worker that is still running; stopping
+  again retries (#618; #736).
 - A zero-byte database file is no longer taken for a healthy SQLite database,
   so it cannot be kept as the chat or settings store and rotate the real
   backups out (#636; #738).
