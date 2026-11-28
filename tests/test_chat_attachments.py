@@ -937,6 +937,39 @@ def test_regenerating_a_follow_up_reply_brings_the_same_documents_back():
     assert _documents(seen[-1]) == [("report.md", _REPORT.decode(), True)]
 
 
+def test_a_regeneration_with_other_attachments_is_refused():
+    """#587: the model read the new documents while the saved turn kept the old
+    ones, so later history and forks described a different conversation."""
+    app, seen = _follow_up_app()
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        report = _stage_file(client, headers, "report.md", _REPORT)
+        other = _stage_file(client, headers, "other.md", b"# Something else" + bytes([10]))
+        _turn(client, headers, "swap-1", "Summarise this.", attachments=[report])
+        chat = client.get("/api/v1/chats/follow-up-thread", headers=headers).json()
+        reply_id = chat["messages"][-1]["id"]
+
+        refused = client.post(
+            "/api/v1/chats/follow-up-thread/regenerations",
+            headers=headers,
+            json={"request_id": "swap-2", "message_id": reply_id, "attachments": [other]},
+        )
+        assert refused.status_code == 422, refused.text
+        assert client.get("/api/v1/chats/follow-up-thread", headers=headers).json() == chat
+
+        # Sending the turn's own attachments back, as the app does, regenerates.
+        resent = client.post(
+            "/api/v1/chats/follow-up-thread/regenerations",
+            headers=headers,
+            json={"request_id": "swap-3", "message_id": reply_id, "attachments": [report]},
+        )
+        assert resent.status_code == 202, resent.text
+        _finish(client, headers, resent.json()["job_id"])
+
+    assert len(seen) == 2
+    assert _documents(seen[-1]) == [("report.md", _REPORT.decode(), False)]
+
+
 def test_only_the_message_right_before_a_follow_up_lends_it_documents():
     """A document comes back for the next turn, not for every turn after it."""
     app, seen = _follow_up_app()
