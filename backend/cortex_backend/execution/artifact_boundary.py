@@ -578,7 +578,10 @@ class ArtifactBoundary:
                         mime_type=mime_type,
                     )
                 )
-        except ExecutionRepositoryError:
+        except (ExecutionRepositoryError, OSError):
+            # A full disk or a failed fsync/replace raises OSError, not a
+            # repository error; the batch is all-or-nothing either way, so
+            # what was already published is taken back.
             try:
                 for item in published:
                     self.repository.delete_artifact(item.artifact.artifact_id)

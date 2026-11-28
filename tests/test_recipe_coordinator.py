@@ -358,3 +358,34 @@ def test_the_worker_output_dimension_limit_is_the_providers_not_a_copy(monkeypat
     with pytest.raises(RecipeExecutionError) as error:
         RecipeWorkerOutput(**kwargs)
     assert error.value.code == "worker_output_invalid"
+
+
+def test_a_failed_completion_write_takes_back_the_published_output(tmp_path: Path, monkeypatch):
+    """A one-off store error on the final "succeeded" write left the output published (#598)."""
+
+    from cortex_backend.execution.repository import ExecutionRepositoryError
+
+    repository, _source_job_id, source_artifact_id = _repository(tmp_path)
+    real_transition = repository.transition
+    failed: list[str] = []
+
+    def completion_fails_once(job_id, **kwargs):
+        if kwargs.get("status") == "succeeded" and not failed:
+            failed.append(job_id)
+            raise ExecutionRepositoryError("SQLite execution operation failed.")
+        return real_transition(job_id, **kwargs)
+
+    monkeypatch.setattr(repository, "transition", completion_fails_once)
+    coordinator = RecipeExecutionCoordinator(repository, lambda _job: _FakeAttempt(_output()))
+
+    accepted = coordinator.start_image_transform(_request(source_artifact_id))
+    finished = coordinator.wait(accepted.job_id, timeout=15)
+
+    assert failed == [accepted.job_id]
+    assert finished.status == "failed"
+    assert finished.error == "coordinator_failed"
+    with repository.connect() as connection:
+        outputs = connection.execute(
+            "SELECT COUNT(*) FROM execution_artifacts WHERE job_id = ?", (accepted.job_id,)
+        ).fetchone()[0]
+    assert outputs == 0

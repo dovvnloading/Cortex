@@ -18,8 +18,9 @@ from typing import Any
 from uuid import uuid4
 
 from .artifact_boundary import ArtifactBoundary, ArtifactBoundaryError, sniff_artifact_mime
+from .finish import UnsuccessfulJobWording, finish_unsuccessful_job
 from .models import ExecutionArtifact, ExecutionJob
-from .repository import ExecutionRepository, ExecutionRepositoryError
+from .repository import ExecutionRepository, ExecutionRepositoryError, ExecutionTransitionConflict
 
 
 ATTACHMENT_STAGE_PROFILE = "attachment.stage.v1"
@@ -37,6 +38,14 @@ ATTACHMENT_INTERRUPTED = "attachment_interrupted"
 ATTACHMENT_INTERRUPTED_MESSAGE = "Attachment staging was interrupted."
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+_STAGING_WORDING = UnsuccessfulJobWording(
+    cancelled_event="cancelled",
+    failed_event="failed",
+    cancelled_message="Attachment staging was cancelled.",
+    failed_message="Attachment staging failed safely.",
+)
 
 
 class AttachmentStagingError(RuntimeError):
@@ -192,6 +201,23 @@ class AttachmentStagingService:
                 data={"message": "Attachment staged."},
                 result=result,
             )
+        except ExecutionTransitionConflict:
+            # Stop committed while the bytes were being staged, so the job is
+            # cancelling and refuses "succeeded". That is a cancellation, not a
+            # persistence failure: take the staged bytes back and finish it as
+            # cancelled.
+            try:
+                self.repository.delete_artifact(artifact.artifact_id)
+            except Exception:
+                pass  # Retention reclaims it; the job's outcome is still the Stop.
+            finish_unsuccessful_job(
+                self.repository,
+                job.job_id,
+                failure_code="cancelled",
+                cancel_requested=lambda: True,
+                wording=_STAGING_WORDING,
+            )
+            raise AttachmentStagingError("attachment_cancelled") from None
         except Exception:
             try:
                 self.repository.delete_artifact(artifact.artifact_id)
