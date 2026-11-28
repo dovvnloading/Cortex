@@ -156,13 +156,49 @@ def test_approval_is_one_shot_even_before_resume(tmp_path: Path, monkeypatch: py
             manager.approval(run.id, owner=_OWNER, seq=seq, decision="allow_once")
         assert reused.value.code == "approval_unavailable"
         # Cancellation before resume must stop even the once-approved call.
-        manager.cancel(run.id, owner=_OWNER)
-        manager.resume(run.id, owner=_OWNER)
+        assert manager.cancel(run.id, owner=_OWNER).status == "cancelled"
+        with pytest.raises(AgentWorkflowError):
+            manager.resume(run.id, owner=_OWNER)
         _await(manager, run.id, "cancelled")
         assert calls == [] and model.calls == 1
         step = manager._ledger().list_steps(run.id, owner=_OWNER)[-1]
         assert step.result == {} and step.ended is None
         _assert_project(project, _OLD)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("decision", ["allow_once", "deny"])
+def test_stop_after_a_decision_without_resume_ends_the_run_and_frees_the_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str,
+) -> None:
+    """#576: Stop between a recorded decision and Resume left the run running
+    with no worker and kept the only Agent slot."""
+    calls: list[str] = []
+    monkeypatch.setattr(agent_runs, "fetch_url", lambda url, *, approved: calls.append(url))
+    model = _Replies(_tool("web_fetch", {"url": "https://example.invalid/once"}), _final())
+    manager = AgentRuns(data_dir=tmp_path / "data", chat_client=model)
+    project = _project(tmp_path)
+    try:
+        run = _start(manager, project)
+        _await(manager, run.id, "waiting_approval")
+        seq, _request = _pending(manager, run.id)
+        manager.approval(run.id, owner=_OWNER, seq=seq, decision=decision)
+
+        stopped = manager.cancel(run.id, owner=_OWNER)
+
+        assert (stopped.status, stopped.stop_reason) == ("cancelled", "cancelled")
+        assert manager._active_id is None
+        events, finished = manager.events(run.id, owner=_OWNER, after_id=0)
+        assert finished and events[-1].kind == "status"
+        assert events[-1].data["status"] == "cancelled"
+        with pytest.raises(AgentWorkflowError):
+            manager.resume(run.id, owner=_OWNER)
+        assert calls == [] and model.calls == 1
+        _assert_project(project, _OLD)
+        # The slot is free: another run starts.
+        second = _start(manager, project)
+        assert second.id != run.id
     finally:
         manager.close()
 

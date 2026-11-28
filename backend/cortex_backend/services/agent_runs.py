@@ -697,6 +697,15 @@ class AgentRuns:
             managed.probe_cancel.set()
             managed.loop.cancel(run_id)
             current = self._owned(run_id, owner)
+            if current.status == "running" and not managed.driving:
+                # Parked after a recorded approval decision, waiting for a
+                # Resume that may never come. No worker will look at the
+                # cancellation, so the run used to stay running and keep the
+                # one Agent slot (#576). Nothing runs it, so end it here; the
+                # approved call never executes.
+                current = self._ledger().transition(
+                    run_id, owner=owner, status="cancelled", stop_reason="cancelled",
+                )
             if current.status in _TERMINAL and not managed.driving:
                 managed.terminal = True
                 if managed.shell is not None:
