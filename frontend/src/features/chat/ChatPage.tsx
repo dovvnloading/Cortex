@@ -508,12 +508,18 @@ export function ChatPage({
       const jobThreadId = accepted.thread_id ?? requestThreadId;
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
-      setResolvedThreadId(jobThreadId);
+      // The user may have opened another chat while this request was out.
+      // The job is still tracked (the stream host follows it wherever the
+      // user is) and the admission settled, but only the chat it was sent
+      // from may take its snapshot: installing it over another chat left
+      // that one on "Loading conversation..." for good (#672).
+      const stillViewing = viewThreadIdRef.current === requestThreadId;
+      if (stillViewing) setResolvedThreadId(jobThreadId);
       trackGeneration(accepted.job_id, jobThreadId, accepted.user_message_id);
       if (readPendingGenerationAdmission()?.requestId === requestId) {
         clearPendingGenerationAdmission();
       }
-      if (!regenerateMessageId) {
+      if (!regenerateMessageId && stillViewing) {
         setChat((current) => ({
           id: jobThreadId,
           title: current?.id === jobThreadId ? current.title : "New Chat",

@@ -1225,6 +1225,31 @@ describe("ChatPage composer integration", () => {
     expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
   });
 
+  it("leaves another chat readable when a send from the previous one is accepted late (#672)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { accept = resolve; }));
+    const chat = vi.fn(async (id: string): Promise<ChatResponse> => (id === "thread-b"
+      ? { ...emptyChat("thread-b"), revision: 3, messages: [{ id: "b-1", role: "user", content: "Chat B question" }] }
+      : { ...emptyChat("thread-a"), revision: 1 }));
+    const api = chatApi({ chat, generate } as Partial<CortexApi>);
+    const view = renderChat(api, "thread-a");
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "Sent from A{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    view.rerender(chatElement(api, "thread-b"));
+    expect(await screen.findByText("Chat B question")).toBeInTheDocument();
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "a-1" });
+    });
+
+    // B is still shown and usable; A's job is tracked in the background.
+    expect(screen.getByText("Chat B question")).toBeInTheDocument();
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sent from A")).not.toBeInTheDocument();
+    expect(useChatStore.getState().generation.jobId).toBe("job-a");
+  });
+
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()
