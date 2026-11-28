@@ -108,27 +108,33 @@ def should_offer_code_execution(query: str) -> bool:
     # gives an imperative action after "then"/"and"/etc. A later "explain"
     # does not veto an initial explicit command ("run the tests and explain").
     # The positive checks below still require a concrete target or code task.
+    requested = normalized
     if _EXPLANATION_ONLY_RE.search(normalized):
         # A second verb can be part of "how to download and parse a CSV", not
         # a separate instruction. Only an explicit next step overrides that.
         if _PROCEDURAL_QUESTION_RE.search(normalized):
-            if not _CLEAR_NEXT_ACTION_RE.search(normalized):
-                return False
-        elif not _SEQUENCED_ACTION_RE.search(normalized):
+            next_action = _CLEAR_NEXT_ACTION_RE.search(normalized)
+        else:
+            next_action = _SEQUENCED_ACTION_RE.search(normalized)
+        if next_action is None:
             return False
+        # Only that separately requested action can ask for execution. The
+        # educational clause merely mentions it: "explain how to run a
+        # Python script, then write a haiku" asks for a poem, not a run.
+        requested = normalized[next_action.start():]
 
     direct_execution = bool(
-        _REFERENTIAL_EXECUTION_RE.search(normalized)
-        or _DIRECT_EXECUTION_RE.search(normalized)
+        _REFERENTIAL_EXECUTION_RE.search(requested)
+        or _DIRECT_EXECUTION_RE.search(requested)
     )
     if direct_execution:
         return True
-    if _USE_CODE_RE.search(normalized):
+    if _USE_CODE_RE.search(requested):
         return True
-    if _PYTHON_OUTPUT_RE.search(normalized):
+    if _PYTHON_OUTPUT_RE.search(requested):
         return True
-    if _COMPUTATION_RE.search(normalized):
+    if _COMPUTATION_RE.search(requested):
         return True
-    if _LOCAL_TASK_RE.search(normalized):
+    if _LOCAL_TASK_RE.search(requested):
         return True
     return False

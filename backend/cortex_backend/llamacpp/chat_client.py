@@ -30,6 +30,7 @@ from cortex_backend.services.sse import sse_payloads
 from .errors import LlamaCppError
 from .model_directory import resolve_gguf_path
 from .server_manager import LlamaServerProvider
+from .stoppable_http import StoppedBeforeResponse, open_unless_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -277,12 +278,16 @@ class LlamaCppChatClient:
         except Exception:
             return None
         try:
-            with self._http.stream(
-                "POST",
-                f"{handle.base_url}/tokenize",
-                json={"content": text},
-                headers=_auth_headers(handle.api_key),
-                timeout=_TOKENIZE_TIMEOUT,
+            with open_unless_stopped(
+                lambda: self._http.stream(
+                    "POST",
+                    f"{handle.base_url}/tokenize",
+                    json={"content": text},
+                    headers=_auth_headers(handle.api_key),
+                    timeout=_TOKENIZE_TIMEOUT,
+                ),
+                cancellation_event.is_set if cancellation_event is not None else None,
+                name="llama-tokenize-open",
             ) as response:
                 # Closing the response is what unblocks a read in flight, the
                 # same way it does for the chat stream.
@@ -297,7 +302,9 @@ class LlamaCppChatClient:
                     response.raise_for_status()
                     response.read()
                     tokens = response.json().get("tokens")
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
+        except (
+            StoppedBeforeResponse, httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError,
+        ):
             return None
         finally:
             self._end_http_request()
@@ -377,11 +384,15 @@ class LlamaCppChatClient:
         done_received = False
         self._begin_http_request()
         try:
-            with self._http.stream(
-                "POST",
-                f"{base_url}/v1/chat/completions",
-                json=body,
-                headers=_auth_headers(api_key),
+            with open_unless_stopped(
+                lambda: self._http.stream(
+                    "POST",
+                    f"{base_url}/v1/chat/completions",
+                    json=body,
+                    headers=_auth_headers(api_key),
+                ),
+                cancellation_event.is_set,
+                name="llama-chat-open",
             ) as response:
                 try:
                     response.raise_for_status()
@@ -477,6 +488,10 @@ class LlamaCppChatClient:
                         # surfacing.
                         if not cancellation_event.is_set():
                             raise
+        except StoppedBeforeResponse:
+            # Stopped before the server answered at all: nothing was received,
+            # and the stopped reply below is simply empty.
+            pass
         except httpx.TransportError as exc:
             raise LlamaCppError(
                 "Cortex lost its connection to the local model runtime."

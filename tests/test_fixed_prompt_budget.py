@@ -432,6 +432,30 @@ def test_admission_lets_through_a_message_whose_optional_parts_alone_do_not_fit(
     )
 
 
+def test_admission_refuses_documents_the_window_cannot_even_list() -> None:
+    """#588: the turn was admitted and saved, then sent overflowing or failed."""
+    documents = tuple(
+        GenerationAttachment(
+            attachment_id=f"doc{index}",
+            filename=f"doc{index}.md",
+            mime_type="text/markdown",
+            kind="document",
+            text_content="filler " * 20_000,
+        )
+        for index in range(8)
+    )
+    client = _RecordingClient()
+    service = _service(client)
+
+    service.ensure_prompt_fits(_snapshot(num_ctx=8192, attachments=documents))
+    with pytest.raises(ChatDomainError) as raised:
+        service.ensure_prompt_fits(_snapshot(num_ctx=1024, attachments=documents))
+
+    assert raised.value.code == "invalid_input"
+    assert "attached files do not fit" in str(raised.value)
+    assert client.prompts == []
+
+
 def test_options_without_a_window_are_sized_for_the_settings_default() -> None:
     """The service and the engine fall back to the one default the settings model uses."""
     default = GenerationSettings().num_ctx

@@ -67,6 +67,7 @@ from .errors import (
 )
 from .extra_args import validate_extra_args
 from .gguf_metadata import read_gguf_metadata
+from .model_directory import to_model_id
 from .launch_failure import (
     LaunchFailureCode,
     classify_child_exit,
@@ -76,6 +77,22 @@ from .launch_failure import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL_FILE_CHANGED = "the model file changed on disk"
+
+
+def _file_version(path: Path) -> tuple[int, int, int, int] | None:
+    """Which file is at ``path``: its identity, size and modification time.
+
+    Size and mtime alone can match after an atomic replacement, so the device
+    and inode are part of it, as in the trained-context cache.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
 
 ServerState = Literal["idle", "downloading_binary", "starting", "ready", "stopping", "failed"]
 GpuBackendSetting = Literal["auto", "vulkan", "cpu"]
@@ -185,7 +202,7 @@ def _safe_restart_reason(reason: str) -> str:
     """Classify a restart without retaining model filenames or child text."""
     if reason.startswith("the selected model changed"):
         return "the selected model changed"
-    if reason == _ADVANCED_OPTIONS_CHANGED:
+    if reason in (_ADVANCED_OPTIONS_CHANGED, _MODEL_FILE_CHANGED):
         return reason
     if reason == _UNLOADED_AT_REQUEST or reason.startswith("the model was unloaded after "):
         return reason
@@ -677,6 +694,11 @@ class LlamaServerManager:
         self._process: subprocess.Popen | None = None
         self._starting_process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
+        # The inventory id of the loaded model, fixed when it was loaded.
+        self._loaded_model_id: str | None = None
+        # Which version of that file the server loaded: the same path can be
+        # replaced on disk with different weights.
+        self._loaded_model_version: tuple[int, int, int, int] | None = None
         # What was requested with ``-c`` for the running server. Reuse
         # decisions key off this, not the read-back value below: relaunching
         # with the same arguments cannot yield a larger window, so treating a
@@ -907,6 +929,7 @@ class LlamaServerManager:
         # The same limit ensure_ready applies, or a window that will be lowered
         # anyway would look too big for the server that is already running.
         num_ctx, _ = self._limit_to_trained_context(num_ctx, self._trained_context(model_path))
+        current_version = _file_version(model_path)
         with self._state_lock:
             if (
                 self._closed
@@ -914,6 +937,10 @@ class LlamaServerManager:
                 or self._process is None
                 or self._base_url is None
                 or self._loaded_model_path != model_path
+                or (
+                    self._loaded_model_version is not None
+                    and current_version != self._loaded_model_version
+                )
             ):
                 return None
             if num_ctx is not None and self._loaded_num_ctx is not None and num_ctx > self._loaded_num_ctx:
@@ -922,15 +949,22 @@ class LlamaServerManager:
                 return None
             return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
 
+    def _model_id_for(self, model_path: Path) -> str:
+        """The inventory id of ``model_path``: its path under the models folder now."""
+        try:
+            relative = model_path.resolve().relative_to(self._models_directory().resolve())
+        except (OSError, ValueError):
+            return to_model_id(model_path.name)
+        return to_model_id(relative.as_posix())
+
     @property
     def status(self) -> LlamaCppRuntimeStatus:
         with self._state_lock:
             state = self._state
-            loaded_model = (
-                f"gguf:{self._loaded_model_path.name}"
-                if state == "ready" and self._loaded_model_path is not None
-                else None
-            )
+            # The same id the inventory lists, subfolder included: the bare
+            # file name made two models called model.gguf indistinguishable
+            # and named an id the inventory did not have.
+            loaded_model = self._loaded_model_id if state == "ready" else None
             last_error = self._last_error
             last_failure_code = self._last_failure_code
             last_restart_reason = self._last_restart_reason
@@ -939,6 +973,22 @@ class LlamaServerManager:
             gpu_layers = self._gpu_layers if state == "ready" else None
             backend_note = self._backend_note
             context_note = self._context_note
+            # A server that has exited is not ready, whatever was last
+            # published: without this, status kept advertising a resident
+            # model, its context and GPU layers until the next chat request
+            # happened to notice. A non-blocking poll only; nothing is
+            # restarted, probed or recorded here -- the next request still
+            # does the crash accounting.
+            process = self._process
+            exit_code = process.poll() if state == "ready" and process is not None else None
+            if exit_code is not None:
+                state = "failed"
+                loaded_model = None
+                loaded_context = None
+                gpu_layers = None
+                last_error = (
+                    f"The local model runtime exited unexpectedly (exit code {exit_code})."
+                )
         # The expensive parts -- hashing the cached binary directory and a
         # settings read for the models folder -- run outside every lock, so
         # a status poll never stalls behind (or holds up) a model load.
@@ -1248,6 +1298,7 @@ class LlamaServerManager:
         extra_args: tuple[str, ...] | None = None,
         requested_backend: GpuBackendSetting | None = None,
     ) -> _ReuseVerdict:
+        current_version = _file_version(model_path)
         with self._state_lock:
             if self._state != "ready" or self._process is None:
                 return _ReuseVerdict(reusable=False)
@@ -1256,6 +1307,10 @@ class LlamaServerManager:
                     reusable=False,
                     reason="the selected model changed",
                 )
+            if self._loaded_model_version is not None and current_version != self._loaded_model_version:
+                # Same path, different file: a model replaced on disk must be
+                # loaded again, not served from the old weights.
+                return _ReuseVerdict(reusable=False, reason=_MODEL_FILE_CHANGED)
             if (
                 num_ctx is not None
                 and self._loaded_num_ctx is not None
@@ -1447,7 +1502,9 @@ class LlamaServerManager:
             )
             failure_code = self._failure_code
             message = crash_loop_message(len(self._failure_times), reason, failure_code)
-            process = self._process
+            # A startup child that would not exit is a process too; tearing
+            # down only the published one and then resetting both lost it.
+            process = self._process or self._starting_process
             self._state = "stopping"
         # Terminate outside the state lock, same as _terminate_and_reset: the
         # grace wait can take seconds, and status -- polled every couple of
@@ -1532,6 +1589,8 @@ class LlamaServerManager:
         self._process = None
         self._starting_process = None
         self._loaded_model_path = None
+        self._loaded_model_id = None
+        self._loaded_model_version = None
         self._loaded_num_ctx = None
         self._loaded_context = None
         self._base_url = None
@@ -1573,7 +1632,7 @@ class LlamaServerManager:
             "Check System settings and try again."
         )
         try:
-            for backend in self._backend_order(requested_backend, model_path, num_ctx):
+            for backend in self._backend_order(requested_backend, model_path, num_ctx, extra_args):
                 try:
                     handle = self._start_with_backend(
                         model_path, num_ctx, backend, extra_args, on_status, cancellation_event
@@ -1604,7 +1663,7 @@ class LlamaServerManager:
                     # argument) would wrongly blame vulkan and strand the user
                     # on cpu for 24h for a problem that has nothing to do with
                     # the GPU backend.
-                    self._mark_backend_bad("vulkan", model_path, num_ctx)
+                    self._mark_backend_bad("vulkan", model_path, num_ctx, extra_args)
                 return handle
         except BaseException as exc:
             # Only the exceptions handled above are retried on another
@@ -1650,7 +1709,11 @@ class LlamaServerManager:
                 self._last_failure_code = failure_code
 
     def _backend_order(
-        self, requested: GpuBackendSetting, model_path: Path, num_ctx: int
+        self,
+        requested: GpuBackendSetting,
+        model_path: Path,
+        num_ctx: int,
+        extra_args: tuple[str, ...] = (),
     ) -> list[GpuBackend]:
         if requested == "cpu":
             return ["cpu"]
@@ -1666,16 +1729,21 @@ class LlamaServerManager:
             with self._state_lock:
                 self._backend_note = _NO_VULKAN_LOADER_NOTE
             return ["cpu"]
-        if self._known_bad_backend(model_path, num_ctx) == "vulkan":
+        if self._known_bad_backend(model_path, num_ctx, extra_args) == "vulkan":
             return ["cpu"]
         return ["vulkan", "cpu"]
 
-    def _known_bad_backend(self, model_path: Path, num_ctx: int) -> str | None:
-        """Only skip vulkan when THIS (model, context size, runtime build)
-        is the one that failed, and only for a bounded window -- a launch
-        failure for one oversized model must not permanently disable GPU
-        inference for every other model, and a driver update or freed VRAM
-        deserves a retry rather than an indefinite ban."""
+    def _known_bad_backend(
+        self, model_path: Path, num_ctx: int, extra_args: tuple[str, ...] = ()
+    ) -> str | None:
+        """Only skip vulkan when THIS (model, context size, launch options,
+        runtime build) is the one that failed, and only for a bounded window
+        -- a launch failure for one oversized model must not permanently
+        disable GPU inference for every other model, and a driver update or
+        freed VRAM deserves a retry rather than an indefinite ban. The launch
+        options count because they can be the whole problem (a KV-cache type
+        the GPU cannot use); changing them must let the GPU build try again.
+        A marker written before options were recorded matches nothing."""
         try:
             data = json.loads(self._preferred_backend_file.read_text("utf-8"))
         except (OSError, ValueError):
@@ -1683,6 +1751,8 @@ class LlamaServerManager:
         if not isinstance(data, dict):
             return None
         if data.get("model") != str(model_path) or data.get("num_ctx") != num_ctx:
+            return None
+        if data.get("extra_args") != list(extra_args):
             return None
         if self._release is not None and data.get("release") != getattr(self._release, "tag", None):
             return None
@@ -1695,7 +1765,13 @@ class LlamaServerManager:
             return None
         return data.get("known_bad")
 
-    def _mark_backend_bad(self, backend: GpuBackend, model_path: Path, num_ctx: int) -> None:
+    def _mark_backend_bad(
+        self,
+        backend: GpuBackend,
+        model_path: Path,
+        num_ctx: int,
+        extra_args: tuple[str, ...] = (),
+    ) -> None:
         try:
             self._runtime_dir.mkdir(parents=True, exist_ok=True)
             self._preferred_backend_file.write_text(
@@ -1703,6 +1779,7 @@ class LlamaServerManager:
                     "known_bad": backend,
                     "model": str(model_path),
                     "num_ctx": num_ctx,
+                    "extra_args": list(extra_args),
                     "release": getattr(self._release, "tag", None) if self._release is not None else None,
                     "at": time.time(),
                 }),
@@ -1724,6 +1801,15 @@ class LlamaServerManager:
         # first made every launch with a cached runtime flash "Downloading
         # runtime..." in the UI for as long as verification took.
         with self._state_lock:
+            if self._starting_process is not None:
+                # An earlier start's child was never confirmed gone (it would
+                # not terminate). Launching another beside it -- Auto falling
+                # back from the GPU build to the CPU one, say -- would lose
+                # the only reference to the first and run two models at once.
+                # Keep it, keep "stopping", and refuse.
+                raise LlamaCppError(
+                    "The local model runtime did not exit cleanly; restart Cortex before trying again."
+                )
             self._state = "starting"
         if self._release is None:
             raise LlamaCppError("No pinned runtime release is selected.")
@@ -1920,12 +2006,16 @@ class LlamaServerManager:
                 props = self._probe_props(base_url, api_key=api_key, model_path=model_path)
                 if props is not None:
                     loaded_context = _context_from_props(props)
+                    loaded_model_id = self._model_id_for(model_path)
+                    loaded_version = _file_version(model_path)
                     with self._state_lock:
                         if cancellation_event.is_set():
                             raise LlamaCppError("The local model runtime startup was cancelled.")
                         self._process = process
                         self._starting_process = None
                         self._loaded_model_path = model_path
+                        self._loaded_model_id = loaded_model_id
+                        self._loaded_model_version = loaded_version
                         self._loaded_num_ctx = num_ctx
                         self._loaded_context = loaded_context
                         self._base_url = base_url

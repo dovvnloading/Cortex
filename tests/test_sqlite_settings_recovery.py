@@ -241,6 +241,65 @@ def _payload_revision(database: Path) -> int:
     return int(row[0])
 
 
+def _saved_three_times(tmp_path: Path) -> tuple[SQLiteSettingsRepository, CortexSettings]:
+    """Revision 3 live, revision 2 in the newest backup, revision 1 in the older one."""
+    repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
+    current = repository.load().settings
+    for revision, language in ((1, "French"), (2, "German"), (3, "Italian")):
+        current = current.model_copy(
+            update={
+                "revision": revision,
+                "translation": current.translation.model_copy(update={"target_language": language}),
+            }
+        )
+        repository.save(current, expected_revision=revision - 1)
+    assert _payload_revision(repository.backup_path) == 2
+    assert _payload_revision(repository.previous_backup_path) == 1
+    return repository, current
+
+
+def test_stale_saves_leave_both_recovery_generations_alone(tmp_path: Path):
+    """#653: each rejected save still rotated the backups, so two of them
+    replaced revisions 2 and 1 with copies of revision 3."""
+    repository, live = _saved_three_times(tmp_path)
+    newest_before = repository.backup_path.read_bytes()
+    older_before = repository.previous_backup_path.read_bytes()
+    stale = live.model_copy(update={"revision": 1})
+
+    for _ in range(2):
+        with pytest.raises(SettingsRevisionConflict):
+            repository.save(stale, expected_revision=0)
+
+    assert repository.load().settings == live
+    assert repository.backup_path.read_bytes() == newest_before
+    assert repository.previous_backup_path.read_bytes() == older_before
+
+
+def test_a_stale_save_reports_the_conflict_even_when_a_backup_would_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The backup is never attempted for a save that cannot apply, so its I/O
+    failure no longer hides the conflict the caller has to resolve."""
+    repository, live = _saved_three_times(tmp_path)
+
+    def failing_backup() -> None:
+        raise SettingsRepositoryError("Could not create a settings backup.")
+
+    monkeypatch.setattr(repository, "_create_backup", failing_backup)
+    with pytest.raises(SettingsRevisionConflict):
+        repository.save(live.model_copy(update={"revision": 1}), expected_revision=0)
+    assert repository.backup_status.state == "ok"
+
+
+def test_a_current_save_still_rotates_the_backups(tmp_path: Path):
+    repository, live = _saved_three_times(tmp_path)
+
+    repository.save(live.model_copy(update={"revision": 4}), expected_revision=3)
+
+    assert _payload_revision(repository.backup_path) == 3
+    assert _payload_revision(repository.previous_backup_path) == 2
+
+
 def test_settings_database_uses_wal_with_normal_synchronous(tmp_path: Path):
     """synchronous = NORMAL is only crash-safe under WAL; assert both together."""
     repository = SQLiteSettingsRepository(tmp_path / "settings.sqlite")
@@ -842,3 +901,26 @@ def test_a_crash_between_setting_the_log_aside_and_moving_the_primary_recovers_n
     assert recovered.recovery_report is not None
     adopted = Path(f"{recovered.recovery_report.quarantined_path}-wal")
     assert adopted.read_bytes() == b"newest committed frames"
+
+
+def test_a_settings_primary_truncated_to_zero_bytes_is_recovered_not_trusted(tmp_path: Path):
+    """An empty file passed the integrity check and replaced the settings with defaults (#636)."""
+    repository, original = _repository_with_valid_backup(tmp_path)
+    backup_before = repository.backup_path.read_bytes()
+    for suffix in ("-wal", "-shm"):
+        Path(str(repository.db_path) + suffix).unlink(missing_ok=True)
+    repository.db_path.write_bytes(b"")
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+
+    assert recovered.load().settings == original
+    assert repository.backup_path.read_bytes() == backup_before
+
+
+def test_an_empty_backup_never_passes_the_backup_check(tmp_path: Path):
+    from cortex_backend.repositories.sqlite_backup import quick_check_at_rest
+
+    empty = tmp_path / "empty.sqlite"
+    empty.write_bytes(b"")
+
+    assert quick_check_at_rest(empty, time_limit=5) is False

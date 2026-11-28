@@ -96,7 +96,7 @@ def _coerce_decimal(value: Any) -> Decimal:
 
 
 def _bounded_result(value: Decimal) -> Decimal:
-    if not value.is_finite() or abs(value) > MAX_RESULT_ABS:
+    if not value.is_finite() or value.copy_abs() > MAX_RESULT_ABS:
         raise PrimitiveEvaluationError("result_out_of_bounds")
     exponent = value.as_tuple().exponent
     if not isinstance(exponent, int):  # excluded by is_finite() above
@@ -320,9 +320,12 @@ def evaluate_calculator(plan: CalculatorPlan) -> Decimal:
                 result = min(plan.operands)
             else:
                 result = max(plan.operands)
+            # Round in this 34-digit context; unary plus after leaving it
+            # would round again at the caller's precision (28 by default).
+            result = +result
         except (ArithmeticError, InvalidOperation):
             raise PrimitiveEvaluationError("calculation_failed") from None
-    return _bounded_result(+result)
+    return _bounded_result(result)
 
 
 def evaluate_check(plan: CheckPlan) -> bool:
@@ -341,7 +344,9 @@ def evaluate_check(plan: CheckPlan) -> bool:
         return plan.left >= plan.right
     if plan.tolerance is None:
         raise PrimitiveEvaluationError("check_tolerance_missing")
-    return abs(plan.left - plan.right) <= plan.tolerance
+    # Take the difference exactly rather than at the caller's precision.
+    with localcontext(Context(prec=50, Emax=24, Emin=-18)):
+        return (plan.left - plan.right).copy_abs() <= plan.tolerance
 
 
 __all__ = [

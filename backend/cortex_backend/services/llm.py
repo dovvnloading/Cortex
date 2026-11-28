@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from cortex_backend.core.generation import (
+    AttachmentsDoNotFit,
     CodeExecutionProposal,
     CodeProposalRejection,
     FixedPromptPlan,
@@ -29,6 +30,7 @@ from cortex_backend.core.generation import (
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+    attachments_too_large_message,
     prompt_too_long_message,
 )
 from cortex_backend.core.settings import DEFAULT_NUM_CTX
@@ -40,7 +42,6 @@ from cortex_backend.execution.code_execution import (
     validate_code_source,
 )
 from cortex_backend.services import token_budget
-from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
 from cortex_backend.services.chat_client import GGUF_PREFIX, KEEP_ALIVE_OPTION, LLAMACPP_ONLY_OPTION_KEYS
 from cortex_backend.services.code_feedback import (
@@ -53,6 +54,7 @@ from cortex_backend.services.history_window import (
     answered_exchanges,
     drop_oldest_exchange,
     with_attachment_notes,
+    HISTORY_OMISSION_NOTE,
     with_omission_note,
     with_omission_note_on_turns,
 )
@@ -293,17 +295,17 @@ _COMMAND_TAG_RE = re.compile(
 )
 
 
-# Reference text is never cut below this many characters (the truncation notice
-# included), so a document squeezed out by a small window still shows the model
-# how it begins.
+# While the window has room for it, reference text is not cut below about this
+# many characters (the truncation notice included), so a document squeezed by a
+# small window still shows the model how it begins.
 _MIN_ATTACHMENT_CHARS = 256
 _ATTACHMENT_TRUNCATION_MARKER = "\n\n[Attachment text truncated to fit the model context.]"
+# What a document's text becomes when not even that beginning fits: it is
+# still listed by name and type, so the model knows it was attached.
+_ATTACHMENT_OMITTED_MARKER = "[Attachment text left out: it did not fit the model context.]"
 # What one document costs beside its text: the filename and type lines and the
 # fence around it.
 _DOCUMENT_FRAME_TOKENS = 64
-# Room for the "[Attachment text truncated by Cortex.]" line the attachment
-# resolver appends to a document it cut at MAX_DOCUMENT_TEXT_CHARS.
-_RESOLVER_TRUNCATION_NOTICE_CHARS = 64
 # Said to the user when the model's own tokenizer found the prompt larger than
 # the estimate that sized it, and more history had to go.
 _MEASURED_TRIM_NOTICE = (
@@ -793,16 +795,49 @@ class SynthesisAgent:
         the large documents divide what the small ones leave. Nobody is offered
         less than its floor. Without a split the first document took the whole
         budget and every later one arrived as nothing but a truncation notice.
+
+        The floors must fit ``budget`` together (see ``_affordable_floors``),
+        and no share takes what a later document's floor still needs, so the
+        shares never add up to more than ``budget``. Granting every floor
+        unconditionally let several documents overrun a budget that had
+        already run out.
         """
         shares: dict[int, int] = {}
         remaining = budget
+        owed = sum(floors.values())
         ordered = sorted(needs, key=lambda index: needs[index])
         for position, index in enumerate(ordered):
+            owed -= floors[index]
             fair = remaining // (len(ordered) - position)
-            share = min(needs[index], max(floors[index], fair))
+            share = min(needs[index], max(floors[index], fair), remaining - owed)
             shares[index] = share
-            remaining = max(0, remaining - share)
+            remaining -= share
         return shares
+
+    @staticmethod
+    def _affordable_floors(
+        needs: Mapping[int, int],
+        floors: Mapping[int, int],
+        minimums: Mapping[int, int],
+        budget: int,
+    ) -> dict[int, int]:
+        """The floors ``budget`` can pay for, given every document its minimum first.
+
+        When there is room for every document's opening text, that is what each
+        is guaranteed. When there is not, the smallest documents keep theirs
+        and the rest are guaranteed only their minimum: listed by name with
+        their text left out.
+        """
+        if sum(floors.values()) <= budget:
+            return dict(floors)
+        granted = dict(minimums)
+        spare = budget - sum(minimums.values())
+        for index in sorted(needs, key=lambda index: needs[index]):
+            extra = floors[index] - minimums[index]
+            if extra <= spare:
+                granted[index] = floors[index]
+                spare -= extra
+        return granted
 
     @classmethod
     def fit_attachments_to_context(
@@ -829,9 +864,15 @@ class SynthesisAgent:
 
         The room documents may take is what the window has left after the rest
         of the prompt and the answer reservation, so it grows with the context
-        size instead of stopping at a fixed number of characters; the one
-        ceiling is ``MAX_DOCUMENT_TEXT_CHARS``, the most a single attachment can
-        resolve to. Several documents divide that room between them.
+        size instead of stopping at a fixed number of characters. Each
+        document is already at most ``MAX_DOCUMENT_TEXT_CHARS``, the most one
+        attachment resolves to; that is a limit per document, not on what
+        several may take together, which only the window bounds. Several
+        documents divide that room between them, and together they never take
+        more than it: a document with no room for its
+        opening text is listed with its text left out, and when even the
+        documents' names and frames do not fit, ``AttachmentsDoNotFit`` is
+        raised instead of building a prompt known to overflow.
         """
         documents = [index for index, item in enumerate(attachments) if item.text_content is not None]
         if not documents:
@@ -861,11 +902,6 @@ class SynthesisAgent:
             - cls.estimate_prompt_tokens(base_prompt, model)
             - image_tokens,
         )
-        # One maximal document (its text plus the notice the resolver appends
-        # when it had to cut it) always fits a window with room for it.
-        ceiling_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
-            math.ceil((MAX_DOCUMENT_TEXT_CHARS + _RESOLVER_TRUNCATION_NOTICE_CHARS) / ratio)
-        )
         needs: dict[int, int] = {}
         floors: dict[int, int] = {}
         for index in documents:
@@ -879,19 +915,40 @@ class SynthesisAgent:
                 _DOCUMENT_FRAME_TOKENS
                 + token_budget.with_safety_margin(math.ceil(_MIN_ATTACHMENT_CHARS / ratio)),
             )
-        shares = cls._share_attachment_budget(needs, min(available_tokens, ceiling_tokens), floors)
+        # All the room the window has left. Capping the documents together at
+        # one maximal document's size cut two large ones that fitted easily,
+        # and told the user the window could not hold them.
+        budget = available_tokens
+        omitted_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
+            math.ceil(len(_ATTACHMENT_OMITTED_MARKER) / ratio)
+        )
+        minimums = {index: min(needs[index], omitted_tokens) for index in documents}
+        if sum(minimums.values()) > budget:
+            raise AttachmentsDoNotFit(
+                attachments_too_large_message(int(num_ctx)),
+                operation="generation",
+                error_details="attachments_too_large",
+            )
+        shares = cls._share_attachment_budget(
+            needs, budget, cls._affordable_floors(needs, floors, minimums, budget)
+        )
         fitted = list(attachments)
         for index, share in shares.items():
             if share >= needs[index]:
                 continue
             attachment = attachments[index]
+            if share < floors[index]:
+                # Not even the opening text fits: list the document, say why
+                # its text is missing.
+                fitted[index] = replace(attachment, text_content=_ATTACHMENT_OMITTED_MARKER)
+                continue
             # Text this method already cut (the service fits attachments once
             # to size history around them, and the engine fits what it was
             # given again) carries the notice; cutting it again must leave one
             # notice at the end, not the stump of the old one in the middle.
             text = (attachment.text_content or "").removesuffix(_ATTACHMENT_TRUNCATION_MARKER)
             room = cls._chars_within(text, share - _DOCUMENT_FRAME_TOKENS, ratio)
-            keep = max(0, max(room, _MIN_ATTACHMENT_CHARS) - len(_ATTACHMENT_TRUNCATION_MARKER))
+            keep = max(0, room - len(_ATTACHMENT_TRUNCATION_MARKER))
             fitted[index] = replace(attachment, text_content=text[:keep] + _ATTACHMENT_TRUNCATION_MARKER)
         return tuple(fitted)
 
@@ -1005,13 +1062,38 @@ class SynthesisAgent:
         holder_length = len(holder_text)
         holder_wide = token_budget.count_wide_characters(holder_text)
 
-        def prompt_tokens(history: str, wide: int) -> int:
-            return token_budget.with_safety_margin(
-                fixed_tokens
-                + token_budget.estimate_tokens_from_counts(
-                    holder_length + len(history), holder_wide + wide, ratio
-                )
+        # The same prompt sent with the history as one message per turn, which
+        # is how a turn usually goes out. Its fixed part has no history section,
+        # and each kept turn then costs its own text and the template overhead,
+        # exactly as estimate_prompt_tokens counts them. Measuring only the
+        # transcript let two hundred one-word exchanges through as a few hundred
+        # tokens when as turns they are thousands.
+        structured_base = PromptTemplate.build_synthesis_prompt(
+            query,
+            "",
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            attachments,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            history_messages=(),
+        )
+        structured_fixed = cls._raw_prompt_tokens(structured_base, ratio) + cls._image_tokens(structured_base)
+        # The omission note opens the oldest kept user turn; the extra token
+        # covers the rounding of that turn's estimate.
+        note_tokens = token_budget.estimate_tokens(f"{HISTORY_OMISSION_NOTE}\n\n", ratio) + 1
+
+        def prompt_tokens(history: str, wide: int, turns: int) -> int:
+            """The larger of the two renderings; ``turns`` is the structured history's raw cost."""
+            transcript = fixed_tokens + token_budget.estimate_tokens_from_counts(
+                holder_length + len(history), holder_wide + wide, ratio
             )
+            return token_budget.with_safety_margin(max(transcript, structured_fixed + turns))
+
+        def turns_cost(exchanges: int, history_cost: int, omitted: bool) -> int:
+            return history_cost + (note_tokens if omitted and exchanges else 0)
 
         selected: list[dict] = []
         # Rendered form of `selected`, kept in step with it. Re-rendering the
@@ -1021,6 +1103,8 @@ class SynthesisAgent:
         chunks: tuple[str, ...] = ()
         # Wide characters across `chunks`, each chunk counted once when it joins.
         chunks_wide = 0
+        # Raw structured cost of the exchanges in `chunks`.
+        chunks_turns = 0
 
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
@@ -1033,17 +1117,27 @@ class SynthesisAgent:
                 continue
             candidate_chunks = cls._prepend_history_chunks(message, selected, chunks)
             candidate_wide = chunks_wide
+            candidate_turns = chunks_turns
             if len(candidate_chunks) > len(chunks):
                 candidate_wide += token_budget.count_wide_characters(candidate_chunks[0])
+                candidate_turns += cls._exchange_turn_tokens(message, selected[0], ratio)
             history = cls._join_history_chunks(candidate_chunks)
             if index > 0:
                 # Older messages are being left out, so the note that says so
                 # is part of what this candidate costs.
                 history = with_omission_note(history)
-            if prompt_tokens(history, cls._rendered_wide(candidate_chunks, candidate_wide)) <= limit:
+            if (
+                prompt_tokens(
+                    history,
+                    cls._rendered_wide(candidate_chunks, candidate_wide),
+                    turns_cost(len(candidate_chunks), candidate_turns, index > 0),
+                )
+                <= limit
+            ):
                 selected = [message, *selected]
                 chunks = candidate_chunks
                 chunks_wide = candidate_wide
+                chunks_turns = candidate_turns
                 continue
             if not chunks and selected and selected[0].get("role") == "assistant":
                 shortened = cls._shorten_newest_answer(
@@ -1052,15 +1146,29 @@ class SynthesisAgent:
                     older_messages=index > 0,
                     limit=limit,
                     prompt_tokens=prompt_tokens,
+                    turns_cost=turns_cost,
+                    ratio=ratio,
                 )
                 if shortened is not None:
                     trailing, chunks = shortened
                     chunks_wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
+                    chunks_turns = (
+                        cls._exchange_turn_tokens(message, trailing[0], ratio) if chunks else 0
+                    )
                     selected = [message, *trailing]
                     continue
             break
 
         return selected
+
+    @staticmethod
+    def _exchange_turn_tokens(question: Mapping[str, Any], answer: Mapping[str, Any], ratio: float) -> int:
+        """Raw cost of one exchange sent as two turns, as estimate_prompt_tokens counts it."""
+        return sum(
+            token_budget.estimate_tokens(str(turn.get("content", "")).strip(), ratio)
+            + token_budget.MESSAGE_OVERHEAD_TOKENS
+            for turn in (question, answer)
+        )
 
     @staticmethod
     def _rendered_wide(chunks: tuple[str, ...], counted: int) -> int:
@@ -1087,7 +1195,9 @@ class SynthesisAgent:
         *,
         older_messages: bool,
         limit: int,
-        prompt_tokens: Callable[[str, int], int],
+        prompt_tokens: Callable[[str, int, int], int],
+        turns_cost: Callable[[int, int, bool], int],
+        ratio: float,
     ) -> tuple[list[dict], tuple[str, ...]] | None:
         """Cut the newest answer down until its exchange takes half the history room.
 
@@ -1100,7 +1210,7 @@ class SynthesisAgent:
         """
         answer = selected[0]
         text = str(answer.get("content", ""))
-        empty_history = prompt_tokens(cls._join_history_chunks(()), 0)
+        empty_history = prompt_tokens(cls._join_history_chunks(()), 0, 0)
         room = limit - empty_history
         if room <= 0 or len(text) <= _MIN_SHORTENED_ANSWER_CHARS:
             return None
@@ -1114,7 +1224,12 @@ class SynthesisAgent:
             if older_messages:
                 history = with_omission_note(history)
             wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
-            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide))
+            turns = turns_cost(
+                len(chunks),
+                cls._exchange_turn_tokens(message, shortened, ratio) if chunks else 0,
+                older_messages,
+            )
+            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide), turns)
 
         low, high = _MIN_SHORTENED_ANSWER_CHARS, len(text) - 1
         trailing, chunks, tokens = attempt(low)
@@ -1880,6 +1995,17 @@ class SynthesisAgent:
                 chat_kwargs["cancellation_event"] = cancellation_event
             response = self.chat_client.chat(**chat_kwargs)
             translated_text = response.get('message', {}).get('content', '')
+            if response.get("done_reason") == "length":
+                # The translation ran into its length or context limit: what
+                # came back is the start of the answer, not all of it.
+                # Accepting it replaced the complete answer with a shorter
+                # one, saved as the reply, with nothing to say so. Every
+                # runtime adapter reports a cut-off as done_reason "length".
+                logging.warning("Translation was cut off before the end of the answer.")
+                return TranslationResult.failed(
+                    "The translation was cut off before the end of the answer.",
+                    error_details="length",
+                )
             if translated_text:
                 return TranslationResult.succeeded(self._format_response(translated_text))
             else:
@@ -2042,7 +2168,11 @@ class SynthesisAgent:
             return MemoryCommand()
         try:
             payload = json.loads(raw_command)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
+            # A few thousand nested brackets fit under the size gate and
+            # overflow the decoder on some Pythons (3.11 at about 1,000 levels).
+            # The RecursionError escaped and turned a finished answer into a
+            # failed generation over an optional proposal.
             logging.warning("Ignoring malformed memory command (invalid JSON).")
             return MemoryCommand()
 

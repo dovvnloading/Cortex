@@ -654,6 +654,51 @@ class GenerationServiceTests(unittest.TestCase):
         self.assertIn("Translation failed", result.translation_error)
         self.assertIn("translation_failed", [event.phase for event in recorder.events])
 
+    def test_a_translation_cut_off_by_its_length_limit_keeps_the_complete_answer(self):
+        """#585: any non-empty translation was accepted, so one that stopped at
+        its length limit replaced the complete answer and was saved as it."""
+
+        class _CutOffTranslator:
+            def chat(self, **kwargs):
+                del kwargs
+                return {
+                    "message": {"content": "Only the first translated paragraph."},
+                    "done": True,
+                    "done_reason": "length",
+                }
+
+        translator = SynthesisAgent("chat", "title", "translate", _CutOffTranslator())
+        engine = _FakeEngine(translation=None)
+        engine.translate_text = translator.translate_text  # type: ignore[method-assign]
+        recorder = _ProgressRecorder()
+        service = GenerationService(
+            history_loader=lambda thread_id: [],
+            memory_loader=lambda: [],
+            engine_factory=lambda snapshot: engine,
+        )
+
+        result = service.generate(_snapshot(), progress_sink=recorder)
+
+        self.assertEqual(result.response, "response")
+        self.assertIsNotNone(result.translation_error)
+        self.assertIn("cut off", result.translation_error)
+        phases = [event.phase for event in recorder.events]
+        self.assertIn("translation_failed", phases)
+        self.assertNotIn("content_replace", phases)
+
+    def test_a_translation_that_finished_normally_still_replaces_the_answer(self):
+        class _Translator:
+            def chat(self, **kwargs):
+                del kwargs
+                return {"message": {"content": "respuesta"}, "done": True, "done_reason": "stop"}
+
+        result = SynthesisAgent("chat", "title", "translate", _Translator()).translate_text(
+            "response", "Spanish"
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.text, "respuesta")
+
     def test_an_invalid_translation_result_keeps_the_answer_too(self):
         engine = _FakeEngine(translation="not a TranslationResult")
         service = GenerationService(

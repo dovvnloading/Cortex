@@ -355,6 +355,10 @@ def test_approval_replay_decision_and_resume(tmp_path: Path) -> None:
         resumed = client.post(f"{ROOT}/{run_id}/resume", headers=headers)
         assert resumed.status_code == 200
         _run_done(client, headers, run_id)
+        # The store says completed a moment before the driver lets the run go;
+        # until then a resume is refused as busy, not as invalid. Asserting
+        # straight away failed whenever the runner was slow.
+        wait_until(lambda: not app.state.agent_workflow._live[run_id].driving)
         assert "resume" in FakeAgentLoop.calls
         _assert_code(client.post(f"{ROOT}/{run_id}/resume", headers=headers), 409, "invalid_state")
         assert (project / "app.py").read_bytes() == SOURCE

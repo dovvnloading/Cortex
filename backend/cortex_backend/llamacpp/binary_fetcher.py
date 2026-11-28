@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import zipfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -22,6 +23,12 @@ import httpx
 
 from .binary_release import AssetSpec, GpuBackend, PinnedRelease
 from .errors import BinaryVerificationError
+from .stoppable_http import (
+    StoppedBeforeResponse,
+    StoppedWhileReading,
+    iter_body_unless_stopped,
+    open_unless_stopped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +125,32 @@ def _content_length(response: httpx.Response) -> int | None:
         return None
 
 
-def _require_free_space(directory: Path, bytes_needed: int, *, reserve: int = _MIN_FREE_SPACE_BYTES) -> None:
+# Staging left by an installer that died (a hard exit skips its cleanup) is
+# reclaimed once nothing has touched it for this long. A live download or
+# extraction keeps writing, so it never looks this old.
+_ABANDONED_STAGING_SECONDS = 10 * 60
+
+
+def _newest_change(path: Path) -> float:
+    """The latest modification time of ``path`` or anything inside it."""
+    newest = path.lstat().st_mtime
+    if path.is_dir() and not path.is_symlink():
+        for folder, _dirs, files in os.walk(path):
+            for name in (*_dirs, *files):
+                try:
+                    newest = max(newest, (Path(folder) / name).lstat().st_mtime)
+                except OSError:
+                    continue
+    return newest
+
+
+def _require_free_space(
+    directory: Path,
+    bytes_needed: int,
+    *,
+    reserve: int = _MIN_FREE_SPACE_BYTES,
+    activity: str = "download",
+) -> None:
     """Require room for ``bytes_needed`` more while retaining a safety reserve.
 
     Mirrors download.py's ``_require_free_space`` for the GGUF downloader:
@@ -132,7 +164,7 @@ def _require_free_space(directory: Path, bytes_needed: int, *, reserve: int = _M
         raise BinaryVerificationError("Could not determine available disk space.") from exc
     if free < bytes_needed + reserve:
         raise BinaryVerificationError(
-            "There is not enough free disk space to download the local model runtime."
+            f"There is not enough free disk space to {activity} the local model runtime."
         )
 
 
@@ -286,6 +318,7 @@ class BinaryFetcher:
             return exe_path
 
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._reclaim_abandoned_staging()
         archive_tmp = self._runtime_dir / f".download-{uuid4().hex}"
         extract_tmp = self._runtime_dir / f".extract-{uuid4().hex}"
         try:
@@ -408,7 +441,16 @@ class BinaryFetcher:
                 if cancellation_event is not None
                 else _DOWNLOAD_TIMEOUT
             )
-            with client.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
+            stop = (
+                (lambda: cancellation_event.is_set())
+                if cancellation_event is not None
+                else None
+            )
+            with open_unless_stopped(
+                lambda: client.stream("GET", url, follow_redirects=True, timeout=timeout),
+                stop,
+                name="cortex-runtime-open",
+            ) as response:
                 response.raise_for_status()
                 # Reject an oversized transfer -- and check free space against
                 # the full advertised size -- before a single byte is written,
@@ -428,8 +470,16 @@ class BinaryFetcher:
                 # cleanup is deferred to there for every failure raised
                 # inside this loop -- same treatment as the pre-existing
                 # cancellation check right below.
+                # Pieces as they arrive, with Stop polled between them: a slow
+                # trickle that never fills a large chunk used to keep the loop
+                # below from ever reaching its cancellation check.
+                body = (
+                    iter_body_unless_stopped(response, stop, name="cortex-runtime-body")
+                    if stop is not None
+                    else response.iter_bytes(_DOWNLOAD_CHUNK_BYTES)
+                )
                 with destination.open("wb") as handle:
-                    for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                    for chunk in body:
                         if cancellation_event is not None and cancellation_event.is_set():
                             raise BinaryVerificationError("Local model runtime startup was cancelled.")
                         # Backstop for a missing or untruthful Content-Length:
@@ -443,6 +493,9 @@ class BinaryFetcher:
                         handle.write(chunk)
                         digest.update(chunk)
                         completed += len(chunk)
+        except (StoppedBeforeResponse, StoppedWhileReading):
+            destination.unlink(missing_ok=True)
+            raise BinaryVerificationError("Local model runtime startup was cancelled.") from None
         except httpx.HTTPError as exc:
             destination.unlink(missing_ok=True)
             # A socket that goes silent after the user asked to stop reaches
@@ -470,6 +523,33 @@ class BinaryFetcher:
                 "Downloaded llama.cpp archive failed checksum verification."
             )
 
+    def _reclaim_abandoned_staging(self) -> None:
+        """Remove download and extraction staging an earlier installer left behind.
+
+        Each attempt stages under a fresh random name and cleans up only its
+        own, so a hard exit mid-install left a partial archive or extraction
+        that nothing removed, run after run. Only those two kinds of name are
+        considered, and only once unchanged for a while; a cached runtime,
+        a build directory or anything else is never touched.
+        """
+        try:
+            entries = list(self._runtime_dir.iterdir())
+        except OSError:
+            return
+        cutoff = time.time() - _ABANDONED_STAGING_SECONDS
+        for entry in entries:
+            if not entry.name.startswith((".download-", ".extract-")):
+                continue
+            try:
+                if _newest_change(entry) > cutoff:
+                    continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            except OSError:
+                logger.debug("Could not remove abandoned runtime staging.")
+
     @staticmethod
     def _extract(
         archive_path: Path,
@@ -480,6 +560,10 @@ class BinaryFetcher:
         destination.mkdir(parents=True, exist_ok=True)
         resolved_destination = destination.resolve()
         with zipfile.ZipFile(archive_path) as archive:
+            # The archive stays on disk while it is unpacked, so the unpacked
+            # size must fit beside it with the same reserve the download kept.
+            unpacked = sum(member.file_size for member in archive.infolist() if not member.is_dir())
+            _require_free_space(destination, unpacked, activity="unpack")
             for member in archive.infolist():
                 _raise_if_cancelled(cancellation_event)
                 member_path = (destination / member.filename).resolve()
@@ -496,6 +580,8 @@ class BinaryFetcher:
                         chunk = source.read(_DOWNLOAD_CHUNK_BYTES)
                         if not chunk:
                             break
+                        # Other writers can use the space meanwhile.
+                        _require_free_space(destination, len(chunk), activity="unpack")
                         output.write(chunk)
         # llama.cpp release zips extract into a single top-level folder;
         # flatten so llama-server.exe lands directly at

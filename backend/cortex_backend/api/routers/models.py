@@ -44,7 +44,7 @@ from cortex_backend.llamacpp.download import (
     resolve_download_url,
     split_gguf_parts,
 )
-from cortex_backend.services.models import ModelPullProgress
+from cortex_backend.services.models import ModelPullNotInstalled, ModelPullProgress
 from cortex_backend.services import cloud_providers
 from cortex_backend.services.chat_client import CLOUD_PREFIX
 from dataclasses import asdict
@@ -138,7 +138,12 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 cancellation_event=cancel_event,
             )
             if not pulled:
-                return {"cancelled": True, "model": model}
+                if cancel_event.is_set():
+                    return {"cancelled": True, "model": model}
+                # Not stopped, so the pull ran to the end and verification did
+                # not find the exact tag: that is a failed install, not a
+                # cancellation the registry would record as success.
+                raise ModelPullNotInstalled()
             # Installation is complete; inventory refresh is a separate, fallible operation.
             # Do not turn an already-successful pull into a failed job if Ollama
             # briefly refuses the follow-up listing. The client rescans on completion.
@@ -268,8 +273,12 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         except GGUFDownloadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         # A file named like one part of a split model ("-00001-of-00003") is
-        # useless alone, so the job fetches every part, all or nothing.
-        parts = split_gguf_parts(url, filename)
+        # useless alone, so the job fetches every part, all or nothing. A set
+        # this cannot fetch is refused here, before anything is transferred.
+        try:
+            parts = split_gguf_parts(url, filename)
+        except GGUFDownloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         def runner(sink, cancel_event):
             sink.publish_progress("gguf_download", "starting", data={"filename": filename})
@@ -286,12 +295,18 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     },
                 )
 
+            # Publishing is the point after which Stop is too late; the
+            # registry decides, atomically with Stop, which one came first.
+            def commit() -> bool:
+                return sink.begin_commit("gguf_download", "Installing the model.")
+
             if parts is not None:
                 download_gguf_set(
                     parts,
                     directory,
                     progress_callback=publish,
                     cancellation_event=cancel_event,
+                    commit=commit,
                 )
                 # The first part names the whole set in the model list.
                 return {"filename": parts[0][1], "parts": len(parts)}
@@ -301,6 +316,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 directory,
                 progress_callback=publish,
                 cancellation_event=cancel_event,
+                commit=commit,
             )
             return {"filename": filename}
 

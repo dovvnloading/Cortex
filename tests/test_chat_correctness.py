@@ -7,7 +7,7 @@ import unittest
 from cortex_backend.api.schemas import ChatMessage
 from cortex_backend.repositories.chats import InMemoryChatRepository, LegacyDatabaseChatRepository
 from cortex_backend.repositories.storage import DatabaseManager
-from cortex_backend.core.generation import GenerationAttachment
+from cortex_backend.core.generation import AttachmentsDoNotFit, GenerationAttachment
 from cortex_backend.core.settings import CortexSettings
 from cortex_backend.services import token_budget
 from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
@@ -947,6 +947,18 @@ class AttachmentBudgetTests(unittest.TestCase):
         for item in fitted:
             self.assertIn("truncated to fit the model context", item.text_content or "")
 
+    def test_two_large_documents_that_fit_the_window_are_kept_whole(self):
+        """#601: the documents together were capped at one maximal document's
+        size, so two that fitted a 65,536-token window easily were both cut and
+        the user was told the window could not hold them."""
+        first = self._document("first", "a" * 96_000)
+        second = self._document("second", "b" * 96_000)
+
+        fitted = SynthesisAgent.fit_attachments_to_context((first, second), num_ctx=65536, **self.BUDGET)
+
+        self.assertEqual(fitted, (first, second))
+        self.assertTrue(self._prompt_fits(fitted, 65536))
+
     def test_a_small_document_keeps_all_its_text_and_the_large_one_gets_the_rest(self):
         small = self._document("small", "short note. " * 50)
         large = self._document("large", "long text. " * 40_000)
@@ -959,14 +971,59 @@ class AttachmentBudgetTests(unittest.TestCase):
         alone = self._kept_chars((large,), 16384)[0]
         self.assertGreater(large_kept, alone - 2_000)
 
-    def test_every_document_keeps_a_floor_even_when_the_window_has_no_room(self):
+    def _prompt_fits(self, fitted, num_ctx: int) -> bool:
+        prompt = PromptTemplate.build_synthesis_prompt(
+            self.BUDGET["query"],
+            self.BUDGET["chat_history"],
+            self.BUDGET["permanent_memories"],
+            self.BUDGET["memories_enabled"],
+            self.BUDGET["user_system_instructions"],
+            fitted,
+        )
+        used = SynthesisAgent.estimate_prompt_tokens(prompt, None)
+        return used + SynthesisAgent.output_token_reservation(num_ctx) <= num_ctx
+
+    def test_the_fitted_documents_never_make_the_prompt_overflow(self):
+        """#588: every document was granted its 256-character floor even once the
+        budget had run out, so eight of them overran the window by hundreds of
+        tokens, and a runtime without a tokenizer was sent the prompt anyway."""
+        documents = tuple(
+            self._document(f"doc{index}", "filler " * (200 + 100 * index)) for index in range(8)
+        )
+        for num_ctx in (1536, 2048, 2560, 3072, 4096, 8192):
+            with self.subTest(num_ctx=num_ctx):
+                fitted = SynthesisAgent.fit_attachments_to_context(
+                    documents, num_ctx=num_ctx, **self.BUDGET
+                )
+                self.assertTrue(self._prompt_fits(fitted, num_ctx))
+                # Every document is still listed, by name.
+                self.assertEqual([item.filename for item in fitted], [item.filename for item in documents])
+
+    def test_without_room_for_every_opening_the_smallest_keep_theirs_and_the_rest_are_listed(self):
+        documents = tuple(
+            self._document(f"doc{index}", "filler " * (200 + 100 * index)) for index in range(8)
+        )
+
+        fitted = SynthesisAgent.fit_attachments_to_context(documents, num_ctx=1536, **self.BUDGET)
+
+        texts = [item.text_content or "" for item in fitted]
+        stubs = [text for text in texts if "truncated to fit the model context" in text]
+        left_out = [text for text in texts if "left out" in text]
+        self.assertTrue(stubs and left_out)
+        self.assertEqual(len(stubs) + len(left_out), len(documents))
+        # The opening text goes to the smallest documents first.
+        self.assertEqual(texts[: len(stubs)], stubs)
+        for text in stubs:
+            self.assertGreaterEqual(len(text), 200)
+
+    def test_documents_that_cannot_even_be_listed_are_refused_not_sent(self):
         documents = tuple(self._document(f"doc{index}", "filler " * 20_000) for index in range(8))
 
-        kept = self._kept_chars(documents, 1024)
+        with self.assertRaises(AttachmentsDoNotFit) as raised:
+            SynthesisAgent.fit_attachments_to_context(documents, num_ctx=1024, **self.BUDGET)
 
-        for length in kept:
-            self.assertGreaterEqual(length, 200)
-            self.assertLess(length, 1_000)
+        self.assertEqual(raised.exception.error_details, "attachments_too_large")
+        self.assertIn("1024 tokens", raised.exception.user_message)
 
     def test_attachments_that_carry_no_text_are_returned_untouched(self):
         image = GenerationAttachment(
