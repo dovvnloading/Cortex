@@ -1880,6 +1880,17 @@ class SynthesisAgent:
                 chat_kwargs["cancellation_event"] = cancellation_event
             response = self.chat_client.chat(**chat_kwargs)
             translated_text = response.get('message', {}).get('content', '')
+            if response.get("done_reason") == "length":
+                # The translation ran into its length or context limit: what
+                # came back is the start of the answer, not all of it.
+                # Accepting it replaced the complete answer with a shorter
+                # one, saved as the reply, with nothing to say so. Every
+                # runtime adapter reports a cut-off as done_reason "length".
+                logging.warning("Translation was cut off before the end of the answer.")
+                return TranslationResult.failed(
+                    "The translation was cut off before the end of the answer.",
+                    error_details="length",
+                )
             if translated_text:
                 return TranslationResult.succeeded(self._format_response(translated_text))
             else:
