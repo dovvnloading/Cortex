@@ -987,7 +987,10 @@ class LocalExecutionCoordinator:
         except ScratchComputeError as exc:
             self._finish_scratch_failure(job_id, cancel_event, exc.code)
         except LeaseConflict:
-            self._fail_scratch_recovery(job_id, "lease_unavailable")
+            # Another live coordinator owns this job (the same rule as
+            # _run_code). This attempt never held it, so it must not write a
+            # failure over that coordinator's eventual result.
+            return
         except ExecutionTransitionConflict:
             # Cancellation committed while this attempt was starting; the store
             # refused the "running" write. See _run_code for the reasoning.
