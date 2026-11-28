@@ -74,7 +74,7 @@ def _string(args: Mapping[str, Any], name: str) -> str:
 
 
 class _Git:
-    def __init__(self, root: str | os.PathLike[str], run_id: str) -> None:
+    def __init__(self, root: str | os.PathLike[str], run_id: str, *, shadow_baseline: bool = False) -> None:
         self.root = canonical_workcopy(Path(root))
         info = self.root.lstat()
         self.identity = (info.st_dev, info.st_ino)
@@ -83,6 +83,8 @@ class _Git:
         self.run_id = run_id
         self._git_dir = ".git"
         self._initialization_attempted = False
+        self._shadow_baseline = shadow_baseline
+        self._lazy_baseline = False
         self._lock = RLock()
 
     def _check(self, context: ToolContext) -> None:
@@ -214,9 +216,22 @@ class _Git:
         if not stat.S_ISREG(info.st_mode) or self._initialization_attempted:
             raise GitToolError("unsafe_repository")
         shadow = self.root / ".cortex-agent-git"
+        if self._shadow_baseline:
+            # The work copy committed its starting contents here before the
+            # model ran (#582). Adopt it; never re-create it from files that
+            # may already be edited, if it went missing.
+            try:
+                shadow_info = shadow.lstat()
+            except FileNotFoundError:
+                raise GitToolError("unsafe_repository") from None
+            if _is_reparse(shadow_info) or not stat.S_ISDIR(shadow_info.st_mode):
+                raise GitToolError("unsafe_repository")
+            self._git_dir = ".cortex-agent-git"
+            return
         if shadow.exists() or shadow.is_symlink():
             raise GitToolError("unsafe_repository")
         self._initialization_attempted = True
+        self._lazy_baseline = True
         self._launch(
             ["git", "--no-pager", "-c", "core.hooksPath=", "-c", "core.fsmonitor=false",
              "-c", "commit.gpgSign=false", "init", "--bare", "-q", ".cortex-agent-git"],
@@ -298,9 +313,10 @@ class _Git:
                     raise GitToolError("invalid_arguments")
                 self._run(["add", "--all", "--", "."], context)
                 command = ["commit", "--no-gpg-sign", "-m", message]
-                if self._git_dir == ".cortex-agent-git":
-                    # First-use initialization may already have included edits
-                    # in the isolated baseline. Still record the user's commit.
+                if self._lazy_baseline:
+                    # A baseline made at first use may already hold edits made
+                    # before it. Still record the user's commit. A baseline the
+                    # work copy made at its start needs no such allowance.
                     command.insert(1, "--allow-empty")
             else:
                 raise GitToolError("invalid_arguments")
@@ -321,9 +337,14 @@ class _Git:
 def register_git_tools(
     registry: ToolRegistry, workcopy_root: str | os.PathLike[str], run_id: str, *,
     require_approval: bool = False,
+    shadow_baseline: bool = False,
 ) -> None:
-    """Register the allowlisted Git tools, optionally gating work-copy commits."""
-    git = _Git(workcopy_root, run_id)
+    """Register the allowlisted Git tools, optionally gating work-copy commits.
+
+    ``shadow_baseline`` says the work copy already holds its own history with
+    its starting contents (``WorkCopy.has_git_baseline``).
+    """
+    git = _Git(workcopy_root, run_id, shadow_baseline=shadow_baseline)
 
     def handle(call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
         if require_approval and call.name == "git_commit" and not context.approved:

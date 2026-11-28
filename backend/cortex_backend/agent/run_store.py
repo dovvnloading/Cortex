@@ -434,6 +434,17 @@ class AgentRunStore:
                 raise AgentRunStoreError("run ID already exists") from exc
             return _run(self._owned(connection, identifier, principal))
 
+    def project_roots(self) -> dict[str, str]:
+        """Every recorded run's project root, by run ID, across owners.
+
+        For the startup sweep of work copies only: it needs to know which
+        project a left-over copy's linked worktree belongs to, whichever
+        session created it.
+        """
+        with self._connection() as connection:
+            rows = connection.execute("SELECT id, project_root FROM runs").fetchall()
+        return {str(row["id"]): str(row["project_root"]) for row in rows}
+
     def get_run(self, run_id: str, *, owner: str) -> AgentRun | None:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM runs WHERE id = ? AND owner = ?", (run_id, owner)).fetchone()

@@ -182,9 +182,9 @@ def git_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[
     return launches
 
 
-def _registry(repo: Path) -> ToolRegistry:
+def _registry(repo: Path, *, shadow_baseline: bool = False) -> ToolRegistry:
     registry = ToolRegistry()
-    register_git_tools(registry, repo, "hostile-git-run")
+    register_git_tools(registry, repo, "hostile-git-run", shadow_baseline=shadow_baseline)
     return registry
 
 
@@ -392,7 +392,8 @@ def test_hostile_workcopy_isolated_from_source_git(tmp_path: Path, git_launches)
         assert (copy.path / "tracked.txt").read_text(encoding="utf-8") == "dirty original\n"
         _assert_no_markers(markers)
         (copy.path / "tracked.txt").write_text("safe agent edit\n", encoding="utf-8")
-        registry = _registry(copy.path)
+        # As the workflow does: the copy made its own baseline at creation.
+        registry = _registry(copy.path, shadow_baseline=copy.has_git_baseline)
         for name, args in (
             ("git_diff", {"path": "tracked.txt"}),
             ("git_show", {"rev": "HEAD", "path": "tracked.txt"}),
@@ -506,3 +507,54 @@ def test_scripted_model_follows_untrusted_git_text_but_cannot_push_or_add_remote
     assert all(not network for _, _, network in git_launches)
     assert "remote" not in (repo / ".git" / "config").read_text(encoding="utf-8").lower()
     assert not (tmp_path / "outside" / "network.marker").exists()
+
+
+def test_an_edit_made_before_the_first_git_call_is_a_change_not_the_baseline(
+    tmp_path: Path, git_launches,
+) -> None:
+    """#582: the first Git call snapshotted the already-edited files as its
+    baseline, so status and diff were clean and the named commit was empty."""
+    repo = _repo(tmp_path)
+    copy = workcopy.create(repo, "baseline-before-edit", confirmed=True, data_dir=tmp_path / "agent-data")
+    try:
+        assert copy.has_git_baseline
+        (copy.path / "tracked.txt").write_text("edited before any git call\n", encoding="utf-8")
+        registry = _registry(copy.path, shadow_baseline=True)
+
+        _result, status = _call(registry, "git_status")
+        assert "tracked.txt" in status["output"]
+        _result, diff = _call(registry, "git_diff", path="tracked.txt")
+        assert "+edited before any git call" in diff["output"]
+        result, data = _call(registry, "git_commit", message="Fix tracked.txt")
+        assert result.success, data
+
+        def shadow(*args: str) -> str:
+            return _git(copy.path, "--git-dir=.cortex-agent-git", "--work-tree=.", "-c", "core.bare=false", *args)
+
+        assert shadow("show", "-s", "--format=%s", "HEAD") == "Fix tracked.txt"
+        assert "tracked.txt" in shadow("show", "--name-only", "--format=", "HEAD")
+        assert shadow("show", "HEAD~1:tracked.txt") == (repo / "tracked.txt").read_text(encoding="utf-8").strip()
+        assert all("--allow-empty" not in argv for _, argv, _ in git_launches)
+    finally:
+        copy.discard()
+
+
+def test_a_missing_work_copy_baseline_is_refused_not_rebuilt_from_edited_files(
+    tmp_path: Path, git_launches,
+) -> None:
+    repo = _repo(tmp_path)
+    copy = workcopy.create(repo, "baseline-removed", confirmed=True, data_dir=tmp_path / "agent-data")
+    try:
+        shadow_dir = copy.path / ".cortex-agent-git"
+        for folder, _dirs, files in os.walk(shadow_dir):
+            for name in files:
+                os.chmod(Path(folder) / name, 0o600)  # Git writes objects read-only
+        shutil.rmtree(shadow_dir)
+        (copy.path / "tracked.txt").write_text("edited\n", encoding="utf-8")
+
+        result, data = _call(_registry(copy.path, shadow_baseline=True), "git_status")
+
+        assert not result.success and data["error"] == "unsafe_repository"
+        assert git_launches == []
+    finally:
+        copy.discard()

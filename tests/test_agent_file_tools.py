@@ -121,6 +121,22 @@ def test_grep_python_re_and_line_numbers(workcopy: tuple[Path, ToolRegistry]) ->
     assert _denied(registry, "grep", pattern="(") == "invalid_regex"
 
 
+@pytest.mark.parametrize("folder", ["src.py", "pkg", "lib.ts"])
+def test_grep_searches_a_folder_whose_name_looks_like_a_file(
+    workcopy: tuple[Path, ToolRegistry], folder: str
+) -> None:
+    """#581: a folder named src.py passed the file-name check, was then refused
+    as "not a regular file", and was never searched."""
+    root, registry = workcopy
+    (root / folder).mkdir()
+    (root / folder / "example.py").write_text("def greet():\n    return 1\n", encoding="utf-8")
+
+    result, searched = _call(registry, "grep", pattern="def greet", path=folder, glob="**/*.py")
+
+    assert result.success, searched
+    assert searched["hits"] == [{"path": f"{folder}/example.py", "line": 1, "text": "def greet():"}]
+
+
 def test_read_file_range_preserves_bytes_and_full_sha(workcopy: tuple[Path, ToolRegistry]) -> None:
     root, registry = workcopy
     contents = (root / "src" / "sample.py").read_bytes()
@@ -240,15 +256,20 @@ def test_glob_rejects_unsafe_pattern(workcopy: tuple[Path, ToolRegistry], patter
 
 def test_limits_are_checked_before_mutation(workcopy: tuple[Path, ToolRegistry]) -> None:
     root, registry = workcopy
-    exactly = "x" * files.MAX_FILE_BYTES
+    # A tool may leave a file only as large as the work copy can review (#583).
+    exactly = "x" * files.MAX_WRITTEN_FILE_BYTES
     result, _ = _call(registry, "write_file", path="size.py", content=exactly)
     assert result.success
-    assert (root / "size.py").read_bytes() == b"x" * files.MAX_FILE_BYTES
+    assert (root / "size.py").read_bytes() == b"x" * files.MAX_WRITTEN_FILE_BYTES
     assert _denied(registry, "write_file", path="size.py", content=exactly + "x") == "file_too_large"
-    assert (root / "size.py").stat().st_size == files.MAX_FILE_BYTES
+    assert (root / "size.py").stat().st_size == files.MAX_WRITTEN_FILE_BYTES
     assert _denied(registry, "edit_file", path="size.py", old="x", new="xx",
                    replace_all=True) == "file_too_large"
-    assert (root / "size.py").stat().st_size == files.MAX_FILE_BYTES
+    assert (root / "size.py").stat().st_size == files.MAX_WRITTEN_FILE_BYTES
+    # Reading still accepts files up to MAX_FILE_BYTES.
+    (root / "readable.py").write_bytes(b"r" * files.MAX_FILE_BYTES)
+    read, _ = _call(registry, "read_file", path="readable.py")
+    assert read.success
     (root / "oversized.py").write_bytes(b"z" * (files.MAX_FILE_BYTES + 1))
     assert _denied(registry, "read_file", path="oversized.py") == "file_too_large"
     assert _denied(registry, "edit_file", path="oversized.py", old="z", new="y") == "file_too_large"

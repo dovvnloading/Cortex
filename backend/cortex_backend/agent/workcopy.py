@@ -9,7 +9,7 @@ all accepted bytes are journaled before the first write for confirmed undo.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import difflib
 import fnmatch
@@ -63,6 +63,9 @@ class WorkCopyChange:
     baseline_sha256: str | None
     new_sha256: str | None
     diff: str
+    # False when the diff is over the review limit: it is shown as a notice
+    # and the change cannot be accepted, since nobody could see it.
+    reviewable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +247,9 @@ def _purge(directory: Path, *, keep_gitfile: bool = False) -> None:
                 _purge_onexc(path, exc)
 
 
+_MAX_IGNORE_RULES = 2048
+
+
 def _rules(files: Mapping[str, _File]) -> tuple[_IgnoreRule, ...]:
     rules: list[_IgnoreRule] = []
     for path, item in sorted(files.items()):
@@ -263,9 +269,49 @@ def _rules(files: Mapping[str, _File]) -> tuple[_IgnoreRule, ...]:
                     directory, pattern.lstrip("/"), negated,
                     pattern.endswith("/"), pattern.startswith("/"),
                 ))
-                if len(rules) > 2048:
+                if len(rules) > _MAX_IGNORE_RULES:
                     raise WorkCopyError("ignore_limit")
     return tuple(rules)
+
+
+class _IgnoreDiscovery:
+    """Prune .gitignore'd paths while the source is walked, before they count.
+
+    The work copy used to read the whole project first and apply the ignore
+    rules afterwards, so an ignored generated folder with a few thousand
+    small files hit the source-file limit and the run could not start (#608).
+    A directory's .gitignore is read when the walk first reaches something in
+    it, and its rules then apply to everything below it, as in Git.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._loaded: set[str] = set()
+        self.rules: tuple[_IgnoreRule, ...] = ()
+
+    def _load(self, directory: str) -> None:
+        if directory in self._loaded:
+            return
+        self._loaded.add(directory)
+        relative = f"{directory}/.gitignore" if directory else ".gitignore"
+        item = _file_at(self._root, relative)
+        if item is None:
+            return
+        try:
+            found = _rules({relative: item})
+        except UnicodeError as exc:
+            raise WorkCopyError("unsafe_file") from exc
+        if len(self.rules) + len(found) > _MAX_IGNORE_RULES:
+            raise WorkCopyError("ignore_limit")
+        self.rules = (*self.rules, *found)
+
+    def __call__(self, relative: str, is_directory: bool) -> bool:
+        parts = relative.split("/")[:-1]
+        for depth in range(len(parts) + 1):
+            self._load("/".join(parts[:depth]))
+        if is_directory:
+            return _directory_ignored(relative, self.rules)
+        return _ignored(relative, self.rules)
 
 
 def _git_glob(value: str, pattern: str) -> bool:
@@ -292,7 +338,22 @@ def _git_glob(value: str, pattern: str) -> bool:
     return re.fullmatch("".join(expression), value) is not None
 
 
+def _directory_ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
+    """Whether a directory, or one of the directories above it, is ignored."""
+    parts = relative.split("/")
+    return any(_ignored_as("/".join(parts[:index]), True, rules) for index in range(1, len(parts) + 1))
+
+
 def _ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
+    # Git refuses to re-include a file in a still-ignored parent directory.
+    parts = relative.split("/")
+    return _ignored_as(relative, False, rules) or any(
+        _ignored_as("/".join(parts[:index]), True, rules)
+        for index in range(1, len(parts))
+    )
+
+
+def _ignored_as(path: str, directory: bool, rules: tuple[_IgnoreRule, ...]) -> bool:
     def matches(path: str, directory: bool) -> bool:
         ignored = False
         for rule in rules:
@@ -316,17 +377,24 @@ def _ignored(relative: str, rules: tuple[_IgnoreRule, ...]) -> bool:
                 ignored = not rule.negated
         return ignored
 
-    # Git refuses to re-include a file in a still-ignored parent directory.
-    parts = relative.split("/")
-    return matches(relative, False) or any(
-        matches("/".join(parts[:index]), True)
-        for index in range(1, len(parts))
-    )
+    return matches(path, directory)
 
 
-def _snapshot(root: Path, ignores: tuple[_IgnoreRule, ...] = ()) -> dict[str, _File]:
+def _snapshot(
+    root: Path,
+    ignores: tuple[_IgnoreRule, ...] = (),
+    *,
+    prune: Callable[[str, bool], bool] | None = None,
+) -> dict[str, _File]:
+    if prune is None and ignores:
+        def by_rules(relative: str, is_directory: bool) -> bool:
+            if is_directory:
+                return _directory_ignored(relative, ignores)
+            return _ignored(relative, ignores)
+
+        prune = by_rules
     try:
-        captured, total, _scanned, _skipped, truncated = _capture_files(root)
+        captured, total, _scanned, _skipped, truncated = _capture_files(root, prune)
     except WorkspaceAccessError as exc:
         raise WorkCopyError("scan_failed") from exc
     if truncated:
@@ -428,6 +496,40 @@ def _git(root: Path, *arguments: str, max_bytes: int = MAX_GIT_TREE_BYTES) -> by
     return result.stdout
 
 
+# The work copy's own Git history: Git tools never use the source project's
+# metadata, which the linked worktree's .git file points at.
+SHADOW_GIT_DIR = ".cortex-agent-git"
+_SHADOW_EXCLUDES = ".cortex-agent-git/\n.cortex-agent-git-home/\n.cortex-agent-tmp/\n"
+
+
+def _init_shadow_baseline(copy: Path) -> None:
+    """Commit the work copy's starting contents as the baseline of its own history.
+
+    The Git tool used to create this history at its first call, from the files
+    as they were then: an edit made before any Git call was swallowed into the
+    baseline, so git_status and git_diff showed nothing and the requested
+    commit came out empty (#582). Here it is made before the model has run,
+    from exactly what the work copy started with. A fresh bare repository has
+    no configuration, and system and global configuration are disabled, so no
+    hook, filter or attribute driver from the project can run.
+    """
+    if os.path.lexists(copy / SHADOW_GIT_DIR):
+        raise WorkCopyError("unsafe_path")
+    _git(copy, "init", "--bare", "-q", SHADOW_GIT_DIR)
+    exclude = copy / SHADOW_GIT_DIR / "info" / "exclude"
+    if _is_reparse(exclude.lstat()) or not exclude.is_file():
+        raise WorkCopyError("unsafe_path")
+    exclude.write_text(_SHADOW_EXCLUDES, encoding="utf-8")
+    isolated = (
+        f"--git-dir={SHADOW_GIT_DIR}", "--work-tree=.", "-c", "core.bare=false",
+        "-c", "commit.gpgSign=false", "-c", "diff.external=",
+        "-c", f"core.attributesFile={os.devnull}", "-c", "submodule.recurse=false",
+        "-c", "user.name=Cortex Agent", "-c", "user.email=agent@cortex.invalid",
+    )
+    _git(copy, *isolated, "add", "--all", "--", ".")
+    _git(copy, *isolated, "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", "Work-copy baseline")
+
+
 def _head(root: Path) -> str | None:
     try:
         metadata = (root / ".git").lstat()
@@ -502,6 +604,11 @@ class WorkCopy:
         self._lock = RLock()
         self._discarded = False
 
+    @property
+    def has_git_baseline(self) -> bool:
+        """Whether this copy has its own Git history with its starting contents."""
+        return self._git_worktree
+
     @classmethod
     def create(
         cls, project_root: str | os.PathLike[str], run_id: str, confirmed: bool = True,
@@ -526,9 +633,10 @@ class WorkCopy:
         _refuse_external_git_includes(root)
         root_info = root.lstat()
         root_identity = (root_info.st_dev, root_info.st_ino)
-        source = _snapshot(root)
+        discovery = _IgnoreDiscovery(root)
+        source = _snapshot(root, prune=discovery)
         _check_root(root, root_identity)
-        ignores = _rules(source)
+        ignores = discovery.rules
         source = {p: item for p, item in source.items() if not _ignored(p, ignores)}
         head = _head(root)
         _check_root(root, root_identity)
@@ -560,6 +668,8 @@ class WorkCopy:
                 for relative, item in source.items():
                     _write(destination, relative, item.contents, item.mode)
                 baseline = _snapshot(destination, ignores)
+                if git:
+                    _init_shadow_baseline(destination)
                 _check_root(root, root_identity)
                 return cls(
                     root=root, path=destination, data_dir=private, run_id=run_id,
@@ -610,13 +720,23 @@ class WorkCopy:
                 else line + "\n\\ No newline at end of file\n"
                 for line in diff
             )
-            if len(rendered) > MAX_DIFF_CHARS:
-                raise WorkCopyError("diff_too_large")
+            reviewable = len(rendered) <= MAX_DIFF_CHARS
+            if not reviewable:
+                # One oversized change used to fail the whole changeset, so
+                # none of the others could be reviewed or accepted either.
+                rendered = (
+                    f"--- {'a/' + relative if initial else '/dev/null'}\n"
+                    f"+++ {'b/' + relative if latest else '/dev/null'}\n"
+                    f"[Cortex: this diff is {len(rendered):,} characters, over the "
+                    f"{MAX_DIFF_CHARS:,}-character review limit, so it is not shown and "
+                    "cannot be accepted. Ask for it in smaller steps.]\n"
+                )
             changes[relative] = WorkCopyChange(
                 kind="add" if initial is None else "delete" if latest is None else "modify",
                 baseline_sha256=_digest(before) if initial else None,
                 new_sha256=_digest(after) if latest else None,
                 diff=rendered,
+                reviewable=reviewable,
             )
         return changes, current
 
@@ -691,6 +811,8 @@ class WorkCopy:
             selected = tuple(sorted({_valid_path(path) for path in paths}))
             if not selected or len(selected) > 32 or not all(p in changes for p in selected):
                 raise WorkCopyError("invalid_selection")
+            if not all(changes[p].reviewable for p in selected):
+                raise WorkCopyError("diff_too_large")
             baselines: dict[str, _File | None] = {}
             proposed: dict[str, tuple[bytes, bytes, int]] = {}
             # Preflight ALL selected paths before writing anything to the journal or project.
@@ -847,6 +969,65 @@ class WorkCopy:
             except (OSError, WorkCopyError) as exc:
                 raise WorkCopyError("discard_failed") from exc
             self._discarded = True
+
+
+def sweep_abandoned_copies(
+    data_dir: str | os.PathLike[str] | None,
+    project_roots: Mapping[str, str],
+    *,
+    keep: Iterable[str] = (),
+) -> int:
+    """Remove the work copies an earlier process left behind; return how many.
+
+    Copies live only while their run object does. Shutdown closed their
+    shells but kept the copies, and a new process starts with no run objects,
+    so nothing could discard them: the private copies and their linked Git
+    worktrees stayed on disk for good (#607). A copy found here belongs to no
+    live run (those named in ``keep`` excepted) and is removed the way an
+    explicit discard removes it: no link is followed, and a linked worktree
+    is removed from the project it was made from, or pruned there if the
+    removal fails.
+    """
+    try:
+        paths = AppPaths.from_data_dir(data_dir) if data_dir is not None else AppPaths.for_current_user()
+    except (AppPathError, OSError, ValueError) as exc:
+        raise WorkCopyError("invalid_data_dir") from exc
+    container = paths.data_dir / "agent_workcopies"
+    try:
+        info = container.lstat()
+    except FileNotFoundError:
+        return 0
+    if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise WorkCopyError("unsafe_path")
+    kept = set(keep)
+    removed = 0
+    for entry in sorted(container.iterdir()):
+        if _RUN_ID.fullmatch(entry.name) is None or entry.name in kept:
+            continue
+        info = entry.lstat()
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            continue
+        gitfile = entry / ".git"
+        linked = os.path.lexists(gitfile) and stat.S_ISREG(gitfile.lstat().st_mode)
+        _purge(entry, keep_gitfile=linked)
+        if linked:
+            root = project_roots.get(entry.name)
+            try:
+                if root is None or not Path(root).is_dir():
+                    raise WorkCopyError("git_unavailable")
+                _git(Path(root), "worktree", "remove", "--force", str(entry))
+            except WorkCopyError:
+                gitfile.unlink()
+                entry.rmdir()
+                if root is not None and Path(root).is_dir():
+                    try:
+                        _git(Path(root), "worktree", "prune")
+                    except WorkCopyError:
+                        pass  # the next Git maintenance in that project prunes it
+        else:
+            entry.rmdir()
+        removed += 1
+    return removed
 
 
 def create(

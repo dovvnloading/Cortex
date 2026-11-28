@@ -61,6 +61,48 @@ def test_non_git_copy_excludes_secrets_dependencies_and_gitignore(tmp_path: Path
     assert (root / "src" / "app.py").is_file()
 
 
+def test_ignored_generated_files_do_not_count_against_the_copy_limits(tmp_path: Path) -> None:
+    """#608: the whole project was read before the ignore rules applied, so
+    2,050 tiny ignored files hit the 2,048-file limit and no run could start."""
+    root = tmp_path / "project"
+    (root / "generated").mkdir(parents=True)
+    (root / "app.py").write_bytes(b"print('tracked')\n")
+    (root / ".gitignore").write_bytes(b"generated/\n")
+    for index in range(2050):
+        (root / "generated" / f"item{index}.json").write_bytes(b"{}")
+
+    work = _copy(tmp_path, root)
+    try:
+        assert (work.path / "app.py").read_bytes() == b"print('tracked')\n"
+        assert not (work.path / "generated").exists()
+        assert work.changeset() == {}
+    finally:
+        work.discard()
+
+
+def test_nested_ignore_rules_apply_below_their_folder_and_ignored_folders_stay_ignored(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    (root / "pkg" / "build").mkdir(parents=True)
+    (root / "pkg" / ".gitignore").write_bytes(b"*.gen.py\n")
+    (root / "pkg" / "keep.py").write_bytes(b"keep = 1\n")
+    (root / "pkg" / "out.gen.py").write_bytes(b"generated = 1\n")
+    (root / "top.gen.py").write_bytes(b"not under pkg = 1\n")
+    (root / ".gitignore").write_bytes(b"pkg/build/\n!pkg/build/wanted.py\n")
+    (root / "pkg" / "build" / "wanted.py").write_bytes(b"inside an ignored folder\n")
+
+    work = _copy(tmp_path, root)
+    try:
+        assert (work.path / "pkg" / "keep.py").is_file()
+        assert not (work.path / "pkg" / "out.gen.py").exists()
+        assert (work.path / "top.gen.py").is_file(), "a nested rule reached outside its folder"
+        # As in Git, a file in an ignored folder cannot be re-included.
+        assert not (work.path / "pkg" / "build").exists()
+    finally:
+        work.discard()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
 def test_git_worktree_includes_dirty_and_untracked_files_without_hooks_or_filters(tmp_path: Path) -> None:
     root = _project(tmp_path)
@@ -132,6 +174,68 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
     assert (root / "empty.py").read_bytes() == _EMPTY_FILE_BYTES
     assert (root / "src" / "app.py").read_bytes() == b"print('original')\r\n"
     work.discard()
+
+
+def test_a_second_accepted_run_keeps_the_first_runs_changes(tmp_path: Path) -> None:
+    """#580: the first accept's undo point blocked every later accept on the
+    project with recovery_required, and nothing let the user keep its edits."""
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    (first.path / "src" / "app.py").write_bytes(b"first accepted change\n")
+    first.accept(["src/app.py"], confirmed=True)
+    first.discard()
+
+    second = _copy(tmp_path, root, "run-b")
+    try:
+        (second.path / "delete.py").write_bytes(b"second accepted change\n")
+        assert second.accept(["delete.py"], confirmed=True) == ("delete.py",)
+        assert (root / "src" / "app.py").read_bytes() == b"first accepted change\n"
+        assert (root / "delete.py").read_bytes() == b"second accepted change\n"
+
+        # Each undo point restores only its own run's files.
+        assert second.undo(confirmed=True) == ("delete.py",)
+        assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
+        assert (root / "src" / "app.py").read_bytes() == b"first accepted change\n"
+    finally:
+        second.discard()
+
+
+def test_undoing_an_earlier_accept_after_a_later_one_changed_the_file_is_refused(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    (first.path / "src" / "app.py").write_bytes(b"first\n")
+    first.accept(["src/app.py"], confirmed=True)
+    second = _copy(tmp_path, root, "run-b")
+    (second.path / "src" / "app.py").write_bytes(b"second\n")
+    second.accept(["src/app.py"], confirmed=True)
+
+    with pytest.raises(WorkCopyError) as refused:
+        first.undo(confirmed=True)
+
+    assert refused.value.code == "stale_source"
+    assert (root / "src" / "app.py").read_bytes() == b"second\n"
+    first.discard()
+    second.discard()
+
+
+def test_an_unfinished_write_still_blocks_a_new_accept_on_the_project(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    store = WorkspaceCheckpointStore(first.data_dir / "workspace_checkpoints.sqlite")
+    info = root.lstat()
+    store.prepare(
+        owner="agent-workcopy", checkpoint_id="interrupted-batch", root=root,
+        root_identity=(info.st_dev, info.st_ino),
+        candidates={"delete.py": (_DELETED_FILE_BYTES, b"half written\n", 0o100644)},
+    )
+    (first.path / "src" / "app.py").write_bytes(b"blocked change\n")
+
+    with pytest.raises(WorkCopyError) as blocked:
+        first.accept(["src/app.py"], confirmed=True)
+
+    assert blocked.value.code == "recovery_required"
+    assert (root / "src" / "app.py").read_bytes() == b"print('original')\r\n"
+    first.discard()
 
 
 def test_undo_never_rebases_unrelated_external_files_into_staged_deletions(tmp_path: Path) -> None:
@@ -410,3 +514,66 @@ def test_durable_restore_after_copy_discard_and_simulated_restart(tmp_path: Path
     assert recovered == ("delete.py", "new.py")
     assert not (root / "new.py").exists()
     assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
+def test_a_restart_removes_work_copies_the_earlier_process_left(tmp_path: Path) -> None:
+    """#607: shutdown kept the copies and a new process had no run objects to
+    discard them with, so copies and linked worktrees stayed for good."""
+    from cortex_backend.agent.run_store import AgentRunStore
+    from cortex_backend.services.agent_runs import AgentRuns
+
+    data = tmp_path / "cortex-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "app.py").write_bytes(b"print('tracked')\n")
+    _git(repo, "add", "app.py")
+    _git(repo, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "init")
+    plain = _project(tmp_path)
+
+    store = AgentRunStore(data / "agent" / "runs.sqlite")
+    linked = create(repo, "left-linked", data_dir=data, confirmed=True)
+    loose = create(plain, "left-plain", data_dir=data, confirmed=True)
+    for copy, root in ((linked, repo), (loose, plain)):
+        (copy.path / "unaccepted.py").write_bytes(b"never accepted = 1\n")
+        store.create_run(owner="earlier-session", project_root=root, workcopy=copy.path,
+                         mode="ask", model="m", run_id=copy.run_id)
+    assert linked.path.name in _git(repo, "worktree", "list", "--porcelain")
+
+    # A new process: no run objects, the same data directory.
+    AgentRuns(data_dir=data).list_runs(owner="new-session")
+
+    assert not linked.path.exists()
+    assert not loose.path.exists()
+    listed = _git(repo, "worktree", "list", "--porcelain")
+    assert linked.path.name not in listed, "the linked worktree's metadata was left in the project"
+    assert (repo / "app.py").read_bytes() == b"print('tracked')\n"
+    assert (plain / "src" / "app.py").is_file()
+
+
+def test_one_change_too_large_to_review_leaves_the_others_reviewable(tmp_path: Path) -> None:
+    """#583: a 61,000-character diff failed the whole changeset, so no change
+    in the run could be reviewed or accepted."""
+    root = _project(tmp_path)
+    work = _copy(tmp_path, root)
+    try:
+        lines = "".join(f"value_{index} = {index}\n" for index in range(4000))
+        (work.path / "generated.py").write_bytes(lines.encode("utf-8"))
+        (work.path / "src" / "app.py").write_bytes(b"print('small change')\r\n")
+
+        changes = work.changeset()
+
+        assert set(changes) == {"generated.py", "src/app.py"}
+        assert not changes["generated.py"].reviewable
+        assert "review limit" in changes["generated.py"].diff
+        assert len(changes["generated.py"].diff) < 1000
+        assert changes["src/app.py"].reviewable
+        with pytest.raises(WorkCopyError) as refused:
+            work.accept(["generated.py", "src/app.py"], confirmed=True)
+        assert refused.value.code == "diff_too_large"
+        assert not (root / "generated.py").exists(), "nothing of a refused batch is written"
+        assert work.accept(["src/app.py"], confirmed=True) == ("src/app.py",)
+        assert (root / "src" / "app.py").read_bytes() == b"print('small change')\r\n"
+    finally:
+        work.discard()

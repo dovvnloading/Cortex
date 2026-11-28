@@ -226,7 +226,16 @@ def _read_regular_source(path: Path, info: os.stat_result) -> bytes | None:
         os.close(descriptor)
 
 
-def _capture_files(root: Path) -> tuple[Mapping[str, WorkspaceFile], int, int, int, bool]:
+def _capture_files(
+    root: Path, prune: Callable[[str, bool], bool] | None = None
+) -> tuple[Mapping[str, WorkspaceFile], int, int, int, bool]:
+    """Read the eligible source files under ``root``, within the workspace limits.
+
+    ``prune(relative_path, is_directory)`` returning True leaves an entry out
+    before it counts against the file and byte limits, and a pruned directory
+    is never entered. The Agent work copy uses it for the project's
+    .gitignore rules. The scanned-entry limit still counts every entry read.
+    """
     files: dict[str, WorkspaceFile] = {}
     scanned = 0
     skipped = 0
@@ -266,12 +275,17 @@ def _capture_files(root: Path) -> tuple[Mapping[str, WorkspaceFile], int, int, i
                 skipped += 1
                 continue
             if stat.S_ISDIR(info.st_mode):
-                if _permitted_name(entry.name, directory=True):
+                if _permitted_name(entry.name, directory=True) and not (
+                    prune is not None and prune(Path(entry.path).relative_to(root).as_posix(), True)
+                ):
                     pending.append(Path(entry.path))
                 else:
                     skipped += 1
                 continue
             if not stat.S_ISREG(info.st_mode) or not _permitted_name(entry.name, directory=False):
+                skipped += 1
+                continue
+            if prune is not None and prune(Path(entry.path).relative_to(root).as_posix(), False):
                 skipped += 1
                 continue
             if len(files) >= MAX_WORKSPACE_FILES:

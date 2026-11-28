@@ -23,6 +23,7 @@ from time import monotonic
 from typing import Any, Final
 
 from cortex_backend.services.workspace_context import (
+    MAX_WORKSPACE_FILE_BYTES,
     WorkspaceAccessError,
     _is_reparse,
     _permitted_name,
@@ -34,6 +35,11 @@ from ..tool_registry import NeedsApproval, ToolContext, ToolInterrupted, ToolReg
 from ..workcopy import WorkCopyError, _check_root, _local_root, _valid_path
 
 MAX_FILE_BYTES: Final = 1024 * 1024
+# The largest file a tool may leave in the work copy: the most the copy's
+# snapshot reads. A larger one was written and reported as success, then left
+# out of the changeset as if nothing had changed, so it could be neither
+# reviewed nor accepted (#583). Reading still accepts up to MAX_FILE_BYTES.
+MAX_WRITTEN_FILE_BYTES: Final = MAX_WORKSPACE_FILE_BYTES
 MAX_READ_LINES: Final = 400
 MAX_GREP_HITS: Final = 200
 MAX_RESULTS: Final = 200
@@ -228,6 +234,14 @@ class _Files:
                 raise FileToolError("unsafe_path")
             self._canonical(cursor)
         return cursor
+
+    def _is_directory(self, path: str) -> bool:
+        """Whether ``path`` names a real directory in the copy (no link is followed)."""
+        try:
+            self._directory(path)
+        except FileToolError:
+            return False
+        return True
 
     def _file(self, path: str, *, create_parents: bool = False, required: bool = True
               ) -> tuple[str, Path, os.stat_result | None]:
@@ -436,9 +450,10 @@ class _Files:
         selector = _glob_pattern(_string(args, "glob", default="**"))
         self._check(context)
         if location not in {"", "."}:
-            try:
-                _file_name(location)
-            except FileToolError:
+            # Decided by what is on disk, not by the name: a folder called
+            # src.py is a valid file name too, and was refused as a file that
+            # is not regular instead of being searched.
+            if self._is_directory(location):
                 directory = _directory_name(location)
                 self._directory(directory)
                 paths: Iterator[str] = self._files(directory, context)
@@ -491,7 +506,7 @@ class _Files:
         if "\x00" in contents:
             raise FileToolError("binary_file")
         data = contents.encode("utf-8")
-        if len(data) > MAX_FILE_BYTES:
+        if len(data) > MAX_WRITTEN_FILE_BYTES:
             raise FileToolError("file_too_large")
         self._check(context)
         relative = self._write(path, data)
@@ -514,7 +529,7 @@ class _Files:
             raise FileToolError("ambiguous_edit")
         updated = source.replace(old, new) if replace_all else source[:first] + new + source[first + len(old):]
         encoded = updated.encode("utf-8")
-        if len(encoded) > MAX_FILE_BYTES:
+        if len(encoded) > MAX_WRITTEN_FILE_BYTES:
             raise FileToolError("file_too_large")
         self._write(relative, encoded)
         return {"path": relative, "replacements": source.count(old) if replace_all else 1,
