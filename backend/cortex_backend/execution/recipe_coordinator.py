@@ -59,6 +59,16 @@ _RECIPE_WORDING = UnsuccessfulJobWording(
 )
 
 
+class ExecutionShutdownIncomplete(RuntimeError):
+    """Shutdown timed out with work still running.
+
+    The coordinator keeps its supervisor ownership and its record of the
+    unfinished threads; calling shutdown again retries. ExecutionLifecycle
+    treats this like any failed stop: the coordinator stays held and no second
+    one is built beside it.
+    """
+
+
 class RecipeExecutionError(RuntimeError):
     """Stable, redacted coordinator failure category."""
 
@@ -195,8 +205,18 @@ class RecipeExecutionCoordinator:
     def start_image_transform(self, request: RecipeImageRequest) -> ExecutionJob:
         if not isinstance(request, RecipeImageRequest):
             raise TypeError("request must be a RecipeImageRequest")
-        self._load_input(request.owner, request.source_artifact_id)
         payload = self._payload_for_request(request)
+        # A retry of a request that was already admitted answers with that job
+        # (or a conflict) before its input is looked at: the input may have
+        # expired since, while the job and its result are still retained.
+        existing = self.repository.find_job_for_request(
+            owner=request.owner, request_id=request.request_id
+        )
+        if existing is not None:
+            if existing.profile != RECIPE_IMAGE_PROFILE or self._canonical_payload(existing.payload) != self._canonical_payload(payload):
+                raise RecipeExecutionError("request_conflict")
+            return existing
+        self._load_input(request.owner, request.source_artifact_id)
         job, created = self.repository.create_job(
             job_id=uuid4().hex,
             owner=request.owner,
@@ -272,6 +292,10 @@ class RecipeExecutionCoordinator:
         deadline = time.monotonic() + timeout
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # A worker that is still unwinding can still write to the store,
+            # so ownership is not given up and a clean stop is not reported.
+            raise ExecutionShutdownIncomplete("image recipe workers are still stopping")
         if self._supervisor_lease_active:
             self.repository.release_supervisor_lease(lease_owner=self._supervisor_owner)
             self._supervisor_lease_active = False
@@ -482,6 +506,19 @@ class RecipeExecutionCoordinator:
             wording=_RECIPE_WORDING,
         )
 
+    def _completed(self, job_id: str) -> bool:
+        """Whether the job is recorded as succeeded; True when that cannot be read.
+
+        Used before rolling back a published output: when the store cannot say,
+        keeping an artifact retention will reclaim is safer than deleting one a
+        committed result may refer to.
+        """
+        try:
+            job = self.repository.get_job(job_id)
+        except Exception:
+            return True
+        return job is not None and job.status == "succeeded"
+
     def _delete_published(self, published: tuple[PublishedArtifact, ...]) -> None:
         for item in published:
             try:
@@ -578,7 +615,9 @@ class RecipeExecutionCoordinator:
                     failure_code = "artifact_cleanup_pending"
             self._finish_failure(job_id, cancel_event, failure_code)
         except LeaseConflict:
-            self._fail_recovery(job_id, "lease_unavailable")
+            # Another live coordinator owns this job; this attempt never held
+            # it and must not write a failure over that owner's result.
+            return
         except ExecutionTransitionConflict:
             # Cancellation committed while this attempt was starting, so the
             # store refused the "running" write (see _run_code in
@@ -586,7 +625,17 @@ class RecipeExecutionCoordinator:
             # as cancelled is all that is required.
             self._finish_failure(job_id, cancel_event, "cancelled")
         except Exception:
-            self._finish_failure(job_id, cancel_event, "coordinator_failed")
+            failure_code = "coordinator_failed"
+            # An unexpected failure after publishing (the completion write
+            # failing, say) must not leave an output no result refers to.
+            # Unless the completion is known to have committed: then the
+            # artifact is the job's result and stays.
+            if published and not self._completed(job_id):
+                try:
+                    self._delete_published(published)
+                except RecipeExecutionError:
+                    failure_code = "artifact_cleanup_pending"
+            self._finish_failure(job_id, cancel_event, failure_code)
         finally:
             if attempt is not None:
                 try:
@@ -605,6 +654,7 @@ class RecipeExecutionCoordinator:
 
 __all__ = [
     "DEFAULT_RECIPE_RETENTION_SECONDS",
+    "ExecutionShutdownIncomplete",
     "MAX_RECIPE_RETENTION_SECONDS",
     "RecipeExecutionCoordinator",
     "RecipeExecutionError",

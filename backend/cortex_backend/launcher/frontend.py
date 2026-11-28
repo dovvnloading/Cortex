@@ -81,11 +81,11 @@ def _digest_files(frontend_root: Path, paths: list[Path]) -> str:
 
 def _tracked_files(frontend_root: Path) -> list[Path]:
     files = [frontend_root / name for name in TRACKED_CONFIG]
-    files.extend(
-        path
-        for extension in ("*.ts", "*.tsx", "*.css")
-        for path in (frontend_root / "src").rglob(extension)
-    )
+    # Every file under src, not a list of extensions: a stylesheet or module
+    # can import an image, a font or JSON, and Vite bundles it. Hashing only
+    # .ts, .tsx and .css let a changed imported image keep the old bundle.
+    # A test file here costs at most an unneeded rebuild.
+    files.extend(path for path in (frontend_root / "src").rglob("*") if path.is_file())
     public_dir = frontend_root / "public"
     if public_dir.is_dir():
         files.extend(path for path in public_dir.rglob("*") if path.is_file())
@@ -242,6 +242,60 @@ def _frontend_build_lock(frontend_root: Path):
         handle.close()
 
 
+_DIST_BACKUP_PREFIX = ".cortex-dist-backup-"
+
+
+def _recover_stranded_dist(frontend_root: Path) -> None:
+    """Restore a bundle an interrupted publication set aside; call holding the build lock.
+
+    Publishing renames the live ``dist`` to a backup and then the new bundle
+    into place, putting the backup back only from the same process. One
+    killed between the two renames left no ``dist`` and the last working
+    bundle under a backup name nothing read again: ``--skip-build-check``,
+    or a launch whose rebuild then failed, could not start, and the backups
+    were never removed. The newest complete backup becomes ``dist`` again;
+    leftover backups are removed only once a complete ``dist`` is in place,
+    since until then one of them may be the only working bundle.
+    """
+    dist = frontend_root / "dist"
+    try:
+        backups = sorted(
+            (path for path in frontend_root.glob(f"{_DIST_BACKUP_PREFIX}*") if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        logger.warning("Could not look for frontend bundles set aside by a build: %s", exc)
+        return
+    if not backups:
+        return
+    if not dist.exists():
+        for candidate in backups:
+            if not (candidate / "index.html").is_file():
+                continue
+            try:
+                os.replace(candidate, dist)
+            except OSError as exc:
+                logger.warning("Could not restore the previous frontend bundle: %s", exc)
+                return
+            logger.warning("Restored the previous frontend bundle after an interrupted build.")
+            break
+    if not (dist / "index.html").is_file():
+        return
+    for candidate in backups:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _recover_stranded_dist_unless_building(frontend_root: Path) -> None:
+    """``_recover_stranded_dist`` under the build lock; a build in progress is left to finish its own."""
+    try:
+        with _frontend_build_lock(frontend_root):
+            _recover_stranded_dist(frontend_root)
+    except FrontendBuildError:
+        pass
+
+
 def _reclaim_stale_staging_directories(parent: Path, keep: Path) -> None:
     """Remove staging directories orphaned by a crashed or killed build."""
     try:
@@ -291,29 +345,100 @@ def _install_cache_root(frontend_root: Path) -> Path:
     return frontend_root / INSTALL_CACHE_DIRNAME
 
 
+# Marks the cache format. A marker without it predates symlink-preserving
+# copies and complete installs: its tree may hold dereferenced ``.bin``
+# entries or lack the devDependencies, so it is never a hit.
+_INSTALL_CACHE_FORMAT = 2
+_PARTIAL_CACHE_PREFIX = ".node_modules-"
+# A source build needs the whole dependency tree: TypeScript and Vite are
+# devDependencies, and Vite's bundler loads its platform binary from an
+# optional one. NODE_ENV=production or an npm "omit" setting in the
+# environment or an .npmrc made a plain "npm ci" install less, and that tree
+# was cached under the lockfile's digest, so every later build reused it and
+# failed even after the setting was gone. Named here, each type is installed
+# whatever the environment says ("include" wins over "omit").
+_COMPLETE_INSTALL_FLAGS = ("--include=dev", "--include=optional", "--include=peer")
+_PARTIAL_CACHE_SUFFIX = ".partial"
+
+
 def _install_if_needed(build_root: Path, expected_lock_digest: str, cache_root: Path) -> None:
-    """Install dependencies into ``build_root``, reusing a stable cache when possible."""
+    """Install dependencies into ``build_root``, reusing a stable cache when possible.
+
+    Both copies keep symbolic links as links. npm installs package
+    executables as relative links under ``node_modules/.bin``; copying the
+    target in their place put ``tsc`` in a folder where its own relative
+    imports do not resolve, so every build after the first failed on a
+    POSIX host.
+    """
     node_modules = build_root / "node_modules"
     cached_node_modules = cache_root / "node_modules"
-    marker = cache_root / INSTALL_MANIFEST_NAME
-    cached_digest = None
-    if marker.is_file():
+    if _cached_digest(cache_root) == expected_lock_digest and cached_node_modules.is_dir():
         try:
-            cached_digest = json.loads(marker.read_text(encoding="utf-8"))["lock_digest"]
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            cached_digest = None
-    if cached_digest == expected_lock_digest and cached_node_modules.is_dir():
-        shutil.copytree(cached_node_modules, node_modules)
-        return
-    _run([_tool_name("npm"), "ci"], cwd=build_root)
-    cache_root.mkdir(parents=True, exist_ok=True)
-    if cached_node_modules.exists():
-        shutil.rmtree(cached_node_modules)
-    shutil.copytree(node_modules, cached_node_modules)
-    marker.write_text(
-        json.dumps({"lock_digest": expected_lock_digest}, indent=2),
-        encoding="utf-8",
-    )
+            shutil.copytree(cached_node_modules, node_modules, symlinks=True)
+            return
+        except (OSError, shutil.Error):
+            # A cache that cannot be copied is a miss; install from scratch.
+            logger.warning("Could not reuse the frontend dependency cache; reinstalling.")
+            shutil.rmtree(node_modules, ignore_errors=True)
+    _run([_tool_name("npm"), "ci", *_COMPLETE_INSTALL_FLAGS], cwd=build_root)
+    _save_install_cache(node_modules, cache_root, expected_lock_digest)
+
+
+def _cached_digest(cache_root: Path) -> str | None:
+    """The lockfile digest the cache holds, or None when it is not a usable cache."""
+    marker = cache_root / INSTALL_MANIFEST_NAME
+    try:
+        stored = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(stored, dict) or stored.get("format") != _INSTALL_CACHE_FORMAT:
+        return None
+    digest = stored.get("lock_digest")
+    return digest if isinstance(digest, str) else None
+
+
+def _save_install_cache(node_modules: Path, cache_root: Path, lock_digest: str) -> None:
+    """Publish a freshly installed ``node_modules`` as the cache for ``lock_digest``.
+
+    The marker used to stay in place while the old tree was deleted and the
+    new one copied over it, so an interrupted or failed copy left the old
+    digest vouching for a partial or different tree, and every later build
+    with that lockfile reused it. Now the marker goes first, the new tree is
+    copied under a name of its own and renamed into place, and only then is a
+    marker for it written. Saving is best effort: the build already has its
+    dependencies, and a cache left unsaved is only a miss next time.
+    """
+    marker = cache_root / INSTALL_MANIFEST_NAME
+    cached_node_modules = cache_root / "node_modules"
+    staged = cache_root / f"{_PARTIAL_CACHE_PREFIX}{uuid.uuid4().hex}{_PARTIAL_CACHE_SUFFIX}"
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        marker.unlink(missing_ok=True)
+        _discard_partial_caches(cache_root)
+        shutil.copytree(node_modules, staged, symlinks=True)
+        if cached_node_modules.exists() or cached_node_modules.is_symlink():
+            shutil.rmtree(cached_node_modules)
+        os.replace(staged, cached_node_modules)
+        written = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}.tmp")
+        written.write_text(
+            json.dumps({"format": _INSTALL_CACHE_FORMAT, "lock_digest": lock_digest}, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(written, marker)
+    except (OSError, shutil.Error):
+        logger.warning("Could not save the frontend dependency cache; the next build reinstalls.")
+        shutil.rmtree(staged, ignore_errors=True)
+        for leftover in cache_root.glob(f"{INSTALL_MANIFEST_NAME}.*.tmp"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+
+
+def _discard_partial_caches(cache_root: Path) -> None:
+    """Remove trees an interrupted save left half copied (builds are serialized by the build lock)."""
+    for partial in cache_root.glob(f"{_PARTIAL_CACHE_PREFIX}*{_PARTIAL_CACHE_SUFFIX}"):
+        shutil.rmtree(partial, ignore_errors=True)
 
 
 def build_frontend(
@@ -325,10 +450,11 @@ def build_frontend(
     if not (frontend_root / "package.json").is_file():
         raise FrontendBuildError("frontend/package.json is missing from the source checkout.")
     with _frontend_build_lock(frontend_root):
+        _recover_stranded_dist(frontend_root)
         build_root = _stage_frontend_source(frontend_root)
         staging = build_root / f".cortex-dist-staging-{uuid.uuid4().hex}"
         dist = frontend_root / "dist"
-        backup = frontend_root / f".cortex-dist-backup-{uuid.uuid4().hex}"
+        backup = frontend_root / f"{_DIST_BACKUP_PREFIX}{uuid.uuid4().hex}"
         try:
             lock = lock_digest(build_root)
             source = source_digest(build_root)
@@ -392,6 +518,7 @@ def ensure_frontend(
         if not (dist / "index.html").is_file():
             raise FrontendBuildError("Packaged Cortex is missing its frontend bundle.")
         return dist
+    _recover_stranded_dist_unless_building(frontend_root)
     if skip_check:
         if not (dist / "index.html").is_file():
             raise FrontendBuildError("--skip-build-check requested but frontend/dist is missing.")

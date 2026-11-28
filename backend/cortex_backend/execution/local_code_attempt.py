@@ -9,7 +9,6 @@ at a checkpoint until that job is attached.
 from __future__ import annotations
 
 from collections.abc import Mapping
-import json
 import multiprocessing
 from threading import Event, Lock
 import time
@@ -26,12 +25,15 @@ from .code_execution import (
     MAX_CODE_OUTPUT_BYTES,
     MAX_CODE_TIMEOUT_SECONDS,
     MAX_CODE_VALUE_BYTES,
+    code_value_json_bytes,
     code_worker_main,
     validate_code_source,
 )
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     _contain_worker,
+    ReceiveInterrupted,
+    _receive_within,
     _release_worker,
     _stop_process,
 )
@@ -120,7 +122,20 @@ class LocalCodeAttempt:
                     cancelled_at = cancelled_at or time.monotonic()
                 if receiver.poll(0.025):
                     try:
-                        message = receiver.recv()
+                        message = _receive_within(
+                            receiver,
+                            process,
+                            deadline=deadline if deadline is not None else startup_deadline,
+                            cancelled=lambda: cancel_event.is_set() or self._cancel_event.is_set(),
+                            cancelled_at=cancelled_at,
+                            grace_seconds=self._cancel_grace_seconds,
+                        )
+                    except ReceiveInterrupted as interrupted:
+                        raise CodeExecutionError(
+                            "cancelled" if interrupted.reason == "cancelled"
+                            else "worker_startup_timeout" if deadline is None
+                            else "worker_timeout"
+                        ) from None
                     except (EOFError, OSError):
                         raise CodeExecutionError("worker_failed") from None
                     if (
@@ -197,7 +212,10 @@ class LocalCodeAttempt:
             if type(truncated) is not bool or type(duration_ms) is not int or not 0 <= duration_ms <= int(MAX_CODE_TIMEOUT_SECONDS * 1_000):
                 raise CodeExecutionError("worker_output_invalid")
             value = result.get("value")
-            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_CODE_VALUE_BYTES:
+            # The same measure the worker bounded the value with: default
+            # separators add a space after every comma and colon, so a value
+            # the worker accepted could be refused here.
+            if code_value_json_bytes(value) > MAX_CODE_VALUE_BYTES:
                 raise CodeExecutionError("worker_output_invalid")
             return CodeExecutionResult(
                 stdout=stdout,

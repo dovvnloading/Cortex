@@ -175,11 +175,13 @@ class InstanceLock:
             )
             os.replace(temporary, self.record_path)
         except (OSError, AppPathError) as exc:
-            handle.close()
+            # Remove the secret while the lock is still held: once it is
+            # released, the next launcher may already have written its own.
             try:
                 self.secret_path.unlink()
             except OSError:
                 pass
+            handle.close()
             raise InstanceLockError(
                 f"Cortex could not publish its instance record ({type(exc).__name__})."
             ) from exc
@@ -204,24 +206,38 @@ class InstanceLock:
     def release(self) -> None:
         if self._handle is None:
             return
+        handle = self._handle
         try:
-            if msvcrt is not None:
-                self._handle.seek(0)
-                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            # The record and secret are removed while the lock is still held.
+            # Removing them after unlocking let the next launcher take the
+            # lock and publish its own in between; this instance, having
+            # already read its own record, then deleted the new owner's files,
+            # leaving a live instance nobody could hand off to.
+            self._withdraw_record()
         finally:
-            self._handle.close()
-            self._handle = None
-            if self._record is not None:
-                current = self.read_record()
-                if current is not None and current.instance_id == self._record.instance_id:
-                    for path in (self.record_path, self.secret_path):
-                        try:
-                            path.unlink()
-                        except FileNotFoundError:
-                            pass
-            self._record = None
+            try:
+                if msvcrt is not None:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                elif fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+                self._handle = None
+                self._record = None
+
+    def _withdraw_record(self) -> None:
+        """Remove this instance's record and secret; call only while holding the lock."""
+        if self._record is None:
+            return
+        current = self.read_record()
+        if current is None or current.instance_id != self._record.instance_id:
+            return
+        for path in (self.record_path, self.secret_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def __enter__(self) -> InstanceLock:
         return self

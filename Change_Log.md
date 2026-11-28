@@ -44,6 +44,113 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   run. It refuses a release that is not a draft before downloading anything,
   and checks again right before upload that the tag still names the same draft
   (#704, #705; #724).
+- Stop always wins over a code job's approval. Pressing Stop while another
+  window approves the job cancels it instead of reporting success and leaving
+  the approval live, and Stop pressed before the approval prompt exists ends
+  the job at once instead of showing a prompt for work already cancelled.
+  A code, scratch or image worker that finishes starting up after Stop is
+  never told to run (#579, #622, #593; #725).
+- The README tour recorder no longer deletes an existing `csv-importer`
+  folder under `-ProjectParent`: it refuses to start instead, and on exit it
+  removes only the sample project it created (#706; #726).
+- A pull request that moves code into `docs/` no longer skips the Quality
+  checks: the document-only classifier now sees both sides of a rename (#714;
+  #727).
+- The release workflow builds only an existing tag that points at the
+  verified commit: a dispatched name is resolved as a tag, never a branch of
+  the same name, and the draft is created with `--verify-tag` only after
+  checking the tag still names that commit (#715; #728).
+- A re-run of a failed Quality shard can replace its own artifacts, so a
+  retried shard whose tests pass no longer fails on its upload (#721; #729).
+- Dependency refresh always starts from main, so a run dispatched from
+  another branch cannot carry that branch into the lock-only pull request,
+  and it updates its existing pull request instead of failing on a stale
+  lease every month after the first (#703, #720; #730).
+- Every job the previous process left unfinished is recovered at startup: a
+  scratch or image job whose worker died within its 60-second lease is
+  relaunched (or finished as cancelled) instead of staying stuck until a later
+  restart, and the recovery scan is no longer capped at 200 jobs (#577, #623;
+  #737).
+- The Windows build's packaged smoke test, the release and Quality package
+  smoke steps, and the README tour recorder quote the arguments they pass to
+  `Start-Process`, so a path with a space (for example in `TEMP`) no longer
+  splits into extra arguments and fails the run (#707, #708; #731).
+- Git commands in the Agent's AppContainer sandbox start again: the launch
+  environment now admits the ten Git isolation variables the sandbox sets,
+  and still refuses every other name (#614; #732).
+- The scratch and typed calculators no longer return wrong results as
+  successes: decimal literals are read as written instead of through a
+  float, results are rounded in the calculator's own 34-digit context, and
+  `//` and `%` follow Python's floor semantics (#595, #616, #617; #733).
+- A code, scratch or image worker that stalls partway through sending a
+  message is stopped by its deadline or by Stop, instead of holding the
+  supervising thread indefinitely (#624; #734).
+- A scratch or image job is no longer marked failed by a second coordinator
+  that lost the race for its lease while the first was still running it
+  (#627; #735).
+- A shutdown whose worker or heartbeat threads outlive the deadline is
+  reported as incomplete and keeps its supervisor lease, so Cortex does not
+  start a second coordinator beside a worker that is still running; stopping
+  again retries (#618; #736).
+- A zero-byte database file is no longer taken for a healthy SQLite database,
+  so it cannot be kept as the chat or settings store and rotate the real
+  backups out (#636; #738).
+- A permanent-memory save that fails leaves the saved memories as they were
+  instead of keeping the rejected change in memory (#637; #738).
+- Rotating the chat backup no longer loses the older generation when the file
+  system cannot make hard links and the new snapshot is refused (#647; #738).
+- A conversation keeps the order its turns were written in when the system
+  clock steps back; a regenerated reply keeps its place (#648; #738).
+- Quarantining or archiving a legacy chat file never overwrites one preserved
+  earlier (#649; #738).
+- A deeply nested, corrupt memory or legacy chat file is treated as unreadable:
+  the memory backup is used, and the legacy file is quarantined while the rest
+  migrate, instead of startup failing (#650, #651; #738).
+- A Windows registry error partway through reading the legacy settings fails
+  the one-time migration so it is retried, instead of committing a partial
+  import (#652; #738).
+- A rejected stale settings save no longer rotates away the recovery backups
+  (#653; #738).
+- An extended-length local data folder (`\\?\C:\...`) is accepted instead of
+  being refused as a network path (#654; #738).
+- A second launch of Cortex no longer deletes the instance record and handoff
+  secret the next launcher has just published: the files are removed while
+  the lock is still held (#662; #739).
+- A launch that finds Cortex still starting up waits up to 10 seconds for
+  it and hands off, instead of failing with an error dialog (#663; #739).
+- The source build's install cache can no longer vouch for a half-copied
+  `node_modules`, keeps the relative links npm puts in `node_modules/.bin`,
+  and always installs the build tools even under `NODE_ENV=production` or an
+  npm `omit` setting. Existing caches are rebuilt once (#664, #665, #670;
+  #739).
+- A changed image or other non-code file under `frontend/src` now triggers a
+  rebuild of the bundle (#667; #739).
+- Raw exception text no longer reaches the console through uvicorn's own log
+  handlers: every one of them redacts (#668; #739).
+- A build killed between its two renames no longer leaves the source launch
+  without a bundle: the newest complete backup is restored first (#669;
+  #739).
+- A brief store error while recording how a job ended no longer leaves the
+  job running with no worker: the write is retried, and a job still
+  unfinished is picked up by startup recovery (#625; #741).
+- A code result close to the 64 KiB limit is measured the same way by the
+  worker and the app, so a valid result is no longer refused, and a result
+  whose dictionary keys were shortened says it was truncated (#594, #599;
+  #741).
+- Stop during attachment staging ends the job as cancelled instead of as a
+  storage failure, and a later output that fails to save, or an image job
+  whose completion cannot be recorded, no longer leaves earlier outputs
+  published (#596, #597, #598; #741).
+- Artifact retention keeps moving past an expired artifact whose path cannot
+  be checked, and two overlapping passes no longer orphan a quarantined file
+  (#619, #620; #741).
+- Run workspaces of finished jobs that a crash left behind are removed at
+  startup; links and junctions are never followed (#621; #741).
+- Retrying an image request after its input expired returns the original job
+  instead of a 404 (#578; #741).
+- A folder name with an emoji or another character outside the Basic
+  Multilingual Plane no longer makes every AppContainer launch fail (#615;
+  #741).
 
 ### Security
 
