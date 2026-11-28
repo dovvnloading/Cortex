@@ -10,6 +10,7 @@ AppPaths and both carry verified backups. Reading legacy JSON chat files is a
 migration path DatabaseManager offers, not what this module is.
 """
 
+import errno
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
@@ -53,6 +54,51 @@ from cortex_backend.repositories.sqlite_schema import (
     prepare_database,
     stored_version,
 )
+
+
+_FREE_NAME_ATTEMPTS = 16
+
+
+def _move_beside_never_replacing(source: str, directory: str) -> str:
+    """Move ``source`` into ``directory`` under a name nothing there has yet; return the new path.
+
+    Quarantine and archive folders hold the only copy of what they preserve.
+    Choosing a name by checking it was free and then moving onto it let a
+    second file replace the first when the fallback name -- the same second's
+    timestamp -- was taken too, and shutil.move replaces whatever is there.
+    The name is reserved here with an exclusive create, and the source moved
+    onto that empty reservation, so nothing that was already preserved is
+    ever overwritten. On failure the source is left where it was.
+    """
+    os.makedirs(directory, exist_ok=True)
+    stem, extension = os.path.splitext(os.path.basename(source))
+    names = [f"{stem}{extension}", f"{stem}_{int(datetime.now().timestamp())}{extension}"]
+    names += [f"{stem}_{uuid4().hex[:12]}{extension}" for _ in range(_FREE_NAME_ATTEMPTS)]
+    for name in names:
+        destination = os.path.join(directory, name)
+        try:
+            with open(destination, "xb"):
+                pass
+        except FileExistsError:
+            continue
+        try:
+            try:
+                os.replace(source, destination)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                # Another volume: copy into the reservation, then let go of
+                # the source, as shutil.move does.
+                shutil.copyfile(source, destination)
+                os.unlink(source)
+        except OSError:
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+            raise
+        return destination
+    raise FileExistsError(errno.EEXIST, "No free name to preserve the file under.", directory)
 
 
 def _utc_now_iso() -> str:
@@ -1245,20 +1291,13 @@ class DatabaseManager:
         return json.loads(payload.decode('utf-8'))
 
     def _quarantine_legacy_file(self, file_path: str) -> str:
-        quarantine_dir = os.path.join(self.legacy_history_dir, 'quarantine')
-        os.makedirs(quarantine_dir, exist_ok=True)
-        destination = os.path.join(quarantine_dir, os.path.basename(file_path))
-        if os.path.exists(destination):
-            destination = os.path.join(
-                quarantine_dir,
-                f"{os.path.splitext(os.path.basename(file_path))[0]}_{int(datetime.now().timestamp())}.json",
-            )
-        return shutil.move(file_path, destination)
+        return _move_beside_never_replacing(
+            file_path, os.path.join(self.legacy_history_dir, 'quarantine')
+        )
 
     @staticmethod
     def _archive_legacy_file(file_path: str, archive_dir: str) -> str:
-        os.makedirs(archive_dir, exist_ok=True)
-        return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
+        return _move_beside_never_replacing(file_path, archive_dir)
 
     @staticmethod
     def _retired_directory_name(directory: str) -> str | None:
