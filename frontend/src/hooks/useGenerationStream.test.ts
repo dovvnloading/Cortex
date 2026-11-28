@@ -401,6 +401,27 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Lives in Oslo."]);
   });
 
+  it("does not check status again for a transport error after the job ended (#693)", async () => {
+    const generationStatus = vi.fn();
+    const streamGeneration = vi.fn(async (_jobId: string, onEvent: (event: unknown) => void) => {
+      onEvent({
+        event_id: 1, event: "generation.completed", job_id: "job-ended", thread_id: "thread-ended",
+        data: { assistant_message_id: "assistant-14" },
+      });
+      throw new Error("connection reset after the end");
+    });
+    const { result } = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration, generationStatus } as Partial<CortexApi>), ignoreSessionExpiry,
+    ));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    const onFailed = vi.fn();
+    act(() => { result.current.start("job-ended", "thread-ended", onCompleted, onFailed); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    expect(generationStatus).not.toHaveBeenCalled();
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

@@ -425,6 +425,9 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               reconnectAttempt += 1;
             }
           } catch (streamError) {
+            // The job already ended on this connection; a transport error
+            // after that changes nothing and needs no status check (#693).
+            if (terminal) break;
             // Only this consumer's own signal means "stop". An abort from
             // anywhere else is a dropped connection like any other: returning
             // here would leave the job tracked with nothing reading it, and the

@@ -74,6 +74,11 @@ function kindForStatus(status: number): ApiErrorKind {
   return "http";
 }
 
+/** A generation stream's own end: nothing after it changes the job. */
+const GENERATION_TERMINAL_EVENTS: ReadonlySet<string> = new Set([
+  "generation.completed", "generation.failed", "generation.cancelled",
+]);
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
@@ -455,13 +460,18 @@ export class CortexApi {
     onEvent: (event: GenerationEvent) => void,
     options: { signal?: AbortSignal; afterEventId?: number } = {},
   ): Promise<void> {
-    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, options).then(() => undefined);
+    // The job's own terminal event ends the stream: a connection that stays
+    // open after it must not keep the composer busy (#693).
+    return this.streamEvents(`/generations/${encodeURIComponent(jobId)}/events`, onEvent, {
+      ...options,
+      isTerminal: (event) => GENERATION_TERMINAL_EVENTS.has(event.event),
+    }).then(() => undefined);
   }
 
   private async streamEvents<T>(
     path: string,
     onEvent: (event: T) => void,
-    options: { signal?: AbortSignal; afterEventId?: number } = {},
+    options: { signal?: AbortSignal; afterEventId?: number; isTerminal?: (event: T) => boolean } = {},
   ): Promise<T | null> {
     const headers = new Headers();
     if (options.afterEventId !== undefined) {
@@ -476,7 +486,9 @@ export class CortexApi {
     }
 
     let terminalEvent: T | null = null;
+    let ended = false;
     const emit = (frame: string) => {
+      if (ended) return;
       const data = frame
         .split("\n")
         .filter((line) => line.startsWith("data:"))
@@ -499,6 +511,10 @@ export class CortexApi {
       const status = (event as { status?: unknown }).status;
       if (status === "succeeded" || status === "failed" || status === "cancelled") {
         terminalEvent = event;
+      }
+      if (options.isTerminal?.(event)) {
+        terminalEvent = event;
+        ended = true;
       }
     };
     const reader = response.body.getReader();
@@ -551,6 +567,11 @@ export class CortexApi {
         throw transportError(error, options.signal);
       }
       feed(decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done }));
+      if (ended) {
+        // Nothing after the terminal event matters; release the connection.
+        void reader.cancel().catch(() => undefined);
+        return terminalEvent;
+      }
       if (chunk.done) break;
     }
     // A final SSE frame is valid even without a terminating blank line.

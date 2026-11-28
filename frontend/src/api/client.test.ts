@@ -315,6 +315,31 @@ describe("CortexApi", () => {
     expect(received).toEqual(["generation.content_delta", "generation.completed"]);
   });
 
+  it("ends a generation stream at its terminal event even if the connection stays open (#693)", async () => {
+    const completed = {
+      event_id: 2, event: "generation.completed", job_id: "job-1", thread_id: "thread-1", data: {},
+    };
+    const progress = { ...completed, event_id: 1, event: "generation.content_delta", data: { delta: "hi" } };
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          [progress, completed].map((event) => `id: ${event.event_id}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        ));
+        // Never closed: a stalled connection after the last event.
+      },
+      cancel() { cancelled = true; },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    window.sessionStorage.setItem("cortex.session.token", "session-1");
+    const received: string[] = [];
+
+    await new CortexApi("/api/v1", fetcher).streamGeneration("job-1", (event) => received.push(event.event));
+
+    expect(received).toEqual(["generation.content_delta", "generation.completed"]);
+    expect(cancelled).toBe(true);
+  });
+
   it("handles mixed line endings and UTF-8 characters split between byte reads", async () => {
     const first = { id: 1, job_id: "job-1", kind: "progress", status: "running", data: { message: "🧪" } };
     const last = { id: 2, job_id: "job-1", kind: "completed", status: "succeeded" };
