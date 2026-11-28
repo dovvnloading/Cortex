@@ -118,6 +118,15 @@ function modelCheckState(events: readonly AgentSSEEvent[]): { checking: boolean;
   return { checking, check };
 }
 
+const RECONNECT_START_MS = 350;
+const RECONNECT_MAX_MS = 4000;
+// How often a run parked at an approval is checked for an expiry or a
+// decision made elsewhere: the server ends the stream while it waits.
+export const PARKED_POLL_MS = 5000;
+// Replays retried for a run already known to be parked or finished before
+// the follower gives up and says so.
+const MAX_FAILED_REPLAYS = 3;
+
 function retryDelay(signal: AbortSignal, ms: number): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) { resolve(); return; }
@@ -179,30 +188,61 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       }
     };
 
+    const unavailable = (cause: unknown): boolean => {
+      // Auth, consent and missing-run errors are not transient connections.
+      if (!(cause instanceof ApiError) || cause.status < 400 || cause.status >= 500) return false;
+      setError(describeApiError(cause, "This agent run is unavailable."));
+      setConnection("idle");
+      return true;
+    };
+    const paused = () => TERMINAL.has(statusRef.current ?? "") || statusRef.current === "waiting_approval";
+
     const follow = async () => {
-      let delay = 350;
-      // Even a fast-completed or already approval-parked run has replayable
-      // history. Fetch it once before deciding that following is finished.
-      let first = true;
-      while (!signal.aborted && (first || (!TERMINAL.has(statusRef.current ?? "")
-        && statusRef.current !== "waiting_approval"))) {
-        first = false;
-        try {
-          await api.events(runId, onEvent, {
-            signal,
-            ...(cursorRef.current > 0 ? { afterEventId: cursorRef.current } : {}),
-          });
-        } catch (cause) {
+      let delay = RECONNECT_START_MS;
+      let failedReplays = 0;
+      // A run parked at an approval: the stream has ended, so only a status
+      // check notices an expiry or a decision made elsewhere (#677).
+      let parked = false;
+      while (!signal.aborted) {
+        if (parked) {
+          await retryDelay(signal, PARKED_POLL_MS);
           if (signal.aborted) return;
-          // Auth, consent and missing-run errors are not transient connections.
-          if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
-            setError(describeApiError(cause, "This agent run is unavailable."));
-            setConnection("idle");
-            return;
+        } else {
+          // Even a fast-completed or already approval-parked run has
+          // replayable history: always read it before deciding anything.
+          let replayed = false;
+          try {
+            await api.events(runId, onEvent, {
+              signal,
+              ...(cursorRef.current > 0 ? { afterEventId: cursorRef.current } : {}),
+            });
+            replayed = true;
+          } catch (cause) {
+            if (signal.aborted || unavailable(cause)) return;
+          }
+          if (signal.aborted) return;
+          if (replayed) {
+            failedReplays = 0;
+            if (TERMINAL.has(statusRef.current ?? "")) break;
+            if (statusRef.current === "waiting_approval") {
+              parked = true;
+              setConnection("idle");
+              continue;
+            }
+          } else if (paused()) {
+            // The run is known to be parked or finished, but what led there
+            // (an approval request, the final answer) was not received.
+            failedReplays += 1;
+            if (failedReplays > MAX_FAILED_REPLAYS) {
+              setError("Some updates for this run could not be loaded. Open it again from Run history.");
+              break;
+            }
+            setConnection("reconnecting");
+            await retryDelay(signal, delay);
+            delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+            continue;
           }
         }
-        if (signal.aborted || TERMINAL.has(statusRef.current ?? "")
-          || statusRef.current === "waiting_approval") break;
         try {
           // A clean EOF could mean an idle proxy, a terminal run, or approval.
           // Refresh server status instead of assuming that EOF means success.
@@ -210,18 +250,23 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
           if (signal.aborted) return;
           statusRef.current = fresh.status;
           setRun(fresh);
-          if (TERMINAL.has(fresh.status) || fresh.status === "waiting_approval") break;
-        } catch (cause) {
-          if (signal.aborted) return;
-          if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
-            setError(describeApiError(cause, "This agent run is unavailable."));
-            setConnection("idle");
-            return;
+          if (parked) {
+            if (fresh.status === "waiting_approval") continue;
+            // Expired, decided elsewhere or stopped: replay what changed.
+            parked = false;
+            delay = RECONNECT_START_MS;
+            continue;
           }
+          // Parked or finished while the stream was down: replay the packets
+          // it missed before stopping (#676).
+          if (paused()) continue;
+        } catch (cause) {
+          if (signal.aborted || unavailable(cause)) return;
+          if (parked) continue;
         }
         setConnection("reconnecting");
         await retryDelay(signal, delay);
-        delay = Math.min(delay * 2, 4000);
+        delay = Math.min(delay * 2, RECONNECT_MAX_MS);
       }
       if (!signal.aborted) setConnection("idle");
     };

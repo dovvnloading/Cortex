@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRunResponse, AgentSSEEvent, StartAgentRun } from "../../../../contracts/cortex-api";
 import type { AgentApi } from "./agentApi";
-import { useAgentRun } from "./useAgentRun";
+import { PARKED_POLL_MS, useAgentRun } from "./useAgentRun";
 
 const started: StartAgentRun = {
   project_root: "C:\\dev\\project",
@@ -212,6 +212,100 @@ describe("useAgentRun", () => {
     expect(api.resume).not.toHaveBeenCalled();
     expect(result.current.run?.status).toBe("running");
     expect(result.current.resumeRequired).toBe(true);
+  });
+
+  it("replays a missed approval when the stream dropped before it arrived (#676)", async () => {
+    const api = fakeApi();
+    let connection = 0;
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent, options) => {
+      connection += 1;
+      if (connection === 1) {
+        onEvent(sse(1, "step", { seq: 1, kind: "tool", tool: "read_file", summary: "Read a file" }));
+        throw new Error("connection reset");
+      }
+      expect(options?.afterEventId).toBe(1);
+      onEvent(sse(2, "approval", { seq: 3, request: { tool: "run_command", command: "pytest", plain_text: "Run the tests." } }));
+      onEvent(sse(3, "status", { status: "waiting_approval" }));
+    });
+    vi.mocked(api.get).mockResolvedValue({ ...run, status: "waiting_approval" });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+
+    await waitFor(() => expect(result.current.pendingApproval?.seq).toBe(3));
+    expect(connection).toBe(2);
+  });
+
+  it("replays the final answer of a run that finished while the stream was down (#676)", async () => {
+    const api = fakeApi();
+    let connection = 0;
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      connection += 1;
+      if (connection === 1) throw new Error("connection reset");
+      onEvent(sse(1, "output", { source: "agent", text: "All tests pass." }));
+      onEvent(sse(2, "status", { status: "completed" }));
+    });
+    vi.mocked(api.get).mockResolvedValue({ ...run, status: "completed" });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+
+    await waitFor(() => expect(result.current.events.map((event) => event.event)).toEqual(["output", "status"]));
+    expect(result.current.run?.status).toBe("completed");
+    expect(result.current.connection).toBe("idle");
+  });
+
+  it("says so when the missed updates of a finished run cannot be replayed (#676)", async () => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockRejectedValue(new Error("connection reset"));
+    vi.mocked(api.get).mockResolvedValue({ ...run, status: "completed" });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+
+    await waitFor(() => expect(result.current.error).toMatch(/could not be loaded/), { timeout: 8000 });
+    // One first attempt plus a bounded number of retries, then it stops.
+    const attempts = vi.mocked(api.events).mock.calls.length;
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(5);
+    expect(result.current.connection).toBe("idle");
+  }, 10000);
+
+  it("notices an approval that expired while parked, and clears it (#677)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const api = fakeApi();
+      let expired = false;
+      vi.mocked(api.events).mockImplementation(async (_id, onEvent, options) => {
+        if (!expired) {
+          onEvent(sse(1, "approval", { seq: 2, request: { tool: "run_command", command: "pytest", plain_text: "Run the tests." } }));
+          onEvent(sse(2, "status", { status: "waiting_approval" }));
+          return;
+        }
+        expect(options?.afterEventId).toBe(2);
+        onEvent(sse(3, "approval", { seq: 2, decision: "expired" }));
+        onEvent(sse(4, "status", { status: "failed", stop_reason: "approval_expired" }));
+      });
+      vi.mocked(api.get).mockImplementation(async () => (expired
+        ? { ...run, status: "failed", stop_reason: "approval_expired" }
+        : { ...run, status: "waiting_approval" }));
+      const { result } = renderHook(() => useAgentRun(api, true));
+      await act(async () => { await result.current.start(started); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(result.current.pendingApproval?.seq).toBe(2);
+
+      // Still parked: the page keeps checking, and keeps the approval.
+      await act(async () => { await vi.advanceTimersByTimeAsync(PARKED_POLL_MS); });
+      expect(api.get).toHaveBeenCalledTimes(1);
+      expect(result.current.pendingApproval?.seq).toBe(2);
+
+      expired = true;
+      await act(async () => { await vi.advanceTimersByTimeAsync(PARKED_POLL_MS); });
+
+      expect(result.current.run?.status).toBe("failed");
+      expect(result.current.run?.stop_reason).toBe("approval_expired");
+      expect(result.current.pendingApproval).toBeNull();
+      expect(api.decide).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports the one-time model check while it runs and the result it ends with", async () => {
