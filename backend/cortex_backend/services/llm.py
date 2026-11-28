@@ -298,6 +298,9 @@ _COMMAND_TAG_RE = re.compile(
 # how it begins.
 _MIN_ATTACHMENT_CHARS = 256
 _ATTACHMENT_TRUNCATION_MARKER = "\n\n[Attachment text truncated to fit the model context.]"
+# What an exchange sent as two structured turns can cost beyond its transcript
+# text: each turn's template overhead plus up to a token of rounding apiece.
+_STRUCTURED_EXCHANGE_TOKENS = 2 * (token_budget.MESSAGE_OVERHEAD_TOKENS + 1)
 # What one document costs beside its text: the filename and type lines and the
 # fence around it.
 _DOCUMENT_FRAME_TOKENS = 64
@@ -1005,12 +1008,19 @@ class SynthesisAgent:
         holder_length = len(holder_text)
         holder_wide = token_budget.count_wide_characters(holder_text)
 
-        def prompt_tokens(history: str, wide: int) -> int:
+        def prompt_tokens(history: str, wide: int, exchanges: int) -> int:
+            # The history is measured as the transcript, but it is usually sent
+            # as one message per turn, and each of those costs the template's
+            # overhead and its own rounding. Two hundred one-word exchanges
+            # look like a few hundred tokens of transcript and are thousands
+            # as turns, so each exchange is charged that difference as well:
+            # what fits is then an upper bound for either rendering.
             return token_budget.with_safety_margin(
                 fixed_tokens
                 + token_budget.estimate_tokens_from_counts(
                     holder_length + len(history), holder_wide + wide, ratio
                 )
+                + _STRUCTURED_EXCHANGE_TOKENS * exchanges
             )
 
         selected: list[dict] = []
@@ -1040,7 +1050,12 @@ class SynthesisAgent:
                 # Older messages are being left out, so the note that says so
                 # is part of what this candidate costs.
                 history = with_omission_note(history)
-            if prompt_tokens(history, cls._rendered_wide(candidate_chunks, candidate_wide)) <= limit:
+            if (
+                prompt_tokens(
+                    history, cls._rendered_wide(candidate_chunks, candidate_wide), len(candidate_chunks)
+                )
+                <= limit
+            ):
                 selected = [message, *selected]
                 chunks = candidate_chunks
                 chunks_wide = candidate_wide
@@ -1087,7 +1102,7 @@ class SynthesisAgent:
         *,
         older_messages: bool,
         limit: int,
-        prompt_tokens: Callable[[str, int], int],
+        prompt_tokens: Callable[[str, int, int], int],
     ) -> tuple[list[dict], tuple[str, ...]] | None:
         """Cut the newest answer down until its exchange takes half the history room.
 
@@ -1100,7 +1115,7 @@ class SynthesisAgent:
         """
         answer = selected[0]
         text = str(answer.get("content", ""))
-        empty_history = prompt_tokens(cls._join_history_chunks(()), 0)
+        empty_history = prompt_tokens(cls._join_history_chunks(()), 0, 0)
         room = limit - empty_history
         if room <= 0 or len(text) <= _MIN_SHORTENED_ANSWER_CHARS:
             return None
@@ -1114,7 +1129,7 @@ class SynthesisAgent:
             if older_messages:
                 history = with_omission_note(history)
             wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
-            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide))
+            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide), len(chunks))
 
         low, high = _MIN_SHORTENED_ANSWER_CHARS, len(text) - 1
         trailing, chunks, tokens = attempt(low)
