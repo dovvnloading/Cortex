@@ -287,7 +287,11 @@ def _unicode_environment_block(environment: dict[str, str]) -> Any:
         raise AppContainerError("AppContainer environment is missing required variables")
     entries = sorted(environment.items(), key=lambda item: item[0].casefold())
     block = "\0".join(f"{name}={value}" for name, value in entries) + "\0\0"
-    return ctypes.create_unicode_buffer(block, len(block))
+    # No explicit size: Windows wchar_t is UTF-16, so a character outside the
+    # Basic Multilingual Plane (an emoji in a folder name) takes two units
+    # while len() counts it once, and a buffer sized by len() is refused as
+    # too small. Left to itself, ctypes counts UTF-16 units.
+    return ctypes.create_unicode_buffer(block)
 
 
 

@@ -1703,7 +1703,11 @@ def _json_safe(value: Any, *, depth: int = 0, elided: list[str] | None = None) -
             if index >= 100:
                 note("entries beyond the supported count")
                 break
-            safe_key = str(key)[:100]
+            full_key = str(key)
+            safe_key = full_key[:100]
+            if len(full_key) > 100:
+                # A shortened key is a changed result, even without a clash.
+                note("keys longer than the supported length")
             # Two keys alike for their first 100 characters collapse onto one
             # another here, so the second silently replaces the first.
             if safe_key in result:
@@ -1724,14 +1728,27 @@ def _json_safe(value: Any, *, depth: int = 0, elided: list[str] | None = None) -
     return rendered[:1000]
 
 
+def code_value_json_bytes(value: Any) -> int:
+    """The size of a result value as measured against MAX_CODE_VALUE_BYTES.
+
+    The worker bounds a value with this and the parent re-checks it with
+    this, so the two can never disagree about whether a value fits. Raises
+    TypeError/ValueError/OverflowError for a value JSON cannot represent.
+    """
+
+    return len(
+        json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
 def _bounded_json_value(value: Any) -> tuple[Any, bool]:
     elided: list[str] = []
     safe = _json_safe(value, elided=elided)
     try:
-        encoded = json.dumps(safe, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        size = code_value_json_bytes(safe)
     except (TypeError, ValueError, OverflowError):
         return "[unavailable]", True
-    if len(encoded.encode("utf-8")) > MAX_CODE_VALUE_BYTES:
+    if size > MAX_CODE_VALUE_BYTES:
         return "[truncated]", True
     return safe, bool(elided)
 
@@ -1951,6 +1968,7 @@ __all__ = [
     "CODE_EXECUTION_PAYLOAD_SCHEMA",
     "CODE_EXECUTION_PROFILE",
     "CODE_EXECUTION_RESULT_SCHEMA",
+    "code_value_json_bytes",
     "CodeCapabilities",
     "CodeExecutionError",
     "CodeExecutionRequest",

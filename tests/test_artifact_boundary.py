@@ -509,3 +509,32 @@ def test_the_boundary_no_longer_creates_a_quarantine_directory_nothing_reads(tmp
 
     assert not (repository.artifact_root / ".artifact_quarantine").exists()
     assert repository.quarantine_root.is_dir()  # the one the repository actually uses
+
+
+def test_a_disk_error_on_a_later_output_takes_back_the_whole_batch(tmp_path: Path, monkeypatch):
+    """An OSError (a full disk) on the second output skipped the rollback (#597)."""
+
+    repository, job_id = _repository(tmp_path)
+    output_root = _output_root(tmp_path)
+    for name in ("a.txt", "b.txt"):
+        (output_root / name).write_text(name, encoding="utf-8")
+    boundary = ArtifactBoundary(repository)
+    real_publish = repository.publish_artifact
+    calls: list[str] = []
+
+    def disk_full_on_the_second(job, **kwargs):
+        calls.append(kwargs["name"])
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real_publish(job, **kwargs)
+
+    monkeypatch.setattr(repository, "publish_artifact", disk_full_on_the_second)
+
+    with pytest.raises(ArtifactBoundaryError) as error:
+        boundary.collect_outputs(
+            job_id, "session-a", output_root, [OutputClaim("a.txt"), OutputClaim("b.txt")]
+        )
+
+    assert error.value.code == "artifact_publish_failed"
+    assert len(calls) == 2
+    assert _published_count(repository) == 0

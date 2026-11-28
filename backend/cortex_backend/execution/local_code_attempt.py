@@ -9,7 +9,6 @@ at a checkpoint until that job is attached.
 from __future__ import annotations
 
 from collections.abc import Mapping
-import json
 import multiprocessing
 from threading import Event, Lock
 import time
@@ -26,6 +25,7 @@ from .code_execution import (
     MAX_CODE_OUTPUT_BYTES,
     MAX_CODE_TIMEOUT_SECONDS,
     MAX_CODE_VALUE_BYTES,
+    code_value_json_bytes,
     code_worker_main,
     validate_code_source,
 )
@@ -212,7 +212,10 @@ class LocalCodeAttempt:
             if type(truncated) is not bool or type(duration_ms) is not int or not 0 <= duration_ms <= int(MAX_CODE_TIMEOUT_SECONDS * 1_000):
                 raise CodeExecutionError("worker_output_invalid")
             value = result.get("value")
-            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_CODE_VALUE_BYTES:
+            # The same measure the worker bounded the value with: default
+            # separators add a space after every comma and colon, so a value
+            # the worker accepted could be refused here.
+            if code_value_json_bytes(value) > MAX_CODE_VALUE_BYTES:
                 raise CodeExecutionError("worker_output_invalid")
             return CodeExecutionResult(
                 stdout=stdout,
