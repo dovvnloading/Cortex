@@ -148,7 +148,10 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
   const [followVersion, setFollowVersion] = useState(0);
   const cursorRef = useRef(0);
   const statusRef = useRef<string | null>(null);
+  // The run shown now. A late callback for another run must not touch it (#683).
+  const currentRunRef = useRef<string | null>(null);
   const runId = run?.id ?? null;
+  currentRunRef.current = runId;
 
   useEffect(() => {
     if (!enabled || !runId) return;
@@ -237,6 +240,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       const created = await api.start(payload);
       cursorRef.current = 0;
       statusRef.current = created.status;
+      currentRunRef.current = created.id;
       setEvents([]);
       setResumeRequired(false);
       setRun(created);
@@ -259,6 +263,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       if (selected.id !== id) throw new Error("The requested run was not returned.");
       cursorRef.current = 0;
       statusRef.current = selected.status;
+      currentRunRef.current = selected.id;
       setEvents([]);
       setResumeRequired(false);
       setRun(selected);
@@ -270,10 +275,13 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     }
   };
 
+  // Compare with the run shown now, not the one of the render that created
+  // this callback: an acknowledgement can arrive after another run opened.
   const forget = (id: string): void => {
-    if (run?.id !== id) return;
+    if (currentRunRef.current !== id) return;
     cursorRef.current = 0;
     statusRef.current = null;
+    currentRunRef.current = null;
     setEvents([]);
     setResumeRequired(false);
     setRun(null);

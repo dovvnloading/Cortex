@@ -165,6 +165,20 @@ describe("useAgentRun", () => {
     expect(result.current.pendingApproval).toBeNull();
   });
 
+  it("a late discard of one run never clears another run opened since (#683)", async () => {
+    const api = fakeApi();
+    vi.mocked(api.get).mockImplementation(async (id) => ({ ...run, id, status: "completed" }));
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.open("run-a"); });
+    // The history row captured this callback while run A was shown.
+    const forgetFromRunA = result.current.forget;
+    await act(async () => { await result.current.open("run-b"); });
+
+    act(() => forgetFromRunA("run-a"));
+
+    expect(result.current.run?.id).toBe("run-b");
+  });
+
   it("reports the one-time model check while it runs and the result it ends with", async () => {
     const api = fakeApi();
     let emit: ((event: AgentSSEEvent) => void) | null = null;
