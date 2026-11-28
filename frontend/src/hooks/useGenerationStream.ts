@@ -292,6 +292,20 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       // callback.
       let completion: Promise<void> | null = null;
       useChatStore.getState().setStatusText(job.jobId, "Connecting to generation...");
+      // The assistant asked to run something locally and the harness refused.
+      // The rejected block is stripped from the answer, so without this the
+      // task would simply never happen and the user would be left guessing
+      // why. The same payload rides the status event, the job result and the
+      // status fallback, so it is announced once per job.
+      const noteRejection = (value: unknown): void => {
+        if (rejectionNotified || !value || typeof value !== "object") return;
+        const rejection = (value as { code_execution_rejection?: unknown }).code_execution_rejection;
+        if (!rejection || typeof rejection !== "object") return;
+        const message = (rejection as { message?: unknown }).message;
+        if (typeof message !== "string" || !message) return;
+        rejectionNotified = true;
+        useUiStore.getState().notify(message, "info");
+      };
       const contentFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendContentToken(job.jobId, buffered));
       const thoughtsFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendThinkingToken(job.jobId, buffered));
 
@@ -376,16 +390,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 // without this the task would simply never happen and the user
                 // would be left guessing why. The same payload rides both the
                 // status event and the job result, so it is announced once.
-                const rejection = data.code_execution_rejection;
-                if (
-                  !rejectionNotified
-                  && rejection
-                  && typeof rejection === "object"
-                  && typeof (rejection as { message?: unknown }).message === "string"
-                ) {
-                  rejectionNotified = true;
-                  useUiStore.getState().notify((rejection as { message: string }).message, "info");
-                }
+                noteRejection(data);
                 if (event.event === "generation.memory_proposed" || event.event === "generation.completed") {
                   noteProposedMemories(data);
                 }
@@ -442,6 +447,8 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 } else {
                   noteTranslationResult(snapshot.result);
                   noteProposedMemories(snapshot.result);
+                  // A refusal the lost stream never delivered (#699).
+                  noteRejection(snapshot.result);
                 }
                 const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
                 completion = clearRequested

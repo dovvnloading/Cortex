@@ -337,6 +337,44 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().untranslatedMessageIds).toEqual({});
   });
 
+  it("announces a code refusal that only the status fallback delivered, once (#699)", async () => {
+    const refusal = { code: "imports_not_allowed", message: "Cortex only runs code without imports." };
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-refused-status", kind: "generation", status: "succeeded", sequence: 3,
+      result: { assistant_message_id: "assistant-12", code_execution_rejection: refusal },
+    });
+    let connection = 0;
+    const streamGeneration = vi.fn(async (_jobId: string, onEvent: (event: unknown) => void) => {
+      connection += 1;
+      if (connection === 1) {
+        // The live refusal arrives, then the stream drops before the end.
+        onEvent({
+          event_id: 1, event: "generation.status", job_id: "job-refused-status", thread_id: "thread-refused",
+          data: { message: refusal.message, code_execution_rejection: refusal },
+        });
+      }
+      throw new Error("connection dropped");
+    });
+    const { result } = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration, generationStatus } as Partial<CortexApi>), ignoreSessionExpiry,
+    ));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-refused-status", "thread-refused", onCompleted, vi.fn()); });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useUiStore.getState().toasts.filter((toast) => toast.message === refusal.message)).toHaveLength(1);
+
+    // With no live event at all, the fallback alone announces it.
+    useUiStore.setState({ toasts: [] });
+    const fallbackOnly = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration: vi.fn().mockRejectedValue(new Error("connection dropped")), generationStatus }),
+      ignoreSessionExpiry,
+    ));
+    const fallbackCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { fallbackOnly.result.current.start("job-refused-status", "thread-refused", fallbackCompleted, vi.fn()); });
+    await waitFor(() => expect(fallbackCompleted).toHaveBeenCalled());
+    expect(useUiStore.getState().toasts.map((toast) => toast.message)).toEqual([refusal.message]);
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast
