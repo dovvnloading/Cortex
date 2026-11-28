@@ -54,6 +54,7 @@ from cortex_backend.services.history_window import (
     answered_exchanges,
     drop_oldest_exchange,
     with_attachment_notes,
+    HISTORY_OMISSION_NOTE,
     with_omission_note,
     with_omission_note_on_turns,
 )
@@ -1061,13 +1062,38 @@ class SynthesisAgent:
         holder_length = len(holder_text)
         holder_wide = token_budget.count_wide_characters(holder_text)
 
-        def prompt_tokens(history: str, wide: int) -> int:
-            return token_budget.with_safety_margin(
-                fixed_tokens
-                + token_budget.estimate_tokens_from_counts(
-                    holder_length + len(history), holder_wide + wide, ratio
-                )
+        # The same prompt sent with the history as one message per turn, which
+        # is how a turn usually goes out. Its fixed part has no history section,
+        # and each kept turn then costs its own text and the template overhead,
+        # exactly as estimate_prompt_tokens counts them. Measuring only the
+        # transcript let two hundred one-word exchanges through as a few hundred
+        # tokens when as turns they are thousands.
+        structured_base = PromptTemplate.build_synthesis_prompt(
+            query,
+            "",
+            permanent_memories,
+            memories_enabled,
+            user_system_instructions,
+            attachments,
+            code_execution_eligible=code_execution_eligible,
+            bypass_system_prompt=bypass_system_prompt,
+            host_observations=host_observations,
+            history_messages=(),
+        )
+        structured_fixed = cls._raw_prompt_tokens(structured_base, ratio) + cls._image_tokens(structured_base)
+        # The omission note opens the oldest kept user turn; the extra token
+        # covers the rounding of that turn's estimate.
+        note_tokens = token_budget.estimate_tokens(f"{HISTORY_OMISSION_NOTE}\n\n", ratio) + 1
+
+        def prompt_tokens(history: str, wide: int, turns: int) -> int:
+            """The larger of the two renderings; ``turns`` is the structured history's raw cost."""
+            transcript = fixed_tokens + token_budget.estimate_tokens_from_counts(
+                holder_length + len(history), holder_wide + wide, ratio
             )
+            return token_budget.with_safety_margin(max(transcript, structured_fixed + turns))
+
+        def turns_cost(exchanges: int, history_cost: int, omitted: bool) -> int:
+            return history_cost + (note_tokens if omitted and exchanges else 0)
 
         selected: list[dict] = []
         # Rendered form of `selected`, kept in step with it. Re-rendering the
@@ -1077,6 +1103,8 @@ class SynthesisAgent:
         chunks: tuple[str, ...] = ()
         # Wide characters across `chunks`, each chunk counted once when it joins.
         chunks_wide = 0
+        # Raw structured cost of the exchanges in `chunks`.
+        chunks_turns = 0
 
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
@@ -1089,17 +1117,27 @@ class SynthesisAgent:
                 continue
             candidate_chunks = cls._prepend_history_chunks(message, selected, chunks)
             candidate_wide = chunks_wide
+            candidate_turns = chunks_turns
             if len(candidate_chunks) > len(chunks):
                 candidate_wide += token_budget.count_wide_characters(candidate_chunks[0])
+                candidate_turns += cls._exchange_turn_tokens(message, selected[0], ratio)
             history = cls._join_history_chunks(candidate_chunks)
             if index > 0:
                 # Older messages are being left out, so the note that says so
                 # is part of what this candidate costs.
                 history = with_omission_note(history)
-            if prompt_tokens(history, cls._rendered_wide(candidate_chunks, candidate_wide)) <= limit:
+            if (
+                prompt_tokens(
+                    history,
+                    cls._rendered_wide(candidate_chunks, candidate_wide),
+                    turns_cost(len(candidate_chunks), candidate_turns, index > 0),
+                )
+                <= limit
+            ):
                 selected = [message, *selected]
                 chunks = candidate_chunks
                 chunks_wide = candidate_wide
+                chunks_turns = candidate_turns
                 continue
             if not chunks and selected and selected[0].get("role") == "assistant":
                 shortened = cls._shorten_newest_answer(
@@ -1108,15 +1146,29 @@ class SynthesisAgent:
                     older_messages=index > 0,
                     limit=limit,
                     prompt_tokens=prompt_tokens,
+                    turns_cost=turns_cost,
+                    ratio=ratio,
                 )
                 if shortened is not None:
                     trailing, chunks = shortened
                     chunks_wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
+                    chunks_turns = (
+                        cls._exchange_turn_tokens(message, trailing[0], ratio) if chunks else 0
+                    )
                     selected = [message, *trailing]
                     continue
             break
 
         return selected
+
+    @staticmethod
+    def _exchange_turn_tokens(question: Mapping[str, Any], answer: Mapping[str, Any], ratio: float) -> int:
+        """Raw cost of one exchange sent as two turns, as estimate_prompt_tokens counts it."""
+        return sum(
+            token_budget.estimate_tokens(str(turn.get("content", "")).strip(), ratio)
+            + token_budget.MESSAGE_OVERHEAD_TOKENS
+            for turn in (question, answer)
+        )
 
     @staticmethod
     def _rendered_wide(chunks: tuple[str, ...], counted: int) -> int:
@@ -1143,7 +1195,9 @@ class SynthesisAgent:
         *,
         older_messages: bool,
         limit: int,
-        prompt_tokens: Callable[[str, int], int],
+        prompt_tokens: Callable[[str, int, int], int],
+        turns_cost: Callable[[int, int, bool], int],
+        ratio: float,
     ) -> tuple[list[dict], tuple[str, ...]] | None:
         """Cut the newest answer down until its exchange takes half the history room.
 
@@ -1156,7 +1210,7 @@ class SynthesisAgent:
         """
         answer = selected[0]
         text = str(answer.get("content", ""))
-        empty_history = prompt_tokens(cls._join_history_chunks(()), 0)
+        empty_history = prompt_tokens(cls._join_history_chunks(()), 0, 0)
         room = limit - empty_history
         if room <= 0 or len(text) <= _MIN_SHORTENED_ANSWER_CHARS:
             return None
@@ -1170,7 +1224,12 @@ class SynthesisAgent:
             if older_messages:
                 history = with_omission_note(history)
             wide = sum(token_budget.count_wide_characters(chunk) for chunk in chunks)
-            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide))
+            turns = turns_cost(
+                len(chunks),
+                cls._exchange_turn_tokens(message, shortened, ratio) if chunks else 0,
+                older_messages,
+            )
+            return trailing, chunks, prompt_tokens(history, cls._rendered_wide(chunks, wide), turns)
 
         low, high = _MIN_SHORTENED_ANSWER_CHARS, len(text) - 1
         trailing, chunks, tokens = attempt(low)

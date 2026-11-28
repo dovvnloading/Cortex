@@ -436,6 +436,43 @@ def test_both_history_renderings_retain_exactly_the_same_exchanges() -> None:
     assert len(structured) == 4
 
 
+@pytest.mark.parametrize("num_ctx", [2048, 4096, 8192])
+def test_many_short_exchanges_never_overflow_as_structured_turns(num_ctx: int) -> None:
+    """#600: history was sized as the transcript, where "User: q
+AI: a" is a
+    few tokens, but sent as two turns that each cost the template's overhead:
+    250 one-letter exchanges passed the check and overran the window."""
+    history: list[dict] = []
+    for _ in range(250):
+        history += [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+    budget = {
+        "query": "next",
+        "permanent_memories": [],
+        "memories_enabled": False,
+        "user_system_instructions": None,
+        "num_ctx": num_ctx,
+        "bypass_system_prompt": True,
+    }
+
+    transcript, turns = SynthesisAgent.fit_history(history, **budget)
+
+    limit = num_ctx - SynthesisAgent.output_token_reservation(num_ctx)
+    structured = PromptTemplate.build_synthesis_prompt(
+        "next", transcript, [], False, None, bypass_system_prompt=True, history_messages=turns
+    )
+    flattened = PromptTemplate.build_synthesis_prompt(
+        "next", transcript, [], False, None, bypass_system_prompt=True
+    )
+    assert SynthesisAgent.estimate_prompt_tokens(structured) <= limit
+    assert SynthesisAgent.estimate_prompt_tokens(flattened) <= limit
+    assert turns, "the newest exchanges still fit"
+    if num_ctx == 2048:
+        # They do not all fit a small window; the model is told some are missing.
+        assert len(turns) < len(history)
+    if len(turns) < len(history):
+        assert "left out" in turns[0]["content"]
+
+
 def test_transcript_and_structured_renderings_pair_turns_identically() -> None:
     """One pairing rule, two renderings: neither holds a turn the other lacks.
 
