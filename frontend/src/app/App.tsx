@@ -635,6 +635,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const renameChat = async (id: string, title: string): Promise<boolean> => {
     try {
       const chat = await api.renameChat(id, title);
+      useChatStore.getState().noteChatChanged(id);
       setChats((current) => current.map((item) => item.id === id ? { ...item, title: chat.title, timestamp: chat.timestamp } : item));
       notify("Chat renamed.", "success");
       return true;
@@ -673,6 +674,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     const commit = async () => {
       try {
         await api.deleteChat(id);
+        useChatStore.getState().noteChatChanged(id);
         discardComposerDraft(id);
         useChatStore.getState().setThreadOptions(id, null);
         // Take the row out of the list before it is un-hidden, so it cannot flash back.

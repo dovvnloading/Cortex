@@ -102,9 +102,20 @@ interface ChatStoreState {
   // already saved or dismissed from it: the same job repeats its list in its
   // final result, which must not bring them back (#694).
   proposalJobsByMessage: Record<string, { jobId: string; handled: readonly string[] }>;
+  // How many sidebar changes (rename, move, delete) each chat has had. A
+  // transcript fetched before the latest one is older than the sidebar and
+  // must not put back its title, group or the row itself (#698).
+  chatChangeCounts: Record<string, number>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
-  upsertChatSummary: (chat: ChatResponse) => void;
+  /**
+   * Put a chat's summary from a fetched transcript into the list. With
+   * ``sinceChange`` (from ``chatChangeCount`` before the fetch), nothing is
+   * written if the sidebar changed that chat meanwhile (#698).
+   */
+  upsertChatSummary: (chat: ChatResponse, sinceChange?: number) => void;
+  /** Record a confirmed or optimistic sidebar change to a chat: rename, move, delete. */
+  noteChatChanged: (threadId: string) => void;
 
   setGroups: (next: ChatGroup[] | ((current: ChatGroup[]) => ChatGroup[])) => void;
   /** Replace one group in place, keeping its position in the list. */
@@ -174,11 +185,16 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   untranslatedMessageIds: {},
   proposedMemoriesByMessage: {},
   proposalJobsByMessage: {},
+  chatChangeCounts: {},
 
   setChats: (next) =>
     set((state) => ({ chats: typeof next === "function" ? (next as (current: ChatSummary[]) => ChatSummary[])(state.chats) : next })),
-  upsertChatSummary: (chat) =>
+  noteChatChanged: (threadId) =>
     set((state) => ({
+      chatChangeCounts: { ...state.chatChangeCounts, [threadId]: (state.chatChangeCounts[threadId] ?? 0) + 1 },
+    })),
+  upsertChatSummary: (chat, sinceChange) =>
+    set((state) => (sinceChange !== undefined && (state.chatChangeCounts[chat.id] ?? 0) !== sinceChange ? state : {
       chats: [
         // Preserve the filing: a chat that gains a message must not jump out
         // of its group just because the summary was rebuilt from the
@@ -210,6 +226,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   setChatGroup: (threadId, groupId) =>
     set((state) => ({
       chats: state.chats.map((chat) => (chat.id === threadId ? { ...chat, group_id: groupId } : chat)),
+      chatChangeCounts: { ...state.chatChangeCounts, [threadId]: (state.chatChangeCounts[threadId] ?? 0) + 1 },
     })),
 
   // Output that arrives after Stop is kept, but it never moves the phase back

@@ -42,9 +42,11 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
       // Reload here, before the consumer ends the generation, so the pending
       // bubble is not dropped a moment before the saved message can replace it.
       let chat: ChatResponse | null = null;
+      // A rename, move or delete while this fetch is out is newer than it.
+      const sinceChange = useChatStore.getState().chatChangeCounts[threadId] ?? 0;
       try {
         chat = await api.chat(threadId);
-        useChatStore.getState().upsertChatSummary(chat);
+        useChatStore.getState().upsertChatSummary(chat, sinceChange);
       } catch {
         // The answer is saved; only the reload failed. The chat view reports it.
       }

@@ -324,6 +324,54 @@ describe("GenerationStreamHost", () => {
     expect(readActiveJob()).toBeNull();
   });
 
+  it.each([
+    ["a rename", () => {
+      useChatStore.getState().setChats((chats) => chats.map((chat) => ({ ...chat, title: "Renamed by the user" })));
+      useChatStore.getState().noteChatChanged("thread-a");
+    }, { title: "Renamed by the user", group_id: null }],
+    ["a move", () => { useChatStore.getState().setChatGroup("thread-a", "group-new"); },
+      { title: "Before", group_id: "group-new" }],
+  ])("a reload that was already out does not undo %s (#698)", async (_change, change, expected) => {
+    let release!: (chat: ChatResponse) => void;
+    const { api, attachments } = fakeStreamApi({
+      chat: vi.fn(() => new Promise<ChatResponse>((done) => { release = done; })),
+    } as Partial<CortexApi>);
+    useChatStore.getState().setChats([{ id: "thread-a", title: "Before", timestamp: "2026-01-01T00:00:00Z", group_id: null }]);
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => trackGeneration("job-late", "thread-a"));
+    await waitFor(() => expect(attachments).toHaveLength(1));
+    await act(async () => { attachments[0].emit({ event_id: 1, event: "generation.completed" }); });
+    await waitFor(() => expect(api.chat).toHaveBeenCalled());
+
+    act(change);
+    await act(async () => { release({ ...savedChat("thread-a"), title: "Stale title", group_id: "group-old" }); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(useChatStore.getState().chats).toEqual([expect.objectContaining({ id: "thread-a", ...expected })]);
+  });
+
+  it("a reload that was already out does not bring back a deleted chat (#698)", async () => {
+    let release!: (chat: ChatResponse) => void;
+    const { api, attachments } = fakeStreamApi({
+      chat: vi.fn(() => new Promise<ChatResponse>((done) => { release = done; })),
+    } as Partial<CortexApi>);
+    useChatStore.getState().setChats([{ id: "thread-a", title: "Before", timestamp: "2026-01-01T00:00:00Z" }]);
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => trackGeneration("job-deleted", "thread-a"));
+    await waitFor(() => expect(attachments).toHaveLength(1));
+    await act(async () => { attachments[0].emit({ event_id: 1, event: "generation.completed" }); });
+    await waitFor(() => expect(api.chat).toHaveBeenCalled());
+
+    act(() => {
+      useChatStore.getState().noteChatChanged("thread-a");
+      useChatStore.getState().setChats([]);
+    });
+    await act(async () => { release(savedChat("thread-a")); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    expect(useChatStore.getState().chats).toEqual([]);
+  });
+
   it("shows the saved answer after the backend restarts and forgets the generation job", async () => {
     const restored = {
       ...savedChat("thread-a"),
