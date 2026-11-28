@@ -409,10 +409,15 @@ export function useModelJobs(dependencies: Dependencies): {
         const secondary = untracked.current.get(tracking.jobId);
         if (secondary) secondary.cancelRequested = false;
       }
-      // Restore only this job's row; another concurrent job is unaffected.
+      // Restore only this job's row, and only while it is still this job's:
+      // a refusal that arrives after the job ended and another took the
+      // progress row put the old job's progress over the new one (#718).
+      const stillThisJob = isPrimary
+        ? tracked.current === tracking
+        : untracked.current.get(tracking.jobId) === tracking;
       const now = useModelStore.getState();
       const visible = isPrimary ? now.modelProgress : now.secondaryProgress[tracking.jobId];
-      if (visible?.cancelling) setProgress(before);
+      if (stillThisJob && visible?.cancelling) setProgress(before);
       latest.current.notify(describeApiError(error, "Could not cancel the model operation."), "error");
     }
   }, []);

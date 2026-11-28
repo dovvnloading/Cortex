@@ -372,6 +372,34 @@ describe("cancelling", () => {
     expect(api.cancelJob).toHaveBeenCalledTimes(2);
   });
 
+  it("a late refusal for an ended job never puts its progress over the next job's (#718)", async () => {
+    const { result, streams, api } = setup();
+    let refuseFirst!: (error: unknown) => void;
+    api.cancelJob
+      .mockImplementationOnce(() => new Promise<JobStatusResponse>((_resolve, reject) => { refuseFirst = reject; }))
+      .mockImplementationOnce(() => new Promise<JobStatusResponse>(() => undefined));
+
+    let first!: Promise<ModelJobResult>;
+    act(() => { first = result.current.run(accepted("job-a"), "first.gguf"); });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => streams[0].emit(downloading(2, GIB, 4 * GIB)));
+    act(() => { void result.current.cancel(); });
+    // Job A ends on its own before the cancel is answered.
+    await act(async () => streams[0].finish(succeeded(3)));
+    await first;
+
+    act(() => { void result.current.run(accepted("job-b"), "second.gguf"); });
+    await waitFor(() => expect(streams).toHaveLength(2));
+    act(() => streams[1].emit(downloading(1, GIB, 8 * GIB)));
+    act(() => { void result.current.cancel(); });
+    expect(state().modelProgress).toMatchObject({ cancelling: true });
+
+    await act(async () => { refuseFirst(new ApiError(409, "Job already finished.")); });
+
+    expect(state().modelProgress).toMatchObject({ cancelling: true, status: "Cancelling..." });
+    expect(state().modelProgress?.model).not.toBe("first.gguf");
+  });
+
   it("does nothing when no job is being followed", async () => {
     const { result, api, notify } = setup();
 
