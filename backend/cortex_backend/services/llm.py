@@ -42,7 +42,6 @@ from cortex_backend.execution.code_execution import (
     validate_code_source,
 )
 from cortex_backend.services import token_budget
-from cortex_backend.services.attachments import MAX_DOCUMENT_TEXT_CHARS
 from cortex_backend.services.chat import normalize_title as normalize_chat_title
 from cortex_backend.services.chat_client import GGUF_PREFIX, KEEP_ALIVE_OPTION, LLAMACPP_ONLY_OPTION_KEYS
 from cortex_backend.services.code_feedback import (
@@ -306,9 +305,6 @@ _ATTACHMENT_OMITTED_MARKER = "[Attachment text left out: it did not fit the mode
 # What one document costs beside its text: the filename and type lines and the
 # fence around it.
 _DOCUMENT_FRAME_TOKENS = 64
-# Room for the "[Attachment text truncated by Cortex.]" line the attachment
-# resolver appends to a document it cut at MAX_DOCUMENT_TEXT_CHARS.
-_RESOLVER_TRUNCATION_NOTICE_CHARS = 64
 # Said to the user when the model's own tokenizer found the prompt larger than
 # the estimate that sized it, and more history had to go.
 _MEASURED_TRIM_NOTICE = (
@@ -867,10 +863,12 @@ class SynthesisAgent:
 
         The room documents may take is what the window has left after the rest
         of the prompt and the answer reservation, so it grows with the context
-        size instead of stopping at a fixed number of characters; the one
-        ceiling is ``MAX_DOCUMENT_TEXT_CHARS``, the most a single attachment can
-        resolve to. Several documents divide that room between them, and
-        together they never take more than it: a document with no room for its
+        size instead of stopping at a fixed number of characters. Each
+        document is already at most ``MAX_DOCUMENT_TEXT_CHARS``, the most one
+        attachment resolves to; that is a limit per document, not on what
+        several may take together, which only the window bounds. Several
+        documents divide that room between them, and together they never take
+        more than it: a document with no room for its
         opening text is listed with its text left out, and when even the
         documents' names and frames do not fit, ``AttachmentsDoNotFit`` is
         raised instead of building a prompt known to overflow.
@@ -903,11 +901,6 @@ class SynthesisAgent:
             - cls.estimate_prompt_tokens(base_prompt, model)
             - image_tokens,
         )
-        # One maximal document (its text plus the notice the resolver appends
-        # when it had to cut it) always fits a window with room for it.
-        ceiling_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
-            math.ceil((MAX_DOCUMENT_TEXT_CHARS + _RESOLVER_TRUNCATION_NOTICE_CHARS) / ratio)
-        )
         needs: dict[int, int] = {}
         floors: dict[int, int] = {}
         for index in documents:
@@ -921,7 +914,10 @@ class SynthesisAgent:
                 _DOCUMENT_FRAME_TOKENS
                 + token_budget.with_safety_margin(math.ceil(_MIN_ATTACHMENT_CHARS / ratio)),
             )
-        budget = min(available_tokens, ceiling_tokens)
+        # All the room the window has left. Capping the documents together at
+        # one maximal document's size cut two large ones that fitted easily,
+        # and told the user the window could not hold them.
+        budget = available_tokens
         omitted_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
             math.ceil(len(_ATTACHMENT_OMITTED_MARKER) / ratio)
         )
