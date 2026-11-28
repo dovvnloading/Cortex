@@ -181,6 +181,21 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 - Stop ends an Ollama turn while the "is the model loaded" check is stalled,
   and a streamed Ollama answer finishes at its final frame instead of waiting
   for the connection to close (#602, #613; #743).
+- A translation that ran into its length or context limit no longer
+  replaces the complete answer with its first part (#585; #744).
+- A deeply nested, malformed memory proposal is ignored instead of failing
+  the turn (#586; #744).
+- A regeneration answers the saved user turn and its saved attachments, so
+  the reply always matches the question in the transcript (#587; #744).
+- Attached documents stay within the context budget, and several documents
+  share all the room the window has instead of one document's allowance
+  (#588, #601; #744).
+- Chat history is sized for the turns it is sent as, so a long run of short
+  exchanges no longer overruns the context window (#600; #744).
+- A chat's finished code runs are chosen before the observation limit is
+  applied, so other chats' newer jobs no longer push them out (#666; #744).
+- A turn that asks for an explanation first is admitted for code execution
+  only for the action it separately asks for (#626; #744).
 
 ### Security
 
