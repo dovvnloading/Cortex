@@ -18,7 +18,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from botocore.session import Session
 import httpx
 
-from .cloud_transport import cloud_stream
+from .cloud_transport import StoppedBeforeRequest, cloud_stream, run_unless_stopped
 from .cloud_types import CloudProviderError, image_mime_type
 
 
@@ -127,7 +127,14 @@ def converse_stream(
         raise CloudProviderError("Select a valid Amazon Bedrock model ID.")
     url = f"{base}/model/{quote(model, safe='')}/converse-stream"
     data = json.dumps(_bedrock_body(messages, options)).encode()
-    headers = _bedrock_headers(url, data, region)
+    try:
+        # Loading and signing with AWS credentials can block on the network
+        # before the request's own Stop watcher exists.
+        headers = run_unless_stopped(
+            lambda: _bedrock_headers(url, data, region), cancellation_event, name="bedrock-credentials"
+        )
+    except StoppedBeforeRequest:
+        return {"message": {"content": "", "thinking": None}, "done_reason": "cancelled"}
     content: list[str] = []
     thinking: list[str] = []
     reason = ""
@@ -156,6 +163,11 @@ def converse_stream(
                         raise CloudProviderError("Amazon Bedrock could not complete this response.")
                 elif kind == "metadata":
                     usage = item.get("usage") or {}
+                    if reason:
+                        # messageStop and then its usage: the answer is
+                        # complete. Waiting for HTTP EOF only let a stall
+                        # or a dropped connection turn it into an error.
+                        break
     except (BotoCoreError, ParserError, httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
         if cancellation_event is not None and cancellation_event.is_set():
             reason = "cancelled"

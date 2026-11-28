@@ -311,3 +311,58 @@ def test_platform_claude_models_use_native_messages_protocol(monkeypatch, model,
     chat = CloudChatClient(transport=httpx.MockTransport(serve))
     result = chat.chat(model=model, messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "hi"}], options={})
     assert result["message"]["content"] == "ok"
+
+
+def test_bedrock_finishes_after_message_stop_and_usage_without_waiting_for_eof(monkeypatch):
+    """A stall after the terminal frames turned a complete answer into an error (#657)."""
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+    def stream():
+        yield b"".join([
+            _frame("contentBlockDelta", {"delta": {"text": "reply"}}),
+            _frame("messageStop", {"stopReason": "end_turn"}),
+            _frame("metadata", {"usage": {"inputTokens": 5, "outputTokens": 1}}),
+        ])
+        raise httpx.ReadTimeout("the connection stalled after the answer")
+
+    chat = CloudChatClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=stream())))
+    result = chat.chat(model="cloud:bedrock:us.example:0", messages=[{"role": "user", "content": "hi"}], options={})
+
+    assert result["message"]["content"] == "reply"
+    assert (result["done_reason"], result["prompt_eval_count"], result["eval_count"]) == ("stop", 5, 1)
+
+
+def test_stop_ends_a_bedrock_generation_still_loading_credentials(monkeypatch):
+    """IAM credentials were loaded before any Stop watcher existed (#655)."""
+    from threading import Event, Thread
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    entered, release = Event(), Event()
+
+    def stalled_headers(url, data, region):
+        entered.set()
+        release.wait(timeout=10)
+        return {}
+
+    monkeypatch.setattr(cloud_bedrock, "_bedrock_headers", stalled_headers)
+    stop = Event()
+    chat = CloudChatClient(transport=httpx.MockTransport(lambda _: pytest.fail("nothing may be sent")))
+    outcome: list[dict] = []
+    worker = Thread(
+        target=lambda: outcome.append(chat.chat(
+            model="cloud:bedrock:us.example:0", messages=[{"role": "user", "content": "hi"}],
+            options={}, cancellation_event=stop,
+        )),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        stop.set()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), "Stop waited for the credential step"
+        assert outcome[0]["done_reason"] == "cancelled"
+    finally:
+        release.set()
