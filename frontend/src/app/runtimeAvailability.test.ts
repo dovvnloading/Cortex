@@ -5,6 +5,7 @@ import {
   LLAMACPP_IDLE_POLL_MS,
   llamacppPollInterval,
   resolveRuntimeAvailability,
+  shouldWatchLlamacpp,
 } from "./runtimeAvailability";
 
 const RESTART_MESSAGE = "The local model runtime did not exit cleanly; restart Cortex before trying again.";
@@ -156,5 +157,15 @@ describe("resolveRuntimeAvailability while the model inventory is loading", () =
     });
 
     expect(result).toEqual({ ready: true, reason: null, message: null });
+  });
+});
+
+describe("shouldWatchLlamacpp", () => {
+  it("keeps watching a GGUF runtime that is still loaded after another model was chosen (#717)", () => {
+    expect(shouldWatchLlamacpp(false, { state: "ready", loaded_model: "demo.gguf" })).toBe(true);
+    expect(shouldWatchLlamacpp(false, { state: "stopping" })).toBe(true);
+    expect(shouldWatchLlamacpp(false, { state: "idle" })).toBe(false);
+    expect(shouldWatchLlamacpp(false, null)).toBe(false);
+    expect(shouldWatchLlamacpp(true, { state: "idle" })).toBe(true);
   });
 });

@@ -114,3 +114,17 @@ export function llamacppPollInterval(
       return LLAMACPP_IDLE_POLL_MS;
   }
 }
+
+/**
+ * Whether the GGUF runtime's status needs watching: while a GGUF model is
+ * selected, and also while the runtime is anything but idle. Choosing an
+ * Ollama or cloud model does not unload a GGUF model; watching stopped
+ * anyway, so System settings kept saying it was loaded after the runtime
+ * unloaded it on its idle timeout (#717).
+ */
+export function shouldWatchLlamacpp(
+  selectedModelIsGGUF: boolean,
+  status: LlamaCppRuntimeStatus | null | undefined,
+): boolean {
+  return selectedModelIsGGUF || Boolean(status?.state && status.state !== "idle");
+}

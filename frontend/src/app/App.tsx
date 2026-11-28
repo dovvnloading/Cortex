@@ -50,7 +50,7 @@ import { useSettingsStore } from "../stores/useSettingsStore";
 import { RouteBoundary } from "./ErrorBoundary";
 import { lazyRoute } from "./lazyRoute";
 import { useToast } from "./ToastProvider";
-import { llamacppPollInterval, resolveRuntimeAvailability } from "./runtimeAvailability";
+import { llamacppPollInterval, resolveRuntimeAvailability, shouldWatchLlamacpp } from "./runtimeAvailability";
 import { mergeExecutionTasks } from "../lib/executionTasks";
 
 type Props = { api?: CortexApi };
@@ -572,10 +572,11 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setLlamacppStatus(next);
     }
   }, [api, setLlamacppStatus]);
+  const watchLlamacpp = shouldWatchLlamacpp(selectedModelIsGGUF, liveLlamacppStatus);
   useVisiblePolling(
     refreshLlamacppStatus,
     llamacppPollInterval(liveLlamacppStatus, generationActive),
-    selectedModelIsGGUF,
+    watchLlamacpp,
     { backoff: true },
   );
   // A reply that finishes between two slow polls would leave the model picker
@@ -585,8 +586,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   useEffect(() => {
     const ended = wasGenerationActiveRef.current && !generationActive;
     wasGenerationActiveRef.current = generationActive;
-    if (ended && selectedModelIsGGUF) refreshLlamacppStatus().catch(() => undefined);
-  }, [generationActive, selectedModelIsGGUF, refreshLlamacppStatus]);
+    if (ended && watchLlamacpp) refreshLlamacppStatus().catch(() => undefined);
+  }, [generationActive, watchLlamacpp, refreshLlamacppStatus]);
 
   const visibleExecutionTasks = system?.execution_preview_available
     ? executionTasks.filter((task) => shouldShowExecutionTask(task, system.started_at))
