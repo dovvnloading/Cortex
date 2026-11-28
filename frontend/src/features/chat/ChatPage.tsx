@@ -543,7 +543,18 @@ export function ChatPage({
       // admission did not happen and its key must not leak into a later
       // retry. Network failures and server errors remain ambiguous because
       // the backend may have admitted the job before the response was lost.
-      if (isDefinitiveRejection(requestError) && pendingAdmissionRef.current?.requestId === requestId) {
+      //
+      // Two rejections prove nothing about an earlier attempt, though (#691):
+      // a 401 is answered before the handler runs, and a replay is refused
+      // for its own reasons while the original may have been admitted. Either
+      // way the key is the only safe way back, so it stays until the user
+      // abandons it.
+      const replaying = requestIdOverride !== undefined;
+      const authRefusal = requestError instanceof ApiError && requestError.kind === "auth";
+      if (
+        isDefinitiveRejection(requestError) && !replaying && !authRefusal
+        && pendingAdmissionRef.current?.requestId === requestId
+      ) {
         pendingAdmissionRef.current = null;
         setPendingRecovery(null);
         clearPendingGenerationAdmission();
@@ -814,7 +825,10 @@ export function ChatPage({
     } catch (requestError) {
       // A lost response does not mean the fork failed; replay with the same
       // request ID on the next attempt so the backend finds the saved copy.
-      if (isDefinitiveRejection(requestError)) {
+      // A 401 is answered before the handler runs, so it proves nothing
+      // about an earlier attempt with this id either (#691).
+      if (isDefinitiveRejection(requestError)
+        && !(requestError instanceof ApiError && requestError.kind === "auth")) {
         clearForkRequestId(threadId, message.id);
         pendingForkRef.current = null;
       }

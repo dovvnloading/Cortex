@@ -1136,6 +1136,34 @@ describe("ChatPage composer integration", () => {
     }));
   });
 
+  it("keeps the replay key when a replay is refused with 401 (#691)", async () => {
+    const user = userEvent.setup();
+    storePendingGenerationAdmission({
+      requestId: "lost-acceptance",
+      operation: "generate",
+      threadId: "thread-a",
+      baseRevision: 2,
+      prompt: "The first message",
+      attachments: [],
+      createdAt: Date.now(),
+    });
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(401, "Your session expired."))
+      .mockResolvedValue({ job_id: "job-original", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-1" });
+    const api = chatApi({ chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 2 })), generate });
+    renderChat(api);
+
+    await user.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry last message" })).toBeEnabled());
+    expect(readPendingGenerationAdmission()?.requestId).toBe("lost-acceptance");
+
+    // Once the session is back, the retry still replays the original id.
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ request_id: "lost-acceptance" });
+  });
+
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()
