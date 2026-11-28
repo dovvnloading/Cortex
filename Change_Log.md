@@ -151,6 +151,36 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 - A folder name with an emoji or another character outside the Basic
   Multilingual Plane no longer makes every AppContainer launch fail (#615;
   #741).
+- An Ollama pull whose tag is missing afterwards fails with an explanation
+  instead of being recorded as a success, and Stop ends a model check or a
+  pull's final verification while Ollama's inventory read is stalled (#628,
+  #629; #743).
+- Stop ends a GGUF generation or token count still waiting for llama-server's
+  response headers, and a GGUF or runtime download stalled before its headers
+  or trickling bytes, instead of waiting for the read timeout (#630, #642,
+  #658; #743).
+- GGUF models are named the same way in the model list, the loader and
+  runtime status: a model behind a link out of the models folder is no longer
+  listed, and two models with the same file name in different subfolders are
+  told apart (#631, #632; #743).
+- Runtime status no longer reports a llama-server that has exited as ready
+  (#641; #743).
+- A remembered GPU failure applies only to the launch options that failed, so
+  changing them lets Auto try the GPU again (#640; #743).
+- A GGUF file replaced on disk is loaded again instead of being served from
+  the old weights (#639; #743).
+- Cortex never starts a second llama-server while an earlier one will not
+  exit (#638; #743).
+- A Stop that arrives as a GGUF download is published no longer reports the
+  download cancelled while it stays installed; a split set counts as complete
+  only when every part is a real GGUF file; and a split name that cannot be
+  fetched is refused before anything is transferred (#643, #644, #645; #743).
+- The runtime installer keeps its free-space reserve while unpacking, and
+  staging left behind by an interrupted model or runtime download is
+  reclaimed (#659, #660, #661; #743).
+- Stop ends an Ollama turn while the "is the model loaded" check is stalled,
+  and a streamed Ollama answer finishes at its final frame instead of waiting
+  for the connection to close (#602, #613; #743).
 
 ### Security
 
