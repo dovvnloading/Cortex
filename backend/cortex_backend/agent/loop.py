@@ -138,6 +138,11 @@ AfterTool = Callable[[AgentStep], None]
 BeforeFinal = Callable[[], None]
 
 
+# The most of a final answer the run's output carries.
+MAX_FINAL_OUTPUT_CHARS = 16_000
+_FINAL_TRUNCATION_NOTICE = "\n\n[Cortex: the rest of this answer was cut to fit the output limit.]"
+
+
 class AgentLoop:
     """Run one bounded agent job at a time per run ID.
 
@@ -373,6 +378,22 @@ class AgentLoop:
             return None
         return [*fixed, *({"role": item.role, "content": item.content} for item in state.history), *extra]
 
+    @staticmethod
+    def _bounded_final(answer: str, checks: str | None) -> str:
+        """The final output within MAX_FINAL_OUTPUT_CHARS, check results always whole.
+
+        The check report used to be appended and the whole string then cut to
+        16,000 characters, so a long answer lost its test results without a
+        word (#610). The model's text is what gets cut now, with a notice.
+        """
+        tail = "" if checks is None else f"\n\nCheck results: {checks}"
+        text = answer if checks is None else answer.rstrip()
+        room = MAX_FINAL_OUTPUT_CHARS - len(tail)
+        if len(text) > room:
+            notice = _FINAL_TRUNCATION_NOTICE
+            text = text[: max(0, room - len(notice))].rstrip() + notice
+        return (text + tail)[:MAX_FINAL_OUTPUT_CHARS]
+
     def _complete_final(self, run_id: str, state: _State, answer: str, checks: str | None = None) -> LoopResult:
         """Run existing final hook only after verification has settled."""
         if self.before_final is not None:
@@ -383,7 +404,7 @@ class AgentLoop:
         reason = self._interruption(state)
         if reason is not None:
             return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
-        summary = answer if checks is None else f"{answer.rstrip()}\n\nCheck results: {checks}"
+        summary = self._bounded_final(answer, checks)
         return self._stop(run_id, state, "completed", "final_answer", answer=summary)
 
     @staticmethod

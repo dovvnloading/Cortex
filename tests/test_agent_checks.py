@@ -314,6 +314,28 @@ def test_before_final_runs_once_after_edit_and_not_without_new_edit(tmp_path: Pa
         shell.close()
 
 
+def test_a_long_final_answer_keeps_its_check_results(tmp_path: Path) -> None:
+    """#610: the report was appended and the whole answer then cut at 16,000
+    characters, so a long answer lost its test results without a word."""
+    from cortex_backend.agent.loop import MAX_FINAL_OUTPUT_CHARS
+
+    long_text = "Detailed explanation. " * 1000  # 22,000 characters
+    _, run_id, loop, _launcher, _client, shell = _fixture(
+        tmp_path, _edit(), _final(long_text), _final(long_text), exit_code=1,
+    )
+    (tmp_path / "copy" / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    try:
+        result = loop.run(run_id)
+
+        assert result.status == "completed"
+        assert result.answer is not None
+        assert len(result.answer) <= MAX_FINAL_OUTPUT_CHARS
+        assert "Check results:" in result.answer and "1 check failed" in result.answer
+        assert "was cut to fit" in result.answer
+    finally:
+        shell.close()
+
+
 def test_before_final_runs_new_check_after_each_edit(tmp_path: Path) -> None:
     _, run_id, loop, launcher, _, shell = _fixture(
         tmp_path, _edit(), _final(), _edit(), _final(), _final(), exit_code=1,

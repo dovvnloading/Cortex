@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from cortex_backend.agent.context_instructions import load_project_instructions
 from cortex_backend.agent.context_repo_map import build_repo_map
-from cortex_backend.agent.loop import AgentLoop, LoopBudgets, LoopResult
+from cortex_backend.agent.loop import MAX_FINAL_OUTPUT_CHARS, AgentLoop, LoopBudgets, LoopResult
 from cortex_backend.agent.model_profiles import (
     DEFAULT_PROBE_CONTEXT_SIZE,
     ModelProfile,
@@ -526,7 +526,9 @@ class AgentRuns:
                 try:
                     self._publish_steps(managed)
                     if result is not None and result.answer is not None:
-                        self._emit(managed, "output", {"text": result.answer[:16000], "source": "agent"})
+                        self._emit(managed, "output", {
+                            "text": result.answer[:MAX_FINAL_OUTPUT_CHARS], "source": "agent",
+                        })
                     if result is not None and result.approval_request is not None:
                         # The pending call stays in memory and never appears in
                         # the ledger. The owner sees the concrete proposed edit.
