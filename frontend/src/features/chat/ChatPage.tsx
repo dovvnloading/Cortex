@@ -173,6 +173,12 @@ export function ChatPage({
   // A deliberate submit does not pass this key and therefore starts a new
   // user turn with a fresh request id.
   const pendingAdmissionRef = useRef<PendingGenerationAdmission | null>(restoredPending);
+  // The answer the last accepted regeneration was replacing. A failed or
+  // stopped regeneration keeps that answer, so Retry must regenerate it again,
+  // not send the question as a new turn (#671).
+  const regenerationTargetRef = useRef<{
+    threadId: string; messageId: string; prompt: string; attachments: ChatAttachment[];
+  } | null>(null);
   const handledClearRequestsRef = useRef(new Set<string>());
   const handledCompletionsRef = useRef(new Set<number>());
 
@@ -445,6 +451,11 @@ export function ChatPage({
     setGenerationError(null);
     const requestId = requestIdOverride ?? createRequestId();
     const requestThreadId = admissionOverride ? admissionOverride.threadId : threadId;
+    // Set as the request starts, so a failure before or after admission
+    // retries the same answer; any other send forgets it.
+    regenerationTargetRef.current = regenerateMessageId && requestThreadId
+      ? { threadId: requestThreadId, messageId: regenerateMessageId, prompt: input, attachments: [...suppliedAttachments] }
+      : null;
     const options = admissionOverride ? admissionOverride.options : threadOptions ?? undefined;
     const baseRevision = admissionOverride
       ? admissionOverride.baseRevision
@@ -750,6 +761,23 @@ export function ChatPage({
     }
     const messages = chat?.messages;
     const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
+    const target = regenerationTargetRef.current;
+    if (target && target.threadId === threadId) {
+      if (lastMessage?.role !== "assistant" || lastMessage.id !== target.messageId) {
+        // The answer is no longer the last one: something changed since, so
+        // retrying could replace the wrong reply. Leave the choice to the user.
+        regenerationTargetRef.current = null;
+        setGenerationError({
+          threadId,
+          message: "This conversation changed since the answer was regenerated. Choose Regenerate on the answer you want to replace.",
+          retryable: false,
+        });
+        return false;
+      }
+      const started = await startGeneration(target.prompt, target.messageId, target.attachments);
+      if (started) settle(started);
+      return Boolean(started);
+    }
     const recoverMessageId = lastMessage?.role === "user" || (
       lastMessage?.role === "assistant" && lastMessage.stats?.stop_reason === "error"
     ) ? lastMessage.id ?? undefined : undefined;

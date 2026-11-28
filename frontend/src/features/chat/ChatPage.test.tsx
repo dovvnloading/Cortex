@@ -439,6 +439,70 @@ describe("ChatPage composer integration", () => {
     });
   });
 
+  it("retries a failed regeneration as a regeneration of the same answer (#671)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 4,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "The kept answer" },
+      ],
+    };
+    const regenerate = vi.fn()
+      .mockResolvedValueOnce({ job_id: "job-regen-1", kind: "generation", status: "queued", thread_id: "thread-a" })
+      .mockResolvedValueOnce({ job_id: "job-regen-2", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-regen-1") return new Promise<void>(() => undefined);
+      // The replacement failed before it was saved; the old answer stays.
+      onEvent({
+        event_id: 1, event: "generation.failed", job_id: jobId, thread_id: "thread-a",
+        data: { message: "The model stopped responding." },
+      });
+    });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate, streamGeneration } as Partial<CortexApi>);
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(2));
+    expect(regenerate.mock.calls[1][1]).toMatchObject({ message_id: "assistant-1", user_input: "Explain it" });
+    expect(regenerate.mock.calls[1][1].request_id).not.toBe(regenerate.mock.calls[0][1].request_id);
+    expect(api.generate).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed new message as that message after an earlier regeneration (#671)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 4,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "An answer" },
+      ],
+    };
+    const regenerate = vi.fn().mockResolvedValue({ job_id: "job-regen", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "The chat is busy."))
+      .mockResolvedValue({ job_id: "job-new", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-2" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-regen") return new Promise<void>(() => undefined);
+      onEvent({ event_id: 1, event: "generation.completed", job_id: jobId, thread_id: "thread-a", data: {} });
+    });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate, generate, streamGeneration } as Partial<CortexApi>);
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    const input = await screen.findByLabelText("Message Cortex");
+    await userEvent.type(input, "A new question{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ user_input: "A new question" });
+    expect(regenerate).toHaveBeenCalledTimes(1);
+  });
+
   it("does not offer recovery on answered or earlier user turns", async () => {
     const api = chatApi({
       chat: vi.fn(async (): Promise<ChatResponse> => ({
