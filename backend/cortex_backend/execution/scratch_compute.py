@@ -203,8 +203,9 @@ def _is_negative_literal(node: ast.AST) -> bool:
 
 
 class _Evaluator:
-    def __init__(self, cancel_check: CancellationCheck | None) -> None:
+    def __init__(self, cancel_check: CancellationCheck | None, source: str) -> None:
         self._cancel_check = cancel_check
+        self._source = source
         self._operations = 0
 
     def _operation(self) -> None:
@@ -216,22 +217,33 @@ class _Evaluator:
     def evaluate(self, node: ast.AST) -> Decimal:
         self._operation()
         if isinstance(node, ast.Constant):
-            return self._constant(node.value)
+            return self._constant(node)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             value = self.evaluate(node.operand)
-            return _bounded(value if isinstance(node.op, ast.UAdd) else -value)
+            # copy_negate is exact; unary minus would round in the caller's
+            # Decimal context (28 digits by default), not this calculator's.
+            return _bounded(value if isinstance(node.op, ast.UAdd) else value.copy_negate())
         if isinstance(node, ast.BinOp):
             return self._binary(node)
         if isinstance(node, ast.Call):
             return self._call(node)
         raise ScratchComputeError("expression_not_allowed")
 
-    @staticmethod
-    def _constant(value: object) -> Decimal:
+    def _constant(self, node: ast.Constant) -> Decimal:
+        value = node.value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ScratchComputeError("expression_not_allowed")
+        # A fractional literal is already a binary float in the AST, which has
+        # lost digits (10000000000000000.1 parses as 1e16). Read the number
+        # from the literal as written instead; integers are exact already.
+        text = str(value)
+        if isinstance(value, float):
+            segment = ast.get_source_segment(self._source, node)
+            if segment is None:
+                raise ScratchComputeError("number_invalid")
+            text = segment
         try:
-            converted = Decimal(str(value))
+            converted = Decimal(text)
         except (InvalidOperation, ValueError):
             raise ScratchComputeError("number_invalid") from None
         return _bounded(converted)
@@ -249,21 +261,23 @@ class _Evaluator:
                     value = left * right
                 elif isinstance(node.op, ast.Div):
                     value = left / right
-                elif isinstance(node.op, ast.FloorDiv):
-                    value = left // right
-                elif isinstance(node.op, ast.Mod):
-                    value = left % right
+                elif isinstance(node.op, (ast.FloorDiv, ast.Mod)):
+                    quotient, remainder = _floor_divmod(left, right)
+                    value = quotient if isinstance(node.op, ast.FloorDiv) else remainder
                 elif isinstance(node.op, ast.Pow):
                     if right != right.to_integral_value() or not -12 <= int(right) <= 12:
                         raise ScratchComputeError("exponent_out_of_bounds")
                     value = left ** int(right)
                 else:
                     raise ScratchComputeError("expression_not_allowed")
+                # Round here, in the 34-digit context; outside it, unary plus
+                # would round again at the caller's precision.
+                value = +value
         except ScratchComputeError:
             raise
         except (DivisionByZero, InvalidOperation, Overflow, ValueError, ZeroDivisionError):
             raise ScratchComputeError("arithmetic_failed") from None
-        return _bounded(+value)
+        return _bounded(value)
 
     def _call(self, node: ast.Call) -> Decimal:
         if not isinstance(node.func, ast.Name) or node.keywords:
@@ -300,19 +314,38 @@ class _Evaluator:
                     )
                 else:
                     raise ScratchComputeError("expression_not_allowed")
+                value = +value
         except ScratchComputeError:
             raise
         except (DivisionByZero, InvalidOperation, Overflow, ValueError):
             raise ScratchComputeError("arithmetic_failed") from None
-        return _bounded(+value)
+        return _bounded(value)
 
 
 def _decimal_context() -> Context:
     return Context(prec=34, Emax=24, Emin=-MAX_DECIMAL_SCALE)
 
 
+def _floor_divmod(left: Decimal, right: Decimal) -> tuple[Decimal, Decimal]:
+    """Python's floor division and modulo for Decimals.
+
+    The quotient rounds toward minus infinity and the remainder takes the
+    divisor's sign. Decimal's own operators truncate toward zero instead
+    (-7 // 3 gives -2), which is not what the Python syntax this calculator
+    accepts means. Runs inside the caller's local context.
+    """
+
+    quotient = left // right
+    remainder = left % right
+    if remainder and (remainder < 0) != (right < 0):
+        quotient -= 1
+        remainder += right
+    return quotient, remainder
+
+
 def _bounded(value: Decimal) -> Decimal:
-    if not value.is_finite() or abs(value) > MAX_RESULT_ABS:
+    # copy_abs is exact; abs() would round in the caller's context.
+    if not value.is_finite() or value.copy_abs() > MAX_RESULT_ABS:
         raise ScratchComputeError("result_out_of_bounds")
     exponent = value.as_tuple().exponent
     # is_finite() above rules out the 'n'/'N'/'F' exponents Decimal uses
@@ -336,7 +369,7 @@ def _bounded(value: Decimal) -> Decimal:
 def _render(value: Decimal) -> str:
     if value == 0:
         return "0"
-    rendered = format(value.normalize(), "f")
+    rendered = format(value.normalize(_decimal_context()), "f")
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
     if len(rendered) > 128:
@@ -352,7 +385,7 @@ def evaluate_scratch_expression(
     """Evaluate one expression with no host capabilities or dynamic execution."""
 
     tree = _parse(expression)
-    evaluator = _Evaluator(cancel_check)
+    evaluator = _Evaluator(cancel_check, expression)
     value = evaluator.evaluate(tree.body)
     _check_cancel(cancel_check)
     return ScratchComputeResult(value=_render(value))
