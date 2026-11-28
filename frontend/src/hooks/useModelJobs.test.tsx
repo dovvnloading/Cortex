@@ -281,6 +281,30 @@ describe("following a job the backend just accepted", () => {
     expect(state().activeJob).toBeNull();
   });
 
+  it("keeps following, with Cancel, through a 503 from the stream or the status check (#712)", async () => {
+    const { result, streams, api, notify } = setup();
+    api.jobStatus
+      .mockRejectedValueOnce(new ApiError(503, "Cortex is busy."))
+      .mockResolvedValue({ job_id: "job-1", kind: "gguf_download", status: "running", sequence: 3 });
+
+    let outcome!: Promise<ModelJobResult>;
+    act(() => { outcome = result.current.run(accepted("job-1"), "demo.Q4_K_M.gguf"); });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    await act(async () => streams[0].fail(new ApiError(503, "Cortex is busy.")));
+    await waitFor(() => expect(streams).toHaveLength(2), { timeout: 5000 });
+    // A clean close whose status check then gets a 503.
+    await act(async () => streams[1].close());
+
+    expect(state().activeJob).toEqual(job());
+    expect(state().modelBusy).toBe(true);
+    expect(notify).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(streams).toHaveLength(3), { timeout: 5000 });
+    await act(async () => streams[2].finish(succeeded(4)));
+    expect((await outcome).succeeded).toBe(true);
+    expect(state().activeJob).toBeNull();
+  }, 15000);
+
   it("reports a cancellation nobody asked for as a failure", async () => {
     const { result, streams, notify } = setup();
 

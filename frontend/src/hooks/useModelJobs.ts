@@ -77,6 +77,22 @@ function isJobGone(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 404 || error.status === 403);
 }
 
+// "Try again later" answers: the backend (or a proxy in front of it) is
+// briefly unable to answer, which says nothing about the job.
+const TEMPORARILY_UNAVAILABLE = new Set([502, 503, 504]);
+
+/**
+ * No answer about the job: a lost connection, an expired session, or a
+ * temporarily unavailable backend (a 503 while it is busy). The worker may
+ * still be running, so the job is followed again rather than dropped --
+ * dropping it on a 503 left a multi-gigabyte download running with no
+ * Cancel (#712). Any other refusal, a 500 included, still ends it.
+ */
+function saysNothingAboutTheJob(error: unknown): boolean {
+  return error instanceof ApiError
+    && (error.kind === "network" || error.kind === "auth" || TEMPORARILY_UNAVAILABLE.has(error.status));
+}
+
 /**
  * Follow the backend's model jobs (an Ollama check or pull, a GGUF download).
  *
@@ -212,7 +228,7 @@ export function useModelJobs(dependencies: Dependencies): {
           // A missing/foreign job cannot be retried; ordinary failures are
           // handled by the existing outer catch. A lost transport says
           // nothing about whether the backend worker is still running.
-          if (isJobGone(error) || !(error instanceof ApiError && (error.kind === "network" || error.kind === "auth"))) {
+          if (isJobGone(error) || !saysNothingAboutTheJob(error)) {
             throw error;
           }
         }
@@ -279,7 +295,7 @@ export function useModelJobs(dependencies: Dependencies): {
       // No answer says nothing about the job, so a lost connection or an
       // expired session leaves it remembered; a job the backend has forgotten,
       // or any other refusal, does not.
-      const unreachable = error instanceof ApiError && (error.kind === "network" || error.kind === "auth");
+      const unreachable = saysNothingAboutTheJob(error);
       settled = !unreachable;
       if (isJobGone(error)) {
         // Most likely it finished while nothing was watching. The folder may
