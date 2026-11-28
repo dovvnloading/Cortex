@@ -304,6 +304,124 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-8": true });
   });
 
+  it("clears an earlier translation warning when the regenerated answer is translated (#674)", async () => {
+    // A regenerated answer keeps its message id.
+    useChatStore.setState({ untranslatedMessageIds: { "assistant-10": true, "assistant-11": true } });
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-retranslated", "thread-retranslated", onCompleted, vi.fn()); });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    act(() => {
+      emitEvent({
+        event_id: 1, event: "generation.completed", job_id: "job-retranslated", thread_id: "thread-retranslated",
+        data: { assistant_message_id: "assistant-10", translation_error: null },
+      });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-11": true });
+
+    // The status fallback reconciles it the same way.
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-retranslated-status", kind: "generation", status: "succeeded", sequence: 2,
+      result: { assistant_message_id: "assistant-11" },
+    });
+    const fallback = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration: vi.fn().mockRejectedValue(new Error("connection dropped")), generationStatus }),
+      ignoreSessionExpiry,
+    ));
+    const fallbackCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { fallback.result.current.start("job-retranslated-status", "thread-r2", fallbackCompleted, vi.fn()); });
+    await waitFor(() => expect(fallbackCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({});
+  });
+
+  it("announces a code refusal that only the status fallback delivered, once (#699)", async () => {
+    const refusal = { code: "imports_not_allowed", message: "Cortex only runs code without imports." };
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-refused-status", kind: "generation", status: "succeeded", sequence: 3,
+      result: { assistant_message_id: "assistant-12", code_execution_rejection: refusal },
+    });
+    let connection = 0;
+    const streamGeneration = vi.fn(async (_jobId: string, onEvent: (event: unknown) => void) => {
+      connection += 1;
+      if (connection === 1) {
+        // The live refusal arrives, then the stream drops before the end.
+        onEvent({
+          event_id: 1, event: "generation.status", job_id: "job-refused-status", thread_id: "thread-refused",
+          data: { message: refusal.message, code_execution_rejection: refusal },
+        });
+      }
+      throw new Error("connection dropped");
+    });
+    const { result } = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration, generationStatus } as Partial<CortexApi>), ignoreSessionExpiry,
+    ));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-refused-status", "thread-refused", onCompleted, vi.fn()); });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useUiStore.getState().toasts.filter((toast) => toast.message === refusal.message)).toHaveLength(1);
+
+    // With no live event at all, the fallback alone announces it.
+    useUiStore.setState({ toasts: [] });
+    const fallbackOnly = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration: vi.fn().mockRejectedValue(new Error("connection dropped")), generationStatus }),
+      ignoreSessionExpiry,
+    ));
+    const fallbackCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { fallbackOnly.result.current.start("job-refused-status", "thread-refused", fallbackCompleted, vi.fn()); });
+    await waitFor(() => expect(fallbackCompleted).toHaveBeenCalled());
+    expect(useUiStore.getState().toasts.map((toast) => toast.message)).toEqual([refusal.message]);
+  });
+
+  it("keeps a dismissed memory suggestion gone when the same job repeats it (#694)", async () => {
+    useChatStore.setState({ proposedMemoriesByMessage: {}, proposalJobsByMessage: {} });
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-memo", "thread-memo", onCompleted, vi.fn()); });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    const proposal = { assistant_message_id: "assistant-13", proposed_memories: ["Lives in Oslo.", "Prefers tea."] };
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.memory_proposed", job_id: "job-memo", thread_id: "thread-memo", data: proposal });
+    });
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Lives in Oslo.", "Prefers tea."]);
+    act(() => { useChatStore.getState().dismissProposedMemory("assistant-13", "Lives in Oslo."); });
+
+    act(() => {
+      emitEvent({ event_id: 2, event: "generation.completed", job_id: "job-memo", thread_id: "thread-memo", data: proposal });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Prefers tea."]);
+
+    // A later, distinct regeneration of the same message may suggest it again.
+    act(() => { useChatStore.getState().setProposedMemories("assistant-13", ["Lives in Oslo."], "job-memo-2"); });
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Lives in Oslo."]);
+  });
+
+  it("does not check status again for a transport error after the job ended (#693)", async () => {
+    const generationStatus = vi.fn();
+    const streamGeneration = vi.fn(async (_jobId: string, onEvent: (event: unknown) => void) => {
+      onEvent({
+        event_id: 1, event: "generation.completed", job_id: "job-ended", thread_id: "thread-ended",
+        data: { assistant_message_id: "assistant-14" },
+      });
+      throw new Error("connection reset after the end");
+    });
+    const { result } = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration, generationStatus } as Partial<CortexApi>), ignoreSessionExpiry,
+    ));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    const onFailed = vi.fn();
+    act(() => { result.current.start("job-ended", "thread-ended", onCompleted, onFailed); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    expect(generationStatus).not.toHaveBeenCalled();
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

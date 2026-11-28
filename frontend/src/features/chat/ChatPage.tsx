@@ -1,9 +1,17 @@
 import { Paperclip } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
+import { createRequestId } from "../../lib/requestId";
 import { displayChatTitle } from "../../lib/chatTitle";
-import { clearPendingGenerationAdmission, readPendingGenerationAdmission, storePendingGenerationAdmission, type PendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
+import {
+  clearPendingGenerationAdmission,
+  pendingGenerationAdmissionSnapshot,
+  readPendingGenerationAdmission,
+  storePendingGenerationAdmission,
+  subscribePendingGenerationAdmission,
+  type PendingGenerationAdmission,
+} from "../../lib/pendingGenerationAdmission";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
 import { useShallow } from "zustand/react/shallow";
@@ -19,6 +27,7 @@ import { MessageList, type MessageListHandle } from "./MessageList";
 import { NewChatGuide } from "./NewChatGuide";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
 import { ResponseAnnouncer } from "./ResponseAnnouncer";
+import { useComposerStore } from "../../stores/useComposerStore";
 
 type Props = {
   api: CortexApi;
@@ -111,15 +120,17 @@ export function ChatPage({
   const [mountCompletionId] = useState(() => useChatStore.getState().lastCompletion?.id ?? 0);
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
-  const [drafts, setDrafts] = useState<Record<string, string>>(() => ({
-    [composerDraftKey(threadId)]: readComposerDraft(threadId),
-  }));
-  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, ChatAttachment[]>>(() => ({
-    [composerAttachmentKey(threadId)]: readComposerAttachments(threadId),
-  }));
+  // Shared by every mount of this page: a send or an upload that finishes
+  // after a Settings round trip lands in the drafts the remounted page shows,
+  // never in a stale copy of its own (#697, #687).
+  const drafts = useComposerStore((state) => state.drafts);
+  const attachmentDrafts = useComposerStore((state) => state.attachments);
   const [restoredPending] = useState(readPendingGenerationAdmission);
-  // Render-visible mirror; refs are reserved for asynchronous event handlers.
-  const [pendingRecovery, setPendingRecovery] = useState<PendingGenerationAdmission | null>(restoredPending);
+  // Shared with every other mount of this page and with storage, so an
+  // admission another mount settled is gone here too (#686).
+  const pendingRecovery = useSyncExternalStore(
+    subscribePendingGenerationAdmission, pendingGenerationAdmissionSnapshot,
+  );
   const [lastPrompt, setLastPrompt] = useState(restoredPending?.prompt ?? "");
   const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>(restoredPending?.attachments ?? []);
   const [chatLoad, setChatLoad] = useState<ChatLoadState>({
@@ -158,20 +169,23 @@ export function ChatPage({
   // `chat` from the render that created them.
   const chatRef = useRef<ChatResponse | null>(null);
   const chatRequestVersionsRef = useRef(new Map<string | null, number>());
-  const draftsRef = useRef(drafts);
-  const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
   // Batches are staged one after another, so a second drop or paste while the
   // first is still uploading is queued rather than lost.
   const attachmentQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingAttachmentBatchesRef = useRef(0);
   const attachmentPreviewsRef = useRef(attachmentPreviews);
-  // A POST can be admitted before its response reaches the browser. Keep its
-  // idempotency key across that ambiguous failure so Retry can replay the
-  // admission instead of creating a second job (or a second new-chat thread).
-  // A deliberate submit does not pass this key and therefore starts a new
-  // user turn with a fresh request id.
-  const pendingAdmissionRef = useRef<PendingGenerationAdmission | null>(restoredPending);
+  // A POST can be admitted before its response reaches the browser. Its
+  // idempotency key is kept (lib/pendingGenerationAdmission) across that
+  // ambiguous failure so Retry can replay the admission instead of creating a
+  // second job (or a second new-chat thread). A deliberate submit does not
+  // pass this key and therefore starts a new user turn with a fresh request id.
+  // The answer the last accepted regeneration was replacing. A failed or
+  // stopped regeneration keeps that answer, so Retry must regenerate it again,
+  // not send the question as a new turn (#671).
+  const regenerationTargetRef = useRef<{
+    threadId: string; messageId: string; prompt: string; attachments: ChatAttachment[];
+  } | null>(null);
   const handledClearRequestsRef = useRef(new Set<string>());
   const handledCompletionsRef = useRef(new Set<number>());
 
@@ -418,13 +432,14 @@ export function ChatPage({
   ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
     if (!input || modelBusy || generation.jobId || startingRef.current) return null;
-    if (!requestIdOverride && pendingAdmissionRef.current) {
+    const unresolved = requestIdOverride ? null : readPendingGenerationAdmission();
+    if (unresolved) {
       // Never overwrite an unresolved acceptance with a new request ID.
       // A lost 202 may represent a live generation still running on the backend.
       setGenerationError({
         threadId,
         message: "An earlier message may already be running. Return to that chat and Retry to recover it, or Dismiss its warning to abandon recovery.",
-        retryable: pendingAdmissionRef.current.threadId === threadId,
+        retryable: unresolved.threadId === threadId,
       });
       return null;
     }
@@ -444,6 +459,11 @@ export function ChatPage({
     setGenerationError(null);
     const requestId = requestIdOverride ?? createRequestId();
     const requestThreadId = admissionOverride ? admissionOverride.threadId : threadId;
+    // Set as the request starts, so a failure before or after admission
+    // retries the same answer; any other send forgets it.
+    regenerationTargetRef.current = regenerateMessageId && requestThreadId
+      ? { threadId: requestThreadId, messageId: regenerateMessageId, prompt: input, attachments: [...suppliedAttachments] }
+      : null;
     const options = admissionOverride ? admissionOverride.options : threadOptions ?? undefined;
     const baseRevision = admissionOverride
       ? admissionOverride.baseRevision
@@ -452,7 +472,9 @@ export function ChatPage({
       requestId,
       operation: regenerateMessageId ? "regenerate" : "generate",
       threadId: requestThreadId,
-      baseRevision: regenerateMessageId ? undefined : baseRevision,
+      // A regeneration names the revision it was asked from too, so a newer
+      // answer saved by another client is not silently replaced (#685).
+      baseRevision,
       options,
       messageId: regenerateMessageId,
       prompt: input,
@@ -462,8 +484,6 @@ export function ChatPage({
     };
     try {
       if (!requestIdOverride) {
-        pendingAdmissionRef.current = pendingAdmission;
-        setPendingRecovery(pendingAdmission);
         storePendingGenerationAdmission(pendingAdmission);
       }
       const accepted = regenerateMessageId
@@ -473,6 +493,7 @@ export function ChatPage({
             message_id: regenerateMessageId,
             user_input: input,
             attachments: [...suppliedAttachments],
+            base_revision: baseRevision,
             options,
           })
         : await api.generate({
@@ -487,14 +508,18 @@ export function ChatPage({
       const jobThreadId = accepted.thread_id ?? requestThreadId;
       if (!jobThreadId) throw new Error("Cortex did not return a chat thread.");
 
-      setResolvedThreadId(jobThreadId);
+      // The user may have opened another chat while this request was out.
+      // The job is still tracked (the stream host follows it wherever the
+      // user is) and the admission settled, but only the chat it was sent
+      // from may take its snapshot: installing it over another chat left
+      // that one on "Loading conversation..." for good (#672).
+      const stillViewing = viewThreadIdRef.current === requestThreadId;
+      if (stillViewing) setResolvedThreadId(jobThreadId);
       trackGeneration(accepted.job_id, jobThreadId, accepted.user_message_id);
-      if (pendingAdmissionRef.current?.requestId === requestId) {
-        pendingAdmissionRef.current = null;
-        setPendingRecovery(null);
+      if (readPendingGenerationAdmission()?.requestId === requestId) {
         clearPendingGenerationAdmission();
       }
-      if (!regenerateMessageId) {
+      if (!regenerateMessageId && stillViewing) {
         setChat((current) => ({
           id: jobThreadId,
           title: current?.id === jobThreadId ? current.title : "New Chat",
@@ -528,9 +553,18 @@ export function ChatPage({
       // admission did not happen and its key must not leak into a later
       // retry. Network failures and server errors remain ambiguous because
       // the backend may have admitted the job before the response was lost.
-      if (isDefinitiveRejection(requestError) && pendingAdmissionRef.current?.requestId === requestId) {
-        pendingAdmissionRef.current = null;
-        setPendingRecovery(null);
+      //
+      // Two rejections prove nothing about an earlier attempt, though (#691):
+      // a 401 is answered before the handler runs, and a replay is refused
+      // for its own reasons while the original may have been admitted. Either
+      // way the key is the only safe way back, so it stays until the user
+      // abandons it.
+      const replaying = requestIdOverride !== undefined;
+      const authRefusal = requestError instanceof ApiError && requestError.kind === "auth";
+      if (
+        isDefinitiveRejection(requestError) && !replaying && !authRefusal
+        && readPendingGenerationAdmission()?.requestId === requestId
+      ) {
         clearPendingGenerationAdmission();
       }
       const modelChanged = requestError instanceof ApiError && requestError.code === "chat_model_changed";
@@ -580,8 +614,11 @@ export function ChatPage({
       // placeholder key. Migrate them to the real thread id now that one
       // exists, so they keep applying to this conversation instead of
       // reverting after one message and leaking into the next new chat.
-      const draftOptions = useChatStore.getState().generationOptionsByThread[NEW_THREAD_OPTIONS_KEY];
-      if (draftOptions) {
+      // A recovered send can land in a chat that already exists and already
+      // has its own overrides: those are the user's newer choice (#692).
+      const optionsByThread = useChatStore.getState().generationOptionsByThread;
+      const draftOptions = optionsByThread[NEW_THREAD_OPTIONS_KEY];
+      if (draftOptions && !optionsByThread[destinationThreadId]) {
         setThreadOptions(destinationThreadId, draftOptions);
         setThreadOptions(NEW_THREAD_OPTIONS_KEY, null);
       }
@@ -597,44 +634,61 @@ export function ChatPage({
         }
       }
     }
-    const currentDraft = draftsRef.current[submittedScope] ?? readComposerDraft(submittedThreadId);
+    const currentDraft = useComposerStore.getState().drafts[submittedScope] ?? readComposerDraft(submittedThreadId);
     const retainedDraft = currentDraft === submittedDraft ? "" : currentDraft;
     if (submittedScope === destinationDraftScope) {
-      const nextDrafts = { ...draftsRef.current, [submittedScope]: retainedDraft };
-      draftsRef.current = nextDrafts;
-      setDrafts(nextDrafts);
+      const nextDrafts = { ...useComposerStore.getState().drafts, [submittedScope]: retainedDraft };
+      useComposerStore.setState({ drafts: nextDrafts });
       writeComposerDraft(submittedThreadId, retainedDraft);
     } else {
+      // The real thread can already exist (a recovered send whose answer
+      // was lost) and hold its own unsent text. That is never overwritten:
+      // what is left of the submitted draft stays where it was instead (#692).
+      const destinationDraft = useComposerStore.getState().drafts[destinationDraftScope]
+        ?? readComposerDraft(destinationThreadId);
+      const keepDestination = destinationDraft !== "";
+      const sourceDraft = keepDestination ? retainedDraft : "";
       const nextDrafts = {
-        ...draftsRef.current,
-        [submittedScope]: "",
-        [destinationDraftScope]: retainedDraft,
+        ...useComposerStore.getState().drafts,
+        [submittedScope]: sourceDraft,
+        [destinationDraftScope]: keepDestination ? destinationDraft : retainedDraft,
       };
-      draftsRef.current = nextDrafts;
-      setDrafts(nextDrafts);
-      writeComposerDraft(submittedThreadId, "");
-      writeComposerDraft(destinationThreadId, retainedDraft);
+      useComposerStore.setState({ drafts: nextDrafts });
+      writeComposerDraft(submittedThreadId, sourceDraft);
+      if (!keepDestination) writeComposerDraft(destinationThreadId, retainedDraft);
     }
     if (submittedAttachments.length || submittedAttachmentScope !== destinationAttachmentScope) {
       const submittedAttachmentIds = new Set(submittedAttachments.map((attachment) => attachment.attachment_id));
-      const currentAttachments = attachmentDraftsRef.current[submittedAttachmentScope]
+      const currentAttachments = useComposerStore.getState().attachments[submittedAttachmentScope]
         ?? readComposerAttachments(submittedThreadId);
       const retainedAttachments = currentAttachments.filter(
         (attachment) => !submittedAttachmentIds.has(attachment.attachment_id),
       );
+      // Files already staged in the destination stay; the submitted draft's
+      // leftovers join them (#692).
+      const destinationAttachments = submittedAttachmentScope === destinationAttachmentScope
+        ? []
+        : useComposerStore.getState().attachments[destinationAttachmentScope]
+          ?? readComposerAttachments(destinationThreadId);
+      const destinationIds = new Set(destinationAttachments.map((attachment) => attachment.attachment_id));
+      const mergedAttachments = [
+        ...destinationAttachments,
+        ...retainedAttachments.filter((attachment) => !destinationIds.has(attachment.attachment_id)),
+      ];
       const nextAttachments = submittedAttachmentScope === destinationAttachmentScope
-        ? { ...attachmentDraftsRef.current, [submittedAttachmentScope]: retainedAttachments }
+        ? { ...useComposerStore.getState().attachments, [submittedAttachmentScope]: retainedAttachments }
         : {
-            ...attachmentDraftsRef.current,
+            ...useComposerStore.getState().attachments,
             [submittedAttachmentScope]: [],
-            [destinationAttachmentScope]: retainedAttachments,
+            [destinationAttachmentScope]: mergedAttachments,
           };
-      attachmentDraftsRef.current = nextAttachments;
-      setAttachmentDrafts(nextAttachments);
+      useComposerStore.setState({ attachments: nextAttachments });
       if (submittedAttachmentScope !== destinationAttachmentScope) {
         writeComposerAttachments(submittedThreadId, []);
+        writeComposerAttachments(destinationThreadId, mergedAttachments);
+      } else {
+        writeComposerAttachments(destinationThreadId, retainedAttachments);
       }
-      writeComposerAttachments(destinationThreadId, retainedAttachments);
     }
   };
 
@@ -728,7 +782,7 @@ export function ChatPage({
     // as a brand new message -- which used to duplicate the user's turn.
     // The backend's dangling-user-turn regenerate support exists exactly
     // for this case.
-    const pendingAdmission = pendingAdmissionRef.current;
+    const pendingAdmission = readPendingGenerationAdmission();
     if (pendingAdmission) {
       // Prefer exact idempotent admission replay even if the transcript now
       // contains the user's saved turn. Regenerating instead could race the
@@ -746,6 +800,23 @@ export function ChatPage({
     }
     const messages = chat?.messages;
     const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
+    const target = regenerationTargetRef.current;
+    if (target && target.threadId === threadId) {
+      if (lastMessage?.role !== "assistant" || lastMessage.id !== target.messageId) {
+        // The answer is no longer the last one: something changed since, so
+        // retrying could replace the wrong reply. Leave the choice to the user.
+        regenerationTargetRef.current = null;
+        setGenerationError({
+          threadId,
+          message: "This conversation changed since the answer was regenerated. Choose Regenerate on the answer you want to replace.",
+          retryable: false,
+        });
+        return false;
+      }
+      const started = await startGeneration(target.prompt, target.messageId, target.attachments);
+      if (started) settle(started);
+      return Boolean(started);
+    }
     const recoverMessageId = lastMessage?.role === "user" || (
       lastMessage?.role === "assistant" && lastMessage.stats?.stop_reason === "error"
     ) ? lastMessage.id ?? undefined : undefined;
@@ -782,7 +853,10 @@ export function ChatPage({
     } catch (requestError) {
       // A lost response does not mean the fork failed; replay with the same
       // request ID on the next attempt so the backend finds the saved copy.
-      if (isDefinitiveRejection(requestError)) {
+      // A 401 is answered before the handler runs, so it proves nothing
+      // about an earlier attempt with this id either (#691).
+      if (isDefinitiveRejection(requestError)
+        && !(requestError instanceof ApiError && requestError.kind === "auth")) {
         clearForkRequestId(threadId, message.id);
         pendingForkRef.current = null;
       }
@@ -798,9 +872,8 @@ export function ChatPage({
   };
 
   const updateDraft = (nextDraft: string) => {
-    const nextDrafts = { ...draftsRef.current, [draftScope]: nextDraft };
-    draftsRef.current = nextDrafts;
-    setDrafts(nextDrafts);
+    const nextDrafts = { ...useComposerStore.getState().drafts, [draftScope]: nextDraft };
+    useComposerStore.setState({ drafts: nextDrafts });
     writeComposerDraft(threadId, nextDraft);
   };
 
@@ -818,23 +891,22 @@ export function ChatPage({
       // order. Merge into the latest scoped draft instead of the render-time
       // `attachments` snapshot, which may contain files that were submitted
       // and cleared while these new files were still uploading.
-      const currentAttachments = attachmentDraftsRef.current[target.scope]
+      const currentAttachments = useComposerStore.getState().attachments[target.scope]
         ?? readComposerAttachments(target.threadId);
       const currentAttachmentIds = new Set(currentAttachments.map((attachment) => attachment.attachment_id));
       const next = [
         ...currentAttachments,
         ...staged.filter((attachment) => !currentAttachmentIds.has(attachment.attachment_id)),
       ];
-      const nextAttachments = { ...attachmentDraftsRef.current, [target.scope]: next };
-      attachmentDraftsRef.current = nextAttachments;
-      setAttachmentDrafts(nextAttachments);
+      const nextAttachments = { ...useComposerStore.getState().attachments, [target.scope]: next };
+      useComposerStore.setState({ attachments: nextAttachments });
       writeComposerAttachments(target.threadId, next);
       if (Object.keys(previews).length) setAttachmentPreviews((current) => ({ ...current, ...previews }));
     };
     try {
       // Measured when this batch starts, not when it was queued: an earlier
       // batch may have added files, and a message may have been sent since.
-      const current = attachmentDraftsRef.current[target.scope] ?? readComposerAttachments(target.threadId);
+      const current = useComposerStore.getState().attachments[target.scope] ?? readComposerAttachments(target.threadId);
       const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - current.length);
       if (!remaining) throw new Error(`A message can include at most ${MAX_CHAT_ATTACHMENTS} attachments.`);
       let totalBytes = current.reduce((total, attachment) => total + attachment.size, 0);
@@ -918,9 +990,8 @@ export function ChatPage({
 
   const removeAttachment = (attachmentId: string) => {
     const next = attachments.filter((attachment) => attachment.attachment_id !== attachmentId);
-    const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: next };
-    attachmentDraftsRef.current = nextAttachments;
-    setAttachmentDrafts(nextAttachments);
+    const nextAttachments = { ...useComposerStore.getState().attachments, [attachmentScope]: next };
+    useComposerStore.setState({ attachments: nextAttachments });
     writeComposerAttachments(threadId, next);
     setAttachmentError(null);
   };
@@ -973,8 +1044,6 @@ export function ChatPage({
   // can no longer load. Abandoning here drops only the local replay key: it
   // does not imply the backend worker has been cancelled.
   const abandonPendingRecovery = () => {
-    pendingAdmissionRef.current = null;
-    setPendingRecovery(null);
     clearPendingGenerationAdmission();
     setGenerationError(null);
     setAbandonPendingOpen(false);
@@ -1076,9 +1145,7 @@ export function ChatPage({
               setAbandonPendingOpen(true);
               return;
             }
-            if (pendingAdmissionRef.current?.threadId === threadId) {
-              pendingAdmissionRef.current = null;
-              setPendingRecovery(null);
+            if (readPendingGenerationAdmission()?.threadId === threadId) {
               clearPendingGenerationAdmission();
             }
             setGenerationError(null);
@@ -1203,10 +1270,6 @@ function clearForkRequestId(threadId: string, messageId: string): void {
   } catch {
     // The in-memory ref was cleared already.
   }
-}
-
-function createRequestId(): string {
-  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
 async function fileToBase64(file: File): Promise<string> {

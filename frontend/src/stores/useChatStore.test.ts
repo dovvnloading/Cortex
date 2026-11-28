@@ -304,4 +304,23 @@ describe("useChatStore", () => {
       expect(useChatStore.getState().proposedMemoriesByMessage).toEqual({});
     });
   });
+
+  it("keeps Stopping when buffered output arrives after Stop (#673)", () => {
+    const store = useChatStore.getState();
+    store.beginGeneration("job-stop", "thread-stop");
+    useChatStore.getState().appendContentToken("job-stop", "Hel");
+    useChatStore.getState().markStopping("job-stop");
+
+    useChatStore.getState().appendContentToken("job-stop", "lo");
+    useChatStore.getState().appendThinkingToken("job-stop", "thinking");
+    useChatStore.getState().replaceContent("job-stop", "Hello, world");
+
+    const generation = useChatStore.getState().generation;
+    expect(generation.phase).toBe("stopping");
+    expect(generation.partialContent).toBe("Hello, world");
+    expect(generation.partialThoughts).toBe("thinking");
+    // The server refusing the cancel is the only way back to streaming.
+    useChatStore.getState().revertStopping("job-stop");
+    expect(useChatStore.getState().generation.phase).toBe("streaming");
+  });
 });

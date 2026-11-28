@@ -8,6 +8,11 @@ export const NEW_THREAD_OPTIONS_KEY = "new";
 
 export type GenerationPhase = "idle" | "starting" | "streaming" | "stopping";
 
+/** The phase once output arrives: streaming, unless Stop is already in force. */
+function streamingPhase(phase: GenerationPhase): GenerationPhase {
+  return phase === "stopping" ? "stopping" : "streaming";
+}
+
 export interface GenerationState {
   jobId: string | null;
   threadId: string | null;
@@ -93,9 +98,24 @@ interface ChatStoreState {
    * stored message, so like the note above it lasts for this session.
    */
   proposedMemoriesByMessage: Record<string, readonly string[]>;
+  // Which generation a message's suggestions came from, and the ones the user
+  // already saved or dismissed from it: the same job repeats its list in its
+  // final result, which must not bring them back (#694).
+  proposalJobsByMessage: Record<string, { jobId: string; handled: readonly string[] }>;
+  // How many sidebar changes (rename, move, delete) each chat has had. A
+  // transcript fetched before the latest one is older than the sidebar and
+  // must not put back its title, group or the row itself (#698).
+  chatChangeCounts: Record<string, number>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
-  upsertChatSummary: (chat: ChatResponse) => void;
+  /**
+   * Put a chat's summary from a fetched transcript into the list. With
+   * ``sinceChange`` (from ``chatChangeCount`` before the fetch), nothing is
+   * written if the sidebar changed that chat meanwhile (#698).
+   */
+  upsertChatSummary: (chat: ChatResponse, sinceChange?: number) => void;
+  /** Record a confirmed or optimistic sidebar change to a chat: rename, move, delete. */
+  noteChatChanged: (threadId: string) => void;
 
   setGroups: (next: ChatGroup[] | ((current: ChatGroup[]) => ChatGroup[])) => void;
   /** Replace one group in place, keeping its position in the list. */
@@ -124,8 +144,10 @@ interface ChatStoreState {
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
   markUntranslated: (messageId: string) => void;
+  clearUntranslated: (messageId: string) => void;
   /** Replace a message's pending suggestions; an empty list forgets them (a regenerated answer has new ones). */
-  setProposedMemories: (messageId: string, memos: readonly string[]) => void;
+  /** ``jobId`` names the generation the list came from (#694). */
+  setProposedMemories: (messageId: string, memos: readonly string[], jobId?: string) => void;
   /** Drop one suggestion, whether it was saved or declined. */
   dismissProposedMemory: (messageId: string, memo: string) => void;
 }
@@ -162,11 +184,17 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   generationOptionsByThread: readPersistedGenerationOptions(),
   untranslatedMessageIds: {},
   proposedMemoriesByMessage: {},
+  proposalJobsByMessage: {},
+  chatChangeCounts: {},
 
   setChats: (next) =>
     set((state) => ({ chats: typeof next === "function" ? (next as (current: ChatSummary[]) => ChatSummary[])(state.chats) : next })),
-  upsertChatSummary: (chat) =>
+  noteChatChanged: (threadId) =>
     set((state) => ({
+      chatChangeCounts: { ...state.chatChangeCounts, [threadId]: (state.chatChangeCounts[threadId] ?? 0) + 1 },
+    })),
+  upsertChatSummary: (chat, sinceChange) =>
+    set((state) => (sinceChange !== undefined && (state.chatChangeCounts[chat.id] ?? 0) !== sinceChange ? state : {
       chats: [
         // Preserve the filing: a chat that gains a message must not jump out
         // of its group just because the summary was rebuilt from the
@@ -198,26 +226,30 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   setChatGroup: (threadId, groupId) =>
     set((state) => ({
       chats: state.chats.map((chat) => (chat.id === threadId ? { ...chat, group_id: groupId } : chat)),
+      chatChangeCounts: { ...state.chatChangeCounts, [threadId]: (state.chatChangeCounts[threadId] ?? 0) + 1 },
     })),
 
+  // Output that arrives after Stop is kept, but it never moves the phase back
+  // from stopping: only revertStopping (the server refused the cancel) or the
+  // job's end does (#673).
   beginGeneration: (jobId, threadId) =>
     set({ generation: { ...idleGeneration, jobId, threadId, phase: "starting" }, generationCursor: 0 }),
   appendContentToken: (jobId, delta) =>
     set((state) =>
       state.generation.jobId === jobId
-        ? { generation: { ...state.generation, phase: "streaming", partialContent: state.generation.partialContent + delta } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialContent: state.generation.partialContent + delta } }
         : state,
     ),
   appendThinkingToken: (jobId, delta) =>
     set((state) =>
       state.generation.jobId === jobId
-        ? { generation: { ...state.generation, phase: "streaming", partialThoughts: state.generation.partialThoughts + delta } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialThoughts: state.generation.partialThoughts + delta } }
         : state,
     ),
   replaceContent: (jobId, content) =>
     set((state) =>
       state.generation.jobId === jobId && content !== state.generation.partialContent
-        ? { generation: { ...state.generation, phase: "streaming", partialContent: content } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialContent: content } }
         : state,
     ),
   // The two reducers below run on *every* SSE frame, and both used to build a
@@ -289,17 +321,38 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? state
         : { untranslatedMessageIds: { ...state.untranslatedMessageIds, [messageId]: true } }
     )),
-  setProposedMemories: (messageId, memos) =>
+  clearUntranslated: (messageId) =>
     set((state) => {
+      if (!state.untranslatedMessageIds[messageId]) return state;
+      const next = { ...state.untranslatedMessageIds };
+      delete next[messageId];
+      return { untranslatedMessageIds: next };
+    }),
+  setProposedMemories: (messageId, memos, jobId) =>
+    set((state) => {
+      const source = state.proposalJobsByMessage[messageId];
+      const sameJob = jobId !== undefined && source?.jobId === jobId;
+      const handled = sameJob ? source.handled : [];
+      const visible = memos.filter((memo) => !handled.includes(memo));
+      // A new generation for this message starts with nothing handled.
+      const jobs = jobId === undefined || sameJob
+        ? null
+        : { ...state.proposalJobsByMessage, [messageId]: { jobId, handled: [] } };
       const current = state.proposedMemoriesByMessage[messageId];
-      if (memos.length === 0) {
-        if (!current) return state;
-        const next = { ...state.proposedMemoriesByMessage };
-        delete next[messageId];
-        return { proposedMemoriesByMessage: next };
+      let proposals: Record<string, readonly string[]> | null = null;
+      if (visible.length === 0) {
+        if (current) {
+          proposals = { ...state.proposedMemoriesByMessage };
+          delete proposals[messageId];
+        }
+      } else if (!current || current.length !== visible.length || current.some((memo, index) => memo !== visible[index])) {
+        proposals = { ...state.proposedMemoriesByMessage, [messageId]: visible };
       }
-      if (current && current.length === memos.length && current.every((memo, index) => memo === memos[index])) return state;
-      return { proposedMemoriesByMessage: { ...state.proposedMemoriesByMessage, [messageId]: [...memos] } };
+      if (!jobs && !proposals) return state;
+      return {
+        ...(proposals ? { proposedMemoriesByMessage: proposals } : {}),
+        ...(jobs ? { proposalJobsByMessage: jobs } : {}),
+      };
     }),
   dismissProposedMemory: (messageId, memo) =>
     set((state) => {
@@ -309,6 +362,15 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       const next = { ...state.proposedMemoriesByMessage };
       if (remaining.length > 0) next[messageId] = remaining;
       else delete next[messageId];
-      return { proposedMemoriesByMessage: next };
+      const source = state.proposalJobsByMessage[messageId];
+      return {
+        proposedMemoriesByMessage: next,
+        ...(source ? {
+          proposalJobsByMessage: {
+            ...state.proposalJobsByMessage,
+            [messageId]: { jobId: source.jobId, handled: [...source.handled, memo] },
+          },
+        } : {}),
+      };
     }),
 }));

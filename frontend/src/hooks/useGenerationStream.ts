@@ -150,13 +150,23 @@ function hasSavedStoppedAnswer(value: unknown): boolean {
   return typeof id === "string" && id.length > 0;
 }
 
-/** A job result whose translation failed carries the untranslated answer and a translation_error. */
-function noteTranslationFailure(value: unknown): void {
+/**
+ * Record whether a finished answer is translated.
+ *
+ * A job result whose translation failed carries the untranslated answer and a
+ * translation_error. A regenerated answer keeps its message id, so a result
+ * without one must also clear an earlier failure for that id: the warning
+ * stayed on a successfully translated replacement (#674).
+ */
+function noteTranslationResult(value: unknown): void {
   if (!value || typeof value !== "object") return;
   const result = value as { translation_error?: unknown; assistant_message_id?: unknown };
-  if (typeof result.translation_error !== "string" || !result.translation_error) return;
   if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
-  useChatStore.getState().markUntranslated(result.assistant_message_id);
+  if (typeof result.translation_error === "string" && result.translation_error) {
+    useChatStore.getState().markUntranslated(result.assistant_message_id);
+  } else {
+    useChatStore.getState().clearUntranslated(result.assistant_message_id);
+  }
 }
 
 // Mirrors the backend's bounds (api/routes.py). The list is data from a model,
@@ -174,7 +184,7 @@ const MAX_PROPOSED_MEMORY_LENGTH = 500;
  * answer in the same slot had suggested, which is what a regenerated answer
  * with no suggestions needs.
  */
-function noteProposedMemories(value: unknown): void {
+function noteProposedMemories(value: unknown, jobId: string): void {
   if (!value || typeof value !== "object") return;
   const result = value as { assistant_message_id?: unknown; proposed_memories?: unknown };
   if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
@@ -185,7 +195,9 @@ function noteProposedMemories(value: unknown): void {
     const memo = candidate.trim();
     if (memo && memo.length <= MAX_PROPOSED_MEMORY_LENGTH) memos.add(memo);
   }
-  useChatStore.getState().setProposedMemories(result.assistant_message_id, [...memos].slice(0, MAX_PROPOSED_MEMORIES));
+  useChatStore.getState().setProposedMemories(
+    result.assistant_message_id, [...memos].slice(0, MAX_PROPOSED_MEMORIES), jobId,
+  );
 }
 
 /**
@@ -282,6 +294,20 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
       // callback.
       let completion: Promise<void> | null = null;
       useChatStore.getState().setStatusText(job.jobId, "Connecting to generation...");
+      // The assistant asked to run something locally and the harness refused.
+      // The rejected block is stripped from the answer, so without this the
+      // task would simply never happen and the user would be left guessing
+      // why. The same payload rides the status event, the job result and the
+      // status fallback, so it is announced once per job.
+      const noteRejection = (value: unknown): void => {
+        if (rejectionNotified || !value || typeof value !== "object") return;
+        const rejection = (value as { code_execution_rejection?: unknown }).code_execution_rejection;
+        if (!rejection || typeof rejection !== "object") return;
+        const message = (rejection as { message?: unknown }).message;
+        if (typeof message !== "string" || !message) return;
+        rejectionNotified = true;
+        useUiStore.getState().notify(message, "info");
+      };
       const contentFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendContentToken(job.jobId, buffered));
       const thoughtsFlusher = createRafBatchedFlusher((buffered) => useChatStore.getState().appendThinkingToken(job.jobId, buffered));
 
@@ -366,22 +392,13 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 // without this the task would simply never happen and the user
                 // would be left guessing why. The same payload rides both the
                 // status event and the job result, so it is announced once.
-                const rejection = data.code_execution_rejection;
-                if (
-                  !rejectionNotified
-                  && rejection
-                  && typeof rejection === "object"
-                  && typeof (rejection as { message?: unknown }).message === "string"
-                ) {
-                  rejectionNotified = true;
-                  useUiStore.getState().notify((rejection as { message: string }).message, "info");
-                }
+                noteRejection(data);
                 if (event.event === "generation.memory_proposed" || event.event === "generation.completed") {
-                  noteProposedMemories(data);
+                  noteProposedMemories(data, job.jobId);
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
-                  noteTranslationFailure(data);
+                  noteTranslationResult(data);
                   const clearRequested = hasClearRequest(data);
                   completion = clearRequested
                     ? onCompleted(job.threadId, true, job.jobId)
@@ -408,6 +425,9 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
               reconnectAttempt += 1;
             }
           } catch (streamError) {
+            // The job already ended on this connection; a transport error
+            // after that changes nothing and needs no status check (#693).
+            if (terminal) break;
             // Only this consumer's own signal means "stop". An abort from
             // anywhere else is a dropped connection like any other: returning
             // here would leave the job tracked with nothing reading it, and the
@@ -430,8 +450,10 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   // duplicate-send Retry from the status fallback.
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 } else {
-                  noteTranslationFailure(snapshot.result);
-                  noteProposedMemories(snapshot.result);
+                  noteTranslationResult(snapshot.result);
+                  noteProposedMemories(snapshot.result, job.jobId);
+                  // A refusal the lost stream never delivered (#699).
+                  noteRejection(snapshot.result);
                 }
                 const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
                 completion = clearRequested

@@ -411,6 +411,98 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("button", { name: "Retry response" })).toBeDisabled();
   });
 
+  it("regenerates against the revision it shows, also when replaying a lost admission (#685)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 7,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "An answer" },
+      ],
+    };
+    const regenerate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(0, "The connection was lost.", "network"))
+      .mockResolvedValue({ job_id: "job-regen", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate });
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(1));
+    const first = regenerate.mock.calls[0][1];
+    expect(first).toMatchObject({ message_id: "assistant-1", base_revision: 7 });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(2));
+    // The replay is the same request: same id, same revision.
+    expect(regenerate.mock.calls[1][1]).toMatchObject({
+      request_id: first.request_id, message_id: "assistant-1", base_revision: 7,
+    });
+  });
+
+  it("retries a failed regeneration as a regeneration of the same answer (#671)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 4,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "The kept answer" },
+      ],
+    };
+    const regenerate = vi.fn()
+      .mockResolvedValueOnce({ job_id: "job-regen-1", kind: "generation", status: "queued", thread_id: "thread-a" })
+      .mockResolvedValueOnce({ job_id: "job-regen-2", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-regen-1") return new Promise<void>(() => undefined);
+      // The replacement failed before it was saved; the old answer stays.
+      onEvent({
+        event_id: 1, event: "generation.failed", job_id: jobId, thread_id: "thread-a",
+        data: { message: "The model stopped responding." },
+      });
+    });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate, streamGeneration } as Partial<CortexApi>);
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(2));
+    expect(regenerate.mock.calls[1][1]).toMatchObject({ message_id: "assistant-1", user_input: "Explain it" });
+    expect(regenerate.mock.calls[1][1].request_id).not.toBe(regenerate.mock.calls[0][1].request_id);
+    expect(api.generate).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed new message as that message after an earlier regeneration (#671)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 4,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "An answer" },
+      ],
+    };
+    const regenerate = vi.fn().mockResolvedValue({ job_id: "job-regen", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "The chat is busy."))
+      .mockResolvedValue({ job_id: "job-new", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-2" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-regen") return new Promise<void>(() => undefined);
+      onEvent({ event_id: 1, event: "generation.completed", job_id: jobId, thread_id: "thread-a", data: {} });
+    });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate, generate, streamGeneration } as Partial<CortexApi>);
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+    const input = await screen.findByLabelText("Message Cortex");
+    await userEvent.type(input, "A new question{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ user_input: "A new question" });
+    expect(regenerate).toHaveBeenCalledTimes(1);
+  });
+
   it("does not offer recovery on answered or earlier user turns", async () => {
     const api = chatApi({
       chat: vi.fn(async (): Promise<ChatResponse> => ({
@@ -1042,6 +1134,120 @@ describe("ChatPage composer integration", () => {
       base_revision: 3,
       options: { temperature: 0.2 },
     }));
+  });
+
+  it("keeps the replay key when a replay is refused with 401 (#691)", async () => {
+    const user = userEvent.setup();
+    storePendingGenerationAdmission({
+      requestId: "lost-acceptance",
+      operation: "generate",
+      threadId: "thread-a",
+      baseRevision: 2,
+      prompt: "The first message",
+      attachments: [],
+      createdAt: Date.now(),
+    });
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(401, "Your session expired."))
+      .mockResolvedValue({ job_id: "job-original", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-1" });
+    const api = chatApi({ chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 2 })), generate });
+    renderChat(api);
+
+    await user.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry last message" })).toBeEnabled());
+    expect(readPendingGenerationAdmission()?.requestId).toBe("lost-acceptance");
+
+    // Once the session is back, the retry still replays the original id.
+    await user.click(screen.getByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ request_id: "lost-acceptance" });
+  });
+
+  it("a send accepted after a remount never erases the newer draft (#697)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { accept = resolve; }));
+    const api = chatApi({ chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 1 })), generate } as Partial<CortexApi>);
+    const first = renderChat(api);
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "Message A{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    // Settings and back while the send is still waiting for its answer.
+    first.unmount();
+    renderChat(api);
+    const remounted = await screen.findByLabelText("Message Cortex");
+    expect(remounted).toHaveValue("Message A");
+    await userEvent.clear(remounted);
+    await userEvent.type(remounted, "Draft B");
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-a" });
+    });
+
+    await waitFor(() => expect(readPendingGenerationAdmission()).toBeNull());
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("Draft B");
+    expect(window.localStorage.getItem("cortex.composer.draft.thread-a")).toBe("Draft B");
+  });
+
+  it("a remounted page sees the admission settled by the page it replaced (#686)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { accept = resolve; }))
+      .mockResolvedValue({ job_id: "job-b", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-b" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-a") return new Promise<void>(() => undefined);
+      onEvent({ event_id: 1, event: "generation.completed", job_id: jobId, thread_id: "thread-a", data: {} });
+    });
+    const api = chatApi({
+      chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 1 })), generate, streamGeneration,
+    } as Partial<CortexApi>);
+    const first = renderChat(api);
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "First message{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    renderChat(api);
+    // The remount restored the unresolved admission.
+    expect(await screen.findByText(/A previous message may have started before its response was lost/)).toBeInTheDocument();
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-a" });
+    });
+    await waitFor(() => expect(readPendingGenerationAdmission()).toBeNull());
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    // And the next message goes out as a new request.
+    const input = screen.getByLabelText("Message Cortex");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Second message{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ user_input: "Second message" });
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+  });
+
+  it("leaves another chat readable when a send from the previous one is accepted late (#672)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { accept = resolve; }));
+    const chat = vi.fn(async (id: string): Promise<ChatResponse> => (id === "thread-b"
+      ? { ...emptyChat("thread-b"), revision: 3, messages: [{ id: "b-1", role: "user", content: "Chat B question" }] }
+      : { ...emptyChat("thread-a"), revision: 1 }));
+    const api = chatApi({ chat, generate } as Partial<CortexApi>);
+    const view = renderChat(api, "thread-a");
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "Sent from A{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    view.rerender(chatElement(api, "thread-b"));
+    expect(await screen.findByText("Chat B question")).toBeInTheDocument();
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "a-1" });
+    });
+
+    // B is still shown and usable; A's job is tracked in the background.
+    expect(screen.getByText("Chat B question")).toBeInTheDocument();
+    expect(screen.queryByText("Loading conversation...")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sent from A")).not.toBeInTheDocument();
+    expect(useChatStore.getState().generation.jobId).toBe("job-a");
   });
 
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
@@ -2028,6 +2234,35 @@ describe("ChatPage attachments from paste and drop", () => {
 
     expect(await screen.findByRole("button", { name: "Remove first.md" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Remove second.md" })).toBeInTheDocument();
+  });
+
+  it("an upload that finishes after a remount joins the current attachments (#687)", async () => {
+    let releaseSecond!: (attachment: ChatAttachment) => void;
+    const stageChatAttachment = vi.fn()
+      .mockResolvedValueOnce(stagedAs("x.md"))
+      .mockImplementationOnce(() => new Promise<ChatAttachment>((done) => { releaseSecond = done; }))
+      .mockResolvedValueOnce(stagedAs("z.md"));
+    const api = chatApi({ stageChatAttachment });
+    const first = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+    fireEvent.drop(composerSurface(first.container), { dataTransfer: fileDrag([new File(["x"], "x.md", { type: "text/markdown" })]) });
+    expect(await screen.findByRole("button", { name: "Remove x.md" })).toBeInTheDocument();
+    fireEvent.drop(composerSurface(first.container), { dataTransfer: fileDrag([new File(["y"], "y.md", { type: "text/markdown" })]) });
+    await waitFor(() => expect(stageChatAttachment).toHaveBeenCalledTimes(2));
+
+    // Settings and back, while y.md is still uploading.
+    first.unmount();
+    const second = renderChat(api);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove x.md" }));
+    fireEvent.drop(composerSurface(second.container), { dataTransfer: fileDrag([new File(["z"], "z.md", { type: "text/markdown" })]) });
+    expect(await screen.findByRole("button", { name: "Remove z.md" })).toBeInTheDocument();
+
+    await act(async () => { releaseSecond(stagedAs("y.md")); });
+
+    expect(await screen.findByRole("button", { name: "Remove y.md" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove x.md" })).not.toBeInTheDocument();
+    const persisted = JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-a") ?? "[]") as ChatAttachment[];
+    expect(persisted.map((attachment) => attachment.filename).sort()).toEqual(["y.md", "z.md"]);
   });
 
   it("keeps working after a queued batch fails", async () => {

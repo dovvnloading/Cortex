@@ -1,5 +1,6 @@
 import { afterEach } from "vitest";
 import { useChatStore } from "../stores/useChatStore";
+import { useComposerStore } from "../stores/useComposerStore";
 import { useModelStore } from "../stores/useModelStore";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import { useUiStore } from "../stores/useUiStore";
@@ -43,6 +44,7 @@ const initialChatState = useChatStore.getState();
 const initialModelState = useModelStore.getState();
 const initialSettingsState = useSettingsStore.getState();
 const initialUiState = useUiStore.getState();
+const initialComposerState = useComposerStore.getState();
 
 afterEach(() => {
   cleanup?.();
@@ -61,4 +63,5 @@ afterEach(() => {
   useModelStore.setState(initialModelState, true);
   useSettingsStore.setState(initialSettingsState, true);
   useUiStore.setState(initialUiState, true);
+  useComposerStore.setState(initialComposerState, true);
 });
