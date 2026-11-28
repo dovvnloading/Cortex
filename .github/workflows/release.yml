@@ -35,10 +35,12 @@ jobs:
       version: ${{ steps.declared.outputs.version }}
       sha: ${{ steps.proven.outputs.sha }}
     steps:
+      # Always a tag ref: an unqualified name would also match a branch of
+      # the same name, and the build would then come from that branch.
       - name: Check out the tag being released
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -77,12 +79,19 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           $ErrorActionPreference = "Stop"
           $repo = $env:GITHUB_REPOSITORY
           $sha = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') {
             throw "Cannot resolve the exact release commit."
+          }
+          # The commit being verified must be the one the tag names, peeled
+          # through an annotated tag, not merely something checked out.
+          $tagCommit = git rev-parse --verify --quiet "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or "$tagCommit".Trim() -ne $sha) {
+            throw "Tag '$($env:RELEASE_TAG)' does not exist or does not point at the checked-out commit $sha."
           }
           git fetch --no-tags origin main
           if ($LASTEXITCODE -ne 0) { throw "Could not fetch protected main branch." }
@@ -221,14 +230,31 @@ jobs:
           "$hash  $name" | Set-Content -Encoding ascii -NoNewline SHA256SUMS.txt
           "ARCHIVE=$name" >> $env:GITHUB_ENV
 
+      # The tag is re-read right before the release is created: if it was
+      # moved or deleted after verification, the draft would attach this
+      # package to a different commit. --verify-tag stops gh from creating a
+      # missing tag at the default branch tip.
       - name: Create a draft release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          VERIFIED_SHA: ${{ needs.verify-version.outputs.sha }}
         run: |
+          $ErrorActionPreference = "Stop"
           $tag = $env:RELEASE_TAG
+          $repo = $env:GITHUB_REPOSITORY
+          $object = (gh api "repos/$repo/git/ref/tags/$tag" | ConvertFrom-Json).object
+          if ($LASTEXITCODE -ne 0 -or $null -eq $object) { throw "Tag $tag no longer exists." }
+          for ($depth = 0; $object.type -eq "tag" -and $depth -lt 5; $depth++) {
+            $object = (gh api "repos/$repo/git/tags/$($object.sha)" | ConvertFrom-Json).object
+            if ($LASTEXITCODE -ne 0 -or $null -eq $object) { throw "Cannot read annotated tag $tag." }
+          }
+          if ($object.type -ne "commit" -or $object.sha -ne $env:VERIFIED_SHA) {
+            throw "Tag $tag no longer points at the verified commit $($env:VERIFIED_SHA)."
+          }
           gh release create $tag $env:ARCHIVE SHA256SUMS.txt `
+            --verify-tag `
             --draft `
             --title "Cortex $tag" `
             --notes "Unsigned build produced by the release workflow. Sign it with packaging/sign_release.ps1, which replaces the archive and SHA256SUMS.txt, then review and publish."

@@ -13,6 +13,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools" / "screenshots"))
 
@@ -56,6 +58,26 @@ def test_the_scripted_edit_matches_the_sample_project_exactly_once() -> None:
     source = tour_server.PROJECT_FILES[edits[0]["path"]]
     # edit_file refuses an edit whose text is missing or ambiguous.
     assert source.count(edits[0]["old"]) == 1
+
+
+def test_the_sample_project_never_replaces_an_existing_folder(tmp_path: Path) -> None:
+    existing = tmp_path / "csv-importer"
+    existing.mkdir()
+    sentinel = existing / "important.txt"
+    sentinel.write_text("a real project", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        tour_server.write_sample_project(tmp_path)
+
+    assert sentinel.read_text(encoding="utf-8") == "a real project"
+    assert sorted(path.name for path in existing.iterdir()) == ["important.txt"]
+
+
+def test_the_sample_project_is_written_under_a_new_parent(tmp_path: Path) -> None:
+    project = tour_server.write_sample_project(tmp_path / "new" / "parent")
+
+    assert project == tmp_path / "new" / "parent" / "csv-importer"
+    assert {path.name for path in project.iterdir()} == set(tour_server.PROJECT_FILES)
 
 
 def test_the_tour_run_changes_only_the_work_copy_until_it_is_accepted(tmp_path: Path) -> None:
