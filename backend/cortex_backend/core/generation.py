@@ -169,6 +169,15 @@ def prompt_too_long_message(context_tokens: int) -> str:
     )
 
 
+def attachments_too_large_message(context_tokens: int) -> str:
+    """The refusal shown when the attached documents cannot fit even without their text."""
+    return (
+        f"The attached files do not fit the model's context window of {context_tokens} tokens, "
+        "even with their text left out. Attach fewer files, shorten the message, or raise "
+        "the context size in Settings."
+    )
+
+
 @dataclass(frozen=True)
 class TranslationResult:
     """Outcome of the optional translation model call."""
@@ -207,6 +216,16 @@ class ModelOperationError(RuntimeError):
         self.user_message = user_message
         self.operation = operation
         self.error_details = error_details or (type(cause).__name__ if cause else None)
+
+
+class AttachmentsDoNotFit(ModelOperationError):
+    """The documents cannot be listed in the room the rest of the prompt leaves.
+
+    Every attached document costs its name, type and frame even when none of
+    its text fits. When even that is more than the window has left, the prompt
+    is known to overflow, and it is refused rather than sent to a runtime that
+    would truncate it silently.
+    """
 
 
 @dataclass(frozen=True)
