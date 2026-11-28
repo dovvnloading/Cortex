@@ -61,6 +61,7 @@ from .local_scratch_attempt import (
 from .models import ExecutionJob, TerminalExecutionStatus
 from .recipe_coordinator import (
     RECIPE_IMAGE_PROFILE,
+    ExecutionShutdownIncomplete,
     RecipeExecutionCoordinator,
     RecipeExecutionError,
     RecipeImageRequest,
@@ -139,6 +140,9 @@ class LocalExecutionCoordinator:
         self._supervisor_lease_active = False
         self._supervisor_stop_event = Event()
         self._supervisor_thread: Thread | None = None
+        # Set by a shutdown that timed out with work still running; only a
+        # later shutdown that completes clears it.
+        self._stopping = False
         self._scratch_lock = Lock()
         self._scratch_threads: dict[str, Thread] = {}
         self._scratch_cancel_events: dict[str, Event] = {}
@@ -412,6 +416,8 @@ class LocalExecutionCoordinator:
         return self.repository.request_cancel(job_id)
 
     def startup_recover(self) -> list[str]:
+        if self._stopping:
+            raise RuntimeError("Execution supervisor is still stopping.")
         if self._supervisor_lease_active:
             return []
         existing_thread = self._supervisor_thread
@@ -562,26 +568,36 @@ class LocalExecutionCoordinator:
             code_attempt.cancel()
         for thread in code_threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        self._recipe.shutdown(timeout=max(0.0, deadline - time.monotonic()))
+        recipe_stopped = True
+        try:
+            self._recipe.shutdown(timeout=max(0.0, deadline - time.monotonic()))
+        except ExecutionShutdownIncomplete:
+            recipe_stopped = False
         if supervisor_thread is not None:
             supervisor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
         supervisor_stopped = supervisor_thread is None or not supervisor_thread.is_alive()
         self._supervisor_thread = None if supervisor_stopped else supervisor_thread
+        workers_stopped = recipe_stopped and not any(
+            thread.is_alive() for thread in (*threads, *code_threads)
+        )
+        if not (workers_stopped and supervisor_stopped):
+            # A worker still unwinding can still write to the store, and a
+            # renewal still inside SQLite can recreate a released lease. Keep
+            # the supervisor lease (it expires on its own if nothing renews it)
+            # and report the stop as incomplete, so the lifecycle keeps this
+            # coordinator and refuses to build another over the same store.
+            # Calling shutdown again retries.
+            _LOGGER.warning(
+                "Cortex execution runtime did not stop before the shutdown timeout."
+            )
+            self._stopping = True
+            raise ExecutionShutdownIncomplete("execution workers are still stopping")
         if self._supervisor_lease_active:
-            if supervisor_stopped:
-                self.repository.release_supervisor_lease(
-                    lease_owner=self._supervisor_owner
-                )
-            else:
-                # Releasing while a renewal is still inside SQLite can race:
-                # the late renewal may recreate a supposedly released lease.
-                # Leave the record to expire instead of opening split-brain
-                # recovery; the stop event makes the thread exit afterward.
-                _LOGGER.warning(
-                    "Cortex execution supervisor did not stop before shutdown timeout; "
-                    "its lease will expire naturally."
-                )
+            self.repository.release_supervisor_lease(
+                lease_owner=self._supervisor_owner
+            )
             self._supervisor_lease_active = False
+        self._stopping = False
 
     def _start_supervisor_heartbeat(self) -> None:
         thread = self._supervisor_thread
@@ -1020,7 +1036,10 @@ class LocalExecutionCoordinator:
         except ScratchComputeError as exc:
             self._finish_scratch_failure(job_id, cancel_event, exc.code)
         except LeaseConflict:
-            self._fail_scratch_recovery(job_id, "lease_unavailable")
+            # Another live coordinator owns this job (the same rule as
+            # _run_code). This attempt never held it, so it must not write a
+            # failure over that coordinator's eventual result.
+            return
         except ExecutionTransitionConflict:
             # Cancellation committed while this attempt was starting; the store
             # refused the "running" write. See _run_code for the reasoning.
