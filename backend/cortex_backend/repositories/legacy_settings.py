@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from configparser import ConfigParser
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping
@@ -49,6 +50,47 @@ _LEGACY_BOOLEAN_KEYS = {
 }
 
 
+# The Windows error codes the registry read tells apart.
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_NO_MORE_ITEMS = 259
+
+
+def _read_registry_values(winreg: Any, registry_path: str) -> dict[str, Any]:
+    """Every value under the legacy key, or ``{}`` when there is no such key.
+
+    Only ``ERROR_NO_MORE_ITEMS`` ends the enumeration. Every ``OSError`` used
+    to: an access-denied or I/O error halfway through returned the values
+    read so far as if they were all of them, the missing ones became
+    defaults, and that partial snapshot was then committed as the one-time
+    migration, so the rest were never imported. Any other error now fails
+    the read, which commits nothing and lets the next launch try again.
+    A missing key is still a first run with nothing to import, but only
+    when opening the key says so.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path)
+    except OSError as exc:
+        if _ERROR_FILE_NOT_FOUND in (getattr(exc, "winerror", None), getattr(exc, "errno", None)):
+            return {}
+        raise SettingsRepositoryError("Legacy Windows settings could not be read.") from exc
+    values: dict[str, Any] = {}
+    try:
+        with key:
+            index = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, index)
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) == _ERROR_NO_MORE_ITEMS:
+                        break
+                    raise
+                values[name] = value
+                index += 1
+    except OSError as exc:
+        raise SettingsRepositoryError("Legacy Windows settings could not be read.") from exc
+    return values
+
+
 class LegacySettingsReader(SettingsRepository):
     """Read legacy settings without importing a UI framework."""
 
@@ -69,32 +111,15 @@ class LegacySettingsReader(SettingsRepository):
             section = parser["General"] if parser.has_section("General") else {}
             return dict(section), "legacy_ini"
 
-        if __import__("os").name != "nt":
+        if os.name != "nt":
             return {}, "legacy_registry_unavailable"
 
-        try:
-            import winreg
+        import winreg
 
-            registry_path = rf"Software\{ORGANIZATION_NAME}\{APPLICATION_NAME}"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path) as key:
-                values: dict[str, Any] = {}
-                index = 0
-                while True:
-                    try:
-                        name, value, _ = winreg.EnumValue(key, index)
-                    except OSError:
-                        break
-                    values[name] = value
-                    index += 1
-            return values, "legacy_registry"
-        except OSError as exc:
-            # A first-run profile has no legacy key. Defaults are still a valid
-            # settings snapshot and SQLite will record that no import was needed.
-            if getattr(exc, "winerror", None) == 2 or getattr(exc, "errno", None) == 2:
-                return {}, "legacy_registry"
-            raise SettingsRepositoryError(
-                "Legacy Windows settings could not be read."
-            ) from exc
+        # A first-run profile has no legacy key. Defaults are still a valid
+        # settings snapshot and SQLite will record that no import was needed.
+        registry_path = rf"Software\{ORGANIZATION_NAME}\{APPLICATION_NAME}"
+        return _read_registry_values(winreg, registry_path), "legacy_registry"
 
     @staticmethod
     def _normalize_value(field: _LegacyField, raw_value: Any) -> Any:

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import getpass
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -41,8 +42,47 @@ def _running_on_windows() -> bool:
     return sys.platform == "win32"
 
 
+# ``\\?\C:`` -- the drive of an extended-length local path.
+_EXTENDED_LOCAL_DRIVE = re.compile(r"\\\\\?\\[A-Za-z]:")
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
+)
+_MAX_PLAIN_PATH = 260
+
+
 def _is_unc_path(value: str | os.PathLike[str]) -> bool:
-    return PureWindowsPath(str(value)).anchor.startswith("\\\\")
+    """Whether ``value`` is anything but a path on a local drive.
+
+    A UNC share (``\\\\server\\share``, or ``\\\\?\\UNC\\server\\share`` in
+    extended-length form), a device (``\\\\.\\...``) and a volume GUID path
+    all start with two backslashes, and are refused. So does an
+    extended-length local drive path, ``\\\\?\\C:\\...``, which is local and
+    was refused with them only because of that prefix.
+    """
+    drive = PureWindowsPath(str(value)).drive
+    return drive.startswith("\\\\") and _EXTENDED_LOCAL_DRIVE.fullmatch(drive) is None
+
+
+def _plain_drive_form(path: Path) -> Path:
+    """``\\\\?\\C:\\x`` as ``C:\\x`` when both name the same folder; otherwise unchanged.
+
+    The rest of Cortex, and the tools it hands the data directory to, expect
+    an ordinary drive path. The prefix also turns off Windows' path
+    normalization, so it stays wherever dropping it would change what the
+    path names: a component ending in a dot or space (``C:\\data.`` is
+    ``C:\\data``), a device name (``C:\\nul`` is the null device), or a path
+    too long for the plain form.
+    """
+    text = str(path)
+    if _EXTENDED_LOCAL_DRIVE.match(text) is None:
+        return path
+    plain = text[4:]
+    if len(plain) >= _MAX_PLAIN_PATH:
+        return path
+    for part in PureWindowsPath(plain).parts[1:]:
+        if part != part.rstrip(". ") or part.split(".")[0].rstrip(" ").upper() in _WINDOWS_DEVICE_NAMES:
+            return path
+    return Path(plain)
 
 
 def _exists(path: Path) -> bool:
@@ -77,9 +117,10 @@ def _canonical_data_root(data_dir: str | os.PathLike[str]) -> Path:
         ):
             raise AppPathError("Cortex data directories cannot traverse reparse points.")
     try:
-        return value.resolve(strict=False)
+        resolved = value.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise AppPathError("Cortex could not canonicalize the data directory.") from exc
+    return _plain_drive_form(resolved) if _running_on_windows() else resolved
 
 
 def secure_private_path(path: str | os.PathLike[str], *, directory: bool) -> Path:
