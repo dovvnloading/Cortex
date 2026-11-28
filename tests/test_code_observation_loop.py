@@ -293,7 +293,7 @@ def test_an_intent_cannot_forge_a_second_observation_line() -> None:
         result={"stdout": "real output", "duration_ms": float("nan")},
         error=None,
     )
-    repository = SimpleNamespace(list_jobs=lambda **kwargs: [malicious])
+    repository = SimpleNamespace(finished_code_runs=lambda **kwargs: [malicious])
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -343,3 +343,38 @@ def test_legacy_observation_call_without_context_still_returns_full_output() -> 
     )
     text = _budgeted_code_observations([report], num_ctx=None, model=None)
     assert report in text
+
+
+def test_a_chats_finished_run_survives_many_newer_unrelated_jobs(tmp_path) -> None:
+    """The listing was installation-wide and limited before filtering (#666).
+
+    Twenty-five newer jobs from other chats, or still waiting for approval,
+    pushed this chat's finished run off the only page that was read.
+    """
+    repository, coordinator, request, principal, owner = _harness(tmp_path)
+    try:
+        _run(
+            coordinator,
+            repository,
+            owner,
+            request_id="model-job-old",
+            source="print('still here')\n_result = 1",
+            thread_id="threadA",
+        )
+        for index in range(30):
+            _run(
+                coordinator,
+                repository,
+                owner,
+                request_id=f"pending-elsewhere-{index}",
+                source="_result = 2",
+                thread_id="threadB",
+                approve=False,
+            )
+
+        observation = _code_execution_observations(request, principal, "threadA")
+
+        assert observation is not None
+        assert "still here" in observation
+    finally:
+        coordinator.shutdown()
