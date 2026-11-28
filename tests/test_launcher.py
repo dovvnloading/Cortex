@@ -74,6 +74,16 @@ def _restore_logging_state() -> Iterator[None]:
         name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate, logging.getLogger(name).level)
         for name in names
     }
+    # A launch also adds its redacting filter to every handler on uvicorn's
+    # loggers. Once an earlier test has left uvicorn non-propagating, pytest
+    # attaches its own session-wide capture handlers there too, and a filter
+    # left on them redacted every later record in the run, ahead of any
+    # handler a test adds. So their filters are put back as well.
+    handler_filters = {
+        id(handler): (handler, list(handler.filters))
+        for name in ("", *names)
+        for handler in logging.getLogger(name).handlers
+    }
     yield
     launcher_main._close_runtime_logging()
     for name, (handlers, propagate, level) in saved.items():
@@ -81,6 +91,8 @@ def _restore_logging_state() -> Iterator[None]:
         logger.handlers[:] = handlers
         logger.propagate = propagate
         logger.setLevel(level)
+    for handler, filters in handler_filters.values():
+        handler.filters[:] = filters
 
 
 def test_normal_launch_selects_an_available_backend_port(
