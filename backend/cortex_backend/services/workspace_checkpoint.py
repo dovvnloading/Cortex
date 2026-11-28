@@ -283,9 +283,15 @@ class WorkspaceCheckpointStore:
             ).fetchone()
             if record is None:
                 # Refuse a new overlapping checkout checkpoint while an
-                # unfinished one still needs the user's restore/discard choice.
+                # unfinished one still needs the user's restore/discard choice:
+                # a write batch that never completed. A finished checkpoint is
+                # only an undo point. Refusing on it too blocked every later
+                # accept on the project, with no way to keep the earlier edits
+                # and move on (#580). Successive undo points are safe because
+                # undo refuses when a file no longer has the content it left.
                 overlap = connection.execute(
-                    "SELECT id FROM checkpoints WHERE owner = ? AND root = ? LIMIT 1",
+                    "SELECT id FROM checkpoints WHERE owner = ? AND root = ? AND state = 'pending' "
+                    "LIMIT 1",
                     (owner, str(root)),
                 ).fetchone()
                 if overlap is not None:

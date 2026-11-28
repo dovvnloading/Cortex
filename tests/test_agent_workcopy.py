@@ -176,6 +176,68 @@ def test_add_modify_delete_accept_and_durable_undo(tmp_path: Path) -> None:
     work.discard()
 
 
+def test_a_second_accepted_run_keeps_the_first_runs_changes(tmp_path: Path) -> None:
+    """#580: the first accept's undo point blocked every later accept on the
+    project with recovery_required, and nothing let the user keep its edits."""
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    (first.path / "src" / "app.py").write_bytes(b"first accepted change\n")
+    first.accept(["src/app.py"], confirmed=True)
+    first.discard()
+
+    second = _copy(tmp_path, root, "run-b")
+    try:
+        (second.path / "delete.py").write_bytes(b"second accepted change\n")
+        assert second.accept(["delete.py"], confirmed=True) == ("delete.py",)
+        assert (root / "src" / "app.py").read_bytes() == b"first accepted change\n"
+        assert (root / "delete.py").read_bytes() == b"second accepted change\n"
+
+        # Each undo point restores only its own run's files.
+        assert second.undo(confirmed=True) == ("delete.py",)
+        assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
+        assert (root / "src" / "app.py").read_bytes() == b"first accepted change\n"
+    finally:
+        second.discard()
+
+
+def test_undoing_an_earlier_accept_after_a_later_one_changed_the_file_is_refused(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    (first.path / "src" / "app.py").write_bytes(b"first\n")
+    first.accept(["src/app.py"], confirmed=True)
+    second = _copy(tmp_path, root, "run-b")
+    (second.path / "src" / "app.py").write_bytes(b"second\n")
+    second.accept(["src/app.py"], confirmed=True)
+
+    with pytest.raises(WorkCopyError) as refused:
+        first.undo(confirmed=True)
+
+    assert refused.value.code == "stale_source"
+    assert (root / "src" / "app.py").read_bytes() == b"second\n"
+    first.discard()
+    second.discard()
+
+
+def test_an_unfinished_write_still_blocks_a_new_accept_on_the_project(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    first = _copy(tmp_path, root, "run-a")
+    store = WorkspaceCheckpointStore(first.data_dir / "workspace_checkpoints.sqlite")
+    info = root.lstat()
+    store.prepare(
+        owner="agent-workcopy", checkpoint_id="interrupted-batch", root=root,
+        root_identity=(info.st_dev, info.st_ino),
+        candidates={"delete.py": (_DELETED_FILE_BYTES, b"half written\n", 0o100644)},
+    )
+    (first.path / "src" / "app.py").write_bytes(b"blocked change\n")
+
+    with pytest.raises(WorkCopyError) as blocked:
+        first.accept(["src/app.py"], confirmed=True)
+
+    assert blocked.value.code == "recovery_required"
+    assert (root / "src" / "app.py").read_bytes() == b"print('original')\r\n"
+    first.discard()
+
+
 def test_undo_never_rebases_unrelated_external_files_into_staged_deletions(tmp_path: Path) -> None:
     root = _project(tmp_path)
     work = _copy(tmp_path, root)
