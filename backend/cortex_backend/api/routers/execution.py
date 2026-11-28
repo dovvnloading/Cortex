@@ -332,7 +332,22 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         return ChatAttachment.model_validate(descriptor.as_dict())
 
 
-    @router.get("/execution/artifacts/{artifact_id}")
+    @router.get(
+        "/execution/artifacts/{artifact_id}",
+        # The body is the artifact's bytes in its stored type, never JSON. The
+        # default made the contract say application/json, so a client generated
+        # from it tried to parse a PNG.
+        response_class=Response,
+        responses={
+            200: {
+                "description": "The artifact's bytes, sent with its stored media type as an attachment.",
+                "content": {
+                    media_type: {"schema": {"type": "string", "format": "binary"}}
+                    for media_type in ("image/png", "image/jpeg", "image/webp", "*/*")
+                },
+            }
+        },
+    )
     def download_execution_artifact(
         artifact_id: str,
         request: Request,

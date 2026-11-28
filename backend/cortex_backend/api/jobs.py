@@ -878,6 +878,10 @@ class JobRegistry:
         data: dict[str, Any] = {"message": "Job cancelled."}
         if kept:
             data["assistant_message_id"] = kept
+            # The status endpoint reads the result, not the event. Without
+            # this, a client recovering a dropped stream from the status found
+            # nothing saved and reported the stopped answer as a failure.
+            record.result = {"cancelled": True, "assistant_message_id": kept}
         self._append_event(
             record,
             kind="state",

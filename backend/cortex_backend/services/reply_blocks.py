@@ -43,34 +43,51 @@ class TagBlock:
 # three spaces, and closes with the same character at least as many times.
 _FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 _BACKTICK_RUN_RE = re.compile(r"`+")
+# A line that starts a block of its own, so a code span cannot continue into it
+# from the line before: a list item, a heading or a thematic break.
+_BLOCK_START_RE = re.compile(r" {0,3}(?:[-+*][ \t]|\d{1,9}[.)][ \t]|#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)")
+_BLOCKQUOTE_RE = re.compile(r" {0,3}>")
 
 _THINK_OPEN_RE = re.compile(r"\s*<think>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 
 
-def _inline_code_spans(line: str, base: int) -> list[tuple[int, int]]:
-    """Spans of ``` `code` ``` on one line, as offsets into the whole text.
+def _inline_code_spans(paragraph: str, base: int) -> list[tuple[int, int]]:
+    """Spans of ``` `code` ``` in one paragraph, as offsets into the whole text.
 
     A span opens at a run of backticks and closes at the next run of exactly
-    the same length, so a stray single backtick pairs with nothing. Spans never
-    cross a line break: that keeps one unmatched backtick early in an answer
-    from swallowing a real block further down.
+    the same length, so a stray single backtick pairs with nothing. As in
+    CommonMark, a span may continue over line breaks inside its paragraph,
+    so an example the model wrapped across two lines is quoted as the user
+    sees it. Spans never cross a paragraph or block boundary: that keeps one
+    unmatched backtick early in an answer from swallowing a real block
+    further down. Linear in the number of backtick runs.
     """
-    runs = [(match.start(), match.end()) for match in _BACKTICK_RUN_RE.finditer(line)]
+    runs = [(match.start(), match.end()) for match in _BACKTICK_RUN_RE.finditer(paragraph)]
+    # next_same[i]: the next run after i with the same length, found right to left.
+    next_same: list[int | None] = [None] * len(runs)
+    last_seen: dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        length = runs[index][1] - runs[index][0]
+        next_same[index] = last_seen.get(length)
+        last_seen[length] = index
     spans: list[tuple[int, int]] = []
     index = 0
     while index < len(runs):
-        open_start, open_end = runs[index]
-        length = open_end - open_start
-        for later in range(index + 1, len(runs)):
-            close_start, close_end = runs[later]
-            if close_end - close_start == length:
-                spans.append((base + open_start, base + close_end))
-                index = later + 1
-                break
-        else:
+        later = next_same[index]
+        if later is None:
             index += 1
+            continue
+        spans.append((base + runs[index][0], base + runs[later][1]))
+        index = later + 1
     return spans
+
+
+def _starts_new_block(line: str, previous: str) -> bool:
+    """Whether ``line`` cannot continue the paragraph ``previous`` belongs to."""
+    if _BLOCK_START_RE.match(line):
+        return True
+    return bool(_BLOCKQUOTE_RE.match(line)) != bool(_BLOCKQUOTE_RE.match(previous))
 
 
 def _indent_columns(line: str) -> int:
@@ -127,14 +144,24 @@ def quoted_spans(text: str) -> list[tuple[int, int]]:
     """Half-open ``(start, end)`` ranges of ``text`` that are quoted code.
 
     Fenced blocks (a fence left open runs to the end, as in Markdown),
-    single-line inline code spans and four-column indented code blocks.
-    The result is sorted and never overlaps.
+    inline code spans (within one paragraph) and four-column indented code
+    blocks. The result is sorted and never overlaps.
     """
     spans: list[tuple[int, int]] = []
     offset = 0
     fence_char = ""
     fence_length = 0
     fence_start = 0
+    # The paragraph being collected: its start offset and its last line.
+    paragraph_start: int | None = None
+    paragraph_last = ""
+
+    def end_paragraph(end: int) -> None:
+        nonlocal paragraph_start
+        if paragraph_start is not None:
+            spans.extend(_inline_code_spans(text[paragraph_start:end], paragraph_start))
+            paragraph_start = None
+
     for line in text.splitlines(keepends=True):
         line_start = offset
         offset += len(line)
@@ -154,11 +181,20 @@ def quoted_spans(text: str) -> list[tuple[int, int]]:
         if marker is not None and not (
             marker.group(1)[0] == "`" and "`" in line[marker.end():]
         ):
+            end_paragraph(line_start)
             fence_char = marker.group(1)[0]
             fence_length = len(marker.group(1))
             fence_start = line_start
             continue
-        spans.extend(_inline_code_spans(line, line_start))
+        if not line.strip():
+            end_paragraph(line_start)
+            continue
+        if paragraph_start is not None and _starts_new_block(line, paragraph_last):
+            end_paragraph(line_start)
+        if paragraph_start is None:
+            paragraph_start = line_start
+        paragraph_last = line
+    end_paragraph(offset)
     if fence_char:
         spans.append((fence_start, offset))
     # Both scanners emit spans in input order. Merge their ordered streams
@@ -171,6 +207,72 @@ def quoted_spans(text: str) -> list[tuple[int, int]]:
         else:
             combined.append((start, end))
     return combined
+
+
+# Envelopes whose payload is one JSON value. Their closing tag can legitimately
+# appear inside a JSON string ("the literal </memory_command> delimiter"), so it
+# ends the block only outside one.
+JSON_ENVELOPE_TAGS = frozenset({"memory_command", "code_execution_request"})
+
+
+class JsonCloserScanner:
+    """Find a closing tag outside any JSON string, across as many reads as needed.
+
+    The state (position, inside a string, after a backslash) carries over, so a
+    caller that receives the payload in chunks scans each character once. The
+    closing tag itself holds no quote or backslash, so it never changes the
+    string state it is being matched against.
+    """
+
+    def __init__(self, closing: str) -> None:
+        self._closing = closing.lower()
+        self._position = 0
+        self._in_string = False
+        self._escaped = False
+
+    def find(self, text: str) -> int:
+        """Index in ``text`` where the closing tag starts, or -1 if not (yet) found.
+
+        ``text`` must be the payload read so far, from its first character,
+        growing between calls.
+        """
+        closing = self._closing
+        size = len(closing)
+        index = self._position
+        while index < len(text):
+            char = text[index]
+            if self._in_string:
+                if self._escaped:
+                    self._escaped = False
+                elif char == "\\":
+                    self._escaped = True
+                elif char == '"':
+                    self._in_string = False
+            elif char == '"':
+                self._in_string = True
+            elif char == "<":
+                if len(text) - index < size:
+                    break  # the rest of a possible closer has not arrived
+                if text[index:index + size].lower() == closing:
+                    self._position = index
+                    return index
+            index += 1
+        self._position = index
+        return -1
+
+
+def json_envelope_end(text: str, start: int, closing: str) -> int:
+    """Where the closing tag of a JSON envelope whose payload starts at ``start`` begins.
+
+    The first closer outside a JSON string. When there is none -- the payload
+    is not valid JSON, say an unbalanced quote -- the first literal closer, as
+    before, so a malformed command can never swallow the rest of the answer.
+    -1 when the closing tag never appears.
+    """
+    found = JsonCloserScanner(closing).find(text[start:])
+    if found != -1:
+        return start + found
+    return text.lower().find(closing.lower(), start)
 
 
 def extract_tag_blocks(text: str, tag: str) -> tuple[list[TagBlock], str]:
@@ -203,13 +305,19 @@ def extract_tag_blocks(text: str, tag: str) -> tuple[list[TagBlock], str]:
             position = found.end()
             continue
         kept.append(text[copied:found.start()])
-        end = closing.search(text, found.end())
-        if end is None:
+        if tag.lower() in JSON_ENVELOPE_TAGS:
+            # A closer inside a JSON string is part of the payload (#612).
+            close_at = json_envelope_end(text, found.end(), f"</{tag}>")
+            close_end = close_at + len(tag) + 3
+        else:
+            end = closing.search(text, found.end())
+            close_at, close_end = (-1, -1) if end is None else (end.start(), end.end())
+        if close_at == -1:
             blocks.append(TagBlock(text[found.end():].strip(), closed=False))
             copied = len(text)
             break
-        blocks.append(TagBlock(text[found.end():end.start()].strip(), closed=True))
-        copied = position = end.end()
+        blocks.append(TagBlock(text[found.end():close_at].strip(), closed=True))
+        copied = position = close_end
     kept.append(text[copied:])
     return blocks, "".join(kept)
 

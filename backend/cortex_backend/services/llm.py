@@ -423,9 +423,15 @@ class PromptTemplate:
         bypass_system_prompt: bool = False,
         host_observations: str | None = None,
         history_messages: Sequence[Mapping[str, Any]] | None = None,
+        history_omitted: bool = False,
     ) -> list[dict]:
         """
         Builds a structured prompt for a general-purpose AI assistant with memory capabilities.
+
+        ``history_omitted`` says earlier exchanges were left out to fit the
+        window. The note saying so normally opens the oldest kept user turn;
+        when no turn was kept, it opens the current message instead, so the
+        model still knows the conversation did not start here.
 
         Args:
             query (str): The user's most recent question or statement.
@@ -456,6 +462,12 @@ class PromptTemplate:
         # values in the user turn prevents model-produced or otherwise
         # attacker-controlled text from merging with system instructions.
         user_content_parts = []
+        if (
+            history_omitted
+            and history_messages is not None
+            and not any(turn.get("role") == "user" for turn in history_messages)
+        ):
+            user_content_parts.append(HISTORY_OMISSION_NOTE)
 
         if user_system_instructions:
             system_content += ("\n\n" if system_content else "") + f"""## USER-DEFINED INSTRUCTIONS
@@ -1081,8 +1093,8 @@ class SynthesisAgent:
             history_messages=(),
         )
         structured_fixed = cls._raw_prompt_tokens(structured_base, ratio) + cls._image_tokens(structured_base)
-        # The omission note opens the oldest kept user turn; the extra token
-        # covers the rounding of that turn's estimate.
+        # The omission note opens the oldest kept user turn, or the current
+        # message when none was kept; the extra token covers the rounding.
         note_tokens = token_budget.estimate_tokens(f"{HISTORY_OMISSION_NOTE}\n\n", ratio) + 1
 
         def prompt_tokens(history: str, wide: int, turns: int) -> int:
@@ -1093,7 +1105,8 @@ class SynthesisAgent:
             return token_budget.with_safety_margin(max(transcript, structured_fixed + turns))
 
         def turns_cost(exchanges: int, history_cost: int, omitted: bool) -> int:
-            return history_cost + (note_tokens if omitted and exchanges else 0)
+            del exchanges  # the note is sent whether or not a turn was kept
+            return history_cost + (note_tokens if omitted else 0)
 
         selected: list[dict] = []
         # Rendered form of `selected`, kept in step with it. Re-rendering the
@@ -1451,7 +1464,16 @@ class SynthesisAgent:
             model=self.gen_model,
         )
 
+        # Whether earlier exchanges were left out: fit_history records it in
+        # the transcript, and measured trimming below drops more.
+        transcript_omitted = HISTORY_OMISSION_NOTE in chat_history
+
         def build_prompt(turns: Sequence[Mapping[str, Any]] | None) -> list[dict]:
+            dropped = (
+                turns is not None
+                and history_messages is not None
+                and len(turns) < len(history_messages)
+            )
             return PromptTemplate.build_synthesis_prompt(
                 query,
                 chat_history,
@@ -1463,6 +1485,7 @@ class SynthesisAgent:
                 bypass_system_prompt=self.bypass_system_prompt,
                 host_observations=host_observations,
                 history_messages=turns,
+                history_omitted=transcript_omitted or dropped,
             )
 
         prompt_messages = build_prompt(history_messages)

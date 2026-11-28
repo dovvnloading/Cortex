@@ -312,3 +312,20 @@ def test_artifact_download_is_a_no_store_attachment_that_a_browser_cannot_sniff(
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["content-disposition"] == f'attachment; filename="{filename}"'
+
+
+def test_the_contract_describes_the_download_as_the_bytes_it_returns(tmp_path):
+    """#709: OpenAPI said application/json, so a generated client parsed a PNG as JSON."""
+    app, source_artifact_id = _app(tmp_path)
+    operation = app.openapi()["paths"]["/api/v1/execution/artifacts/{artifact_id}"]["get"]
+    documented = operation["responses"]["200"]["content"]
+
+    assert "application/json" not in documented
+    assert all(entry["schema"] == {"type": "string", "format": "binary"} for entry in documented.values())
+
+    with TestClient(app) as client:
+        image = client.get(f"/api/v1/execution/artifacts/{source_artifact_id}", headers=_session(client, app))
+
+    assert image.status_code == 200
+    assert image.headers["content-type"] in documented
+    assert image.content.startswith(bytes([0x89]) + b"PNG")
