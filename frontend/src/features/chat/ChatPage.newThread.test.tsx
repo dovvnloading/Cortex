@@ -2,9 +2,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
-import type { ChatResponse } from "../../../../contracts/cortex-api";
+import type { ChatAttachment, ChatResponse } from "../../../../contracts/cortex-api";
 import type { CortexApi } from "../../api/client";
-import { useChatStore } from "../../stores/useChatStore";
+import { storePendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
+import { NEW_THREAD_OPTIONS_KEY, useChatStore } from "../../stores/useChatStore";
 import { useUiStore } from "../../stores/useUiStore";
 import { ChatPage } from "./ChatPage";
 import { GenerationStreamHost } from "./GenerationStreamHost";
@@ -59,6 +60,38 @@ describe("ChatPage new thread", () => {
     window.localStorage.clear();
     useChatStore.setState({ generationOptionsByThread: {}, proposedMemoriesByMessage: {} });
     useUiStore.setState({ toasts: [] });
+  });
+
+  it("keeps the real chat's own draft, files and settings when a lost first message is recovered (#692)", async () => {
+    const user = userEvent.setup();
+    const staged: ChatAttachment = {
+      attachment_id: "att-followup", filename: "followup.md", mime_type: "text/markdown", size: 9,
+      sha256: "b".repeat(64), kind: "document", expires_at: "2099-01-01T00:00:00Z",
+    };
+    // The first message was admitted and created "thread-new", but its
+    // answer was lost; since then the user wrote in that saved chat.
+    storePendingGenerationAdmission({
+      requestId: "lost-first-message", operation: "generate", threadId: null, baseRevision: 0,
+      prompt: "Start a plan", attachments: [], createdAt: Date.now(),
+    });
+    window.localStorage.setItem("cortex.composer.draft.thread-new", "A follow-up I have not sent");
+    window.sessionStorage.setItem("cortex.composer.attachments.thread-new", JSON.stringify([staged]));
+    useChatStore.getState().setThreadOptions("thread-new", { temperature: 0.1 });
+    useChatStore.getState().setThreadOptions(NEW_THREAD_OPTIONS_KEY, { temperature: 0.9 });
+    const generate = vi.fn().mockResolvedValue({
+      job_id: "job-first", kind: "generation", status: "queued", thread_id: "thread-new", user_message_id: "user-1",
+    });
+    const onThreadCreated = vi.fn();
+    renderPage(chatApi({ generate }), { onThreadCreated });
+
+    await user.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(onThreadCreated).toHaveBeenCalledWith("thread-new"));
+
+    expect(generate.mock.calls[0][0]).toMatchObject({ request_id: "lost-first-message" });
+    expect(window.localStorage.getItem("cortex.composer.draft.thread-new")).toBe("A follow-up I have not sent");
+    expect(JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-new") ?? "[]"))
+      .toEqual([staged]);
+    expect(useChatStore.getState().generationOptionsByThread["thread-new"]).toEqual({ temperature: 0.1 });
   });
 
   it("shows which model will answer, three keyboard hints, and a line about attachments", async () => {

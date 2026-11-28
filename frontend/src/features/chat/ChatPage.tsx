@@ -604,8 +604,11 @@ export function ChatPage({
       // placeholder key. Migrate them to the real thread id now that one
       // exists, so they keep applying to this conversation instead of
       // reverting after one message and leaking into the next new chat.
-      const draftOptions = useChatStore.getState().generationOptionsByThread[NEW_THREAD_OPTIONS_KEY];
-      if (draftOptions) {
+      // A recovered send can land in a chat that already exists and already
+      // has its own overrides: those are the user's newer choice (#692).
+      const optionsByThread = useChatStore.getState().generationOptionsByThread;
+      const draftOptions = optionsByThread[NEW_THREAD_OPTIONS_KEY];
+      if (draftOptions && !optionsByThread[destinationThreadId]) {
         setThreadOptions(destinationThreadId, draftOptions);
         setThreadOptions(NEW_THREAD_OPTIONS_KEY, null);
       }
@@ -628,14 +631,21 @@ export function ChatPage({
       useComposerStore.setState({ drafts: nextDrafts });
       writeComposerDraft(submittedThreadId, retainedDraft);
     } else {
+      // The real thread can already exist (a recovered send whose answer
+      // was lost) and hold its own unsent text. That is never overwritten:
+      // what is left of the submitted draft stays where it was instead (#692).
+      const destinationDraft = useComposerStore.getState().drafts[destinationDraftScope]
+        ?? readComposerDraft(destinationThreadId);
+      const keepDestination = destinationDraft !== "";
+      const sourceDraft = keepDestination ? retainedDraft : "";
       const nextDrafts = {
         ...useComposerStore.getState().drafts,
-        [submittedScope]: "",
-        [destinationDraftScope]: retainedDraft,
+        [submittedScope]: sourceDraft,
+        [destinationDraftScope]: keepDestination ? destinationDraft : retainedDraft,
       };
       useComposerStore.setState({ drafts: nextDrafts });
-      writeComposerDraft(submittedThreadId, "");
-      writeComposerDraft(destinationThreadId, retainedDraft);
+      writeComposerDraft(submittedThreadId, sourceDraft);
+      if (!keepDestination) writeComposerDraft(destinationThreadId, retainedDraft);
     }
     if (submittedAttachments.length || submittedAttachmentScope !== destinationAttachmentScope) {
       const submittedAttachmentIds = new Set(submittedAttachments.map((attachment) => attachment.attachment_id));
@@ -644,18 +654,31 @@ export function ChatPage({
       const retainedAttachments = currentAttachments.filter(
         (attachment) => !submittedAttachmentIds.has(attachment.attachment_id),
       );
+      // Files already staged in the destination stay; the submitted draft's
+      // leftovers join them (#692).
+      const destinationAttachments = submittedAttachmentScope === destinationAttachmentScope
+        ? []
+        : useComposerStore.getState().attachments[destinationAttachmentScope]
+          ?? readComposerAttachments(destinationThreadId);
+      const destinationIds = new Set(destinationAttachments.map((attachment) => attachment.attachment_id));
+      const mergedAttachments = [
+        ...destinationAttachments,
+        ...retainedAttachments.filter((attachment) => !destinationIds.has(attachment.attachment_id)),
+      ];
       const nextAttachments = submittedAttachmentScope === destinationAttachmentScope
         ? { ...useComposerStore.getState().attachments, [submittedAttachmentScope]: retainedAttachments }
         : {
             ...useComposerStore.getState().attachments,
             [submittedAttachmentScope]: [],
-            [destinationAttachmentScope]: retainedAttachments,
+            [destinationAttachmentScope]: mergedAttachments,
           };
       useComposerStore.setState({ attachments: nextAttachments });
       if (submittedAttachmentScope !== destinationAttachmentScope) {
         writeComposerAttachments(submittedThreadId, []);
+        writeComposerAttachments(destinationThreadId, mergedAttachments);
+      } else {
+        writeComposerAttachments(destinationThreadId, retainedAttachments);
       }
-      writeComposerAttachments(destinationThreadId, retainedAttachments);
     }
   };
 
