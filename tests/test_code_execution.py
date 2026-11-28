@@ -1203,7 +1203,9 @@ def test_a_cancelling_job_relaunched_after_a_crash_does_not_leak_its_workspace(c
     workspace = _stale_workspace(repository, job.job_id)
     repository.request_cancel(job.job_id)
 
-    assert coordinator.startup_recover() == []  # the lease is still live: nothing is recovered
+    # The lease has not expired, but its holder was a process that is gone:
+    # startup recovery takes it (#577) instead of waiting out its expiry.
+    assert coordinator.startup_recover() == [job.job_id]
 
     wait_until(
         lambda: repository.get_job(job.job_id).status == "cancelled" and not workspace.exists(),
