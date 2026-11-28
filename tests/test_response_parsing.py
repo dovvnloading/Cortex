@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from cortex_backend.core.generation import MemoryCommand
+from cortex_backend.services import llm as llm_module
 from cortex_backend.services.llm import SynthesisAgent
 
 
@@ -127,6 +128,35 @@ def test_a_complete_memory_command_before_a_truncated_one_is_still_applied() -> 
 
     assert answer == "Noted.  Also"
     assert command == MemoryCommand(("User likes tea",), False)
+
+
+_DEEPLY_NESTED_MEMORY = (
+    '<memory_command>{"add":' + "[" * 1100 + "0" + "]" * 1100 + "}</memory_command>"
+)
+
+
+def test_a_deeply_nested_memory_command_is_ignored_and_the_answer_kept() -> None:
+    """#586: 1,100 nested arrays fit under the size gate and overflow the
+    decoder on Python 3.11; the RecursionError failed the whole generation."""
+    _agent, answer, _thoughts, command = _parse(f"The answer is 4.{_DEEPLY_NESTED_MEMORY}")
+
+    assert answer == "The answer is 4."
+    assert command == MemoryCommand()
+
+
+def test_a_decoder_overflow_in_a_memory_command_is_ignored_on_every_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newer Pythons decode far deeper, so the overflow is simulated as well."""
+
+    def overflow(*_args, **_kwargs):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    monkeypatch.setattr(llm_module.json, "loads", overflow)
+    _agent, answer, _thoughts, command = _parse(f"The answer is 4. {_TEA_COMMAND}")
+
+    assert answer == "The answer is 4."
+    assert command == MemoryCommand()
 
 
 def test_a_complete_block_is_unaffected_by_the_unterminated_block_rule() -> None:
