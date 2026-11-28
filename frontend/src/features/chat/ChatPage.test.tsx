@@ -411,6 +411,34 @@ describe("ChatPage composer integration", () => {
     expect(screen.getByRole("button", { name: "Retry response" })).toBeDisabled();
   });
 
+  it("regenerates against the revision it shows, also when replaying a lost admission (#685)", async () => {
+    const transcript: ChatResponse = {
+      ...emptyChat("thread-a"),
+      revision: 7,
+      messages: [
+        { id: "user-1", role: "user", content: "Explain it" },
+        { id: "assistant-1", role: "assistant", content: "An answer" },
+      ],
+    };
+    const regenerate = vi.fn()
+      .mockRejectedValueOnce(new ApiError(0, "The connection was lost.", "network"))
+      .mockResolvedValue({ job_id: "job-regen", kind: "generation", status: "queued", thread_id: "thread-a" });
+    const api = chatApi({ chat: vi.fn(async () => transcript), regenerate });
+    renderChat(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Regenerate response" }));
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(1));
+    const first = regenerate.mock.calls[0][1];
+    expect(first).toMatchObject({ message_id: "assistant-1", base_revision: 7 });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry last message" }));
+    await waitFor(() => expect(regenerate).toHaveBeenCalledTimes(2));
+    // The replay is the same request: same id, same revision.
+    expect(regenerate.mock.calls[1][1]).toMatchObject({
+      request_id: first.request_id, message_id: "assistant-1", base_revision: 7,
+    });
+  });
+
   it("does not offer recovery on answered or earlier user turns", async () => {
     const api = chatApi({
       chat: vi.fn(async (): Promise<ChatResponse> => ({

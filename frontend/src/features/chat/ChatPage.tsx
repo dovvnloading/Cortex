@@ -453,7 +453,9 @@ export function ChatPage({
       requestId,
       operation: regenerateMessageId ? "regenerate" : "generate",
       threadId: requestThreadId,
-      baseRevision: regenerateMessageId ? undefined : baseRevision,
+      // A regeneration names the revision it was asked from too, so a newer
+      // answer saved by another client is not silently replaced (#685).
+      baseRevision,
       options,
       messageId: regenerateMessageId,
       prompt: input,
@@ -474,6 +476,7 @@ export function ChatPage({
             message_id: regenerateMessageId,
             user_input: input,
             attachments: [...suppliedAttachments],
+            base_revision: baseRevision,
             options,
           })
         : await api.generate({
