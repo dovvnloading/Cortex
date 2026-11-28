@@ -381,14 +381,24 @@ def split_gguf_parts(url: str, filename: str) -> tuple[tuple[str, str], ...] | N
     ``name-00003-of-00003.gguf``, and no single part is usable alone. Given the
     URL and file name of any one part this names all of them, in order, with the
     other parts' URLs built by swapping the part number in the URL's last path
-    segment. ``None`` means an ordinary single file (including a name that only
-    looks like a part but is not consistent, such as part 5 of 3).
+    segment. ``None`` means an ordinary single file, or a set of one part.
+
+    A name that is a part of a split model this cannot fetch -- more parts
+    than are supported, or an impossible part number such as 5 of 3 -- raises
+    ``GGUFDownloadError``: downloading it as a single file only produced a
+    part the models folder will never list.
     """
     match = _SPLIT_NAME_PATTERN.fullmatch(filename)
     if match is None:
         return None
     count, index = int(match.group("total")), int(match.group("index"))
-    if not 2 <= count <= _MAX_SPLIT_PARTS or not 1 <= index <= count:
+    if not 1 <= index <= count:
+        raise GGUFDownloadError("This file name claims a part number that its split model does not have.")
+    if count > _MAX_SPLIT_PARTS:
+        raise GGUFDownloadError(
+            f"This split model has {count} parts; Cortex can download at most {_MAX_SPLIT_PARTS}."
+        )
+    if count < 2:
         return None
     parts = urlsplit(url)
     directory, _, tail = parts.path.rpartition("/")
@@ -636,8 +646,15 @@ def download_gguf(
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
     allow_overwrite: bool = False,
+    commit: Callable[[], bool] | None = None,
 ) -> Path:
-    """Stream a validated GGUF into ``directory`` without clobbering a model."""
+    """Stream a validated GGUF into ``directory`` without clobbering a model.
+
+    ``commit`` is called once, right before the model is published. Returning
+    False means Stop won: nothing is published and the download reports
+    cancellation. Returning True means the result is committed: a later Stop
+    can no longer win, so the published model is never rolled back for one.
+    """
     if not isinstance(target_filename, str) or _SAFE_FILENAME_PATTERN.fullmatch(target_filename) is None:
         raise GGUFDownloadError("The target filename must be a plain '.gguf' filename.")
     if not isinstance(url, str) or _contains_control_character(url):
@@ -666,15 +683,19 @@ def download_gguf(
         ).run()
         _validate_gguf_file(temp_path)
         _raise_if_cancelled(cancellation_event)
+        if commit is not None and not commit():
+            raise GGUFDownloadError("Download cancelled.")
+        committed = commit is not None
         staged_identity = _file_identity(temp_path) if not allow_overwrite else None
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
         published = True
         # Publication can race Stop. For a new file, roll back only the model
         # this transfer created; never unlink a concurrent writer's replacement.
-        if not allow_overwrite:
+        # Once committed, Stop no longer wins and nothing is rolled back for it.
+        if not allow_overwrite and not committed:
             _raise_if_cancelled(cancellation_event)
         reporter.success(destination.stat().st_size)
-        if not allow_overwrite:
+        if not allow_overwrite and not committed:
             _raise_if_cancelled(cancellation_event)
     except BaseException:
         if published and not allow_overwrite:
@@ -705,8 +726,13 @@ def download_gguf_set(
     http_client: httpx.Client | None = None,
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
+    commit: Callable[[], bool] | None = None,
 ) -> tuple[Path, ...]:
     """Fetch every ``(url, filename)`` part of a split model, all or nothing.
+
+    ``commit`` works as in ``download_gguf``: called once before the first
+    part is published, False cancels with nothing published, True means a
+    later Stop no longer rolls the set back.
 
     Parts download one after another into staging files, each validated as it
     arrives, and are moved into ``directory`` only once every one is complete. A
@@ -784,15 +810,22 @@ def download_gguf_set(
                 )
             journal_identities.append(identity)
         _raise_if_cancelled(cancellation_event)
+        if commit is not None and not commit():
+            raise GGUFDownloadError("Download cancelled.")
+        # After a commit Stop no longer wins: the set is finished, not undone.
+        stop_still_counts = commit is None
         publication_journal = _write_split_publication_journal(
             parts, staged, journal_identities, directory
         )
         for staging_path, destination in zip(staged, destinations, strict=True):
-            _raise_if_cancelled(cancellation_event)
+            if stop_still_counts:
+                _raise_if_cancelled(cancellation_event)
             _publish(staging_path, destination, allow_overwrite=False)
-            _raise_if_cancelled(cancellation_event)
+            if stop_still_counts:
+                _raise_if_cancelled(cancellation_event)
         reporter.success(fetched_bytes)
-        _raise_if_cancelled(cancellation_event)
+        if stop_still_counts:
+            _raise_if_cancelled(cancellation_event)
         complete = True
     finally:
         # Best effort, and every file gets its turn: a file that cannot be
