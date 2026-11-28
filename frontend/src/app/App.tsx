@@ -360,6 +360,10 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const mountedRef = useRef(false);
   const workspaceLoadGenerationRef = useRef(0);
   const groupLoadGenerationRef = useRef(0);
+  // Whether the workspace has its group list yet. A group change confirmed
+  // before it arrives invalidates that request, so the list is asked for
+  // again rather than left at only the groups changed since (#711).
+  const groupsLoadedRef = useRef(false);
   const chatMoveWritesRef = useRef(new Map<string, LatestWrite<string | null>>());
   const groupCollapseWritesRef = useRef(new Map<string, LatestWrite<boolean>>());
   const modelGenerationRef = useRef(0);
@@ -383,6 +387,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   const loadWorkspace = useCallback(async () => {
     const loadGeneration = ++workspaceLoadGenerationRef.current;
     const groupGeneration = ++groupLoadGenerationRef.current;
+    groupsLoadedRef.current = false;
     const modelGeneration = ++modelGenerationRef.current;
     const isCurrentLoad = () => mountedRef.current && workspaceLoadGenerationRef.current === loadGeneration;
     const isCurrentGroupLoad = () => isCurrentLoad() && groupLoadGenerationRef.current === groupGeneration;
@@ -411,7 +416,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       // the whole workspace on filing metadata would be the wrong trade.
       void api.chatGroups()
         .then((nextGroups) => {
-          if (isCurrentGroupLoad()) setGroups(nextGroups);
+          if (!isCurrentGroupLoad()) return;
+          groupsLoadedRef.current = true;
+          setGroups(nextGroups);
         })
         .catch(() => {
           if (isCurrentGroupLoad()) setGroups([]);
@@ -698,6 +705,19 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     return true;
   };
 
+  /** After a group change that invalidated a list still on its way, ask for the list again. */
+  const reloadGroupsIfNotLoaded = () => {
+    if (groupsLoadedRef.current || !mountedRef.current) return;
+    const generation = ++groupLoadGenerationRef.current;
+    void api.chatGroups()
+      .then((nextGroups) => {
+        if (!mountedRef.current || groupLoadGenerationRef.current !== generation) return;
+        groupsLoadedRef.current = true;
+        setGroups(nextGroups);
+      })
+      .catch(() => undefined);
+  };
+
   const createGroup = async (name: string): Promise<boolean> => {
     let requestId: string | null = null;
     try {
@@ -712,6 +732,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         // the library, while a late snapshot must not erase the new row.
         ++groupLoadGenerationRef.current;
         upsertGroup(group);
+        reloadGroupsIfNotLoaded();
       }
       notify("Group created.", "success");
       return true;
@@ -740,6 +761,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
         // the stale collapsed field echoed back with the renamed group.
         const local = useChatStore.getState().groups.find((item) => item.id === groupId);
         upsertGroup(local ? { ...group, collapsed: local.collapsed } : group);
+        reloadGroupsIfNotLoaded();
       }
       return true;
     } catch (error) { notify(apiMessage(error, "Could not rename group."), "error"); return false; }
@@ -753,6 +775,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       if (mountedRef.current) {
         ++groupLoadGenerationRef.current;
         removeGroup(groupId);
+        reloadGroupsIfNotLoaded();
       }
       notify("Group deleted. Its chats moved back to the main list.", "success");
       return true;
@@ -766,6 +789,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     // Update immediately, but serialize persistence for this one group.
     // Quick collapse/expand/collapse sequences retain their most recent intent.
     upsertGroup({ ...previous, collapsed });
+    reloadGroupsIfNotLoaded();
     persistLatestWrite(
       groupCollapseWritesRef.current,
       groupId, previous.collapsed, collapsed,
