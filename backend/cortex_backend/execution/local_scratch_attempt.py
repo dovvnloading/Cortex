@@ -19,6 +19,8 @@ from cortex_backend.core.win_jobs import JobLimits, JobObjectError, KillOnCloseJ
 from .local_process import (
     DEFAULT_CANCEL_GRACE_SECONDS,
     _contain_worker,
+    ReceiveInterrupted,
+    _receive_within,
     _release_worker,
     _stop_process,
 )
@@ -94,13 +96,30 @@ class LocalScratchAttempt:
                     cancelled_at = cancelled_at or time.monotonic()
                 if receiver.poll(0.025):
                     try:
-                        message = receiver.recv()
+                        message = _receive_within(
+                            receiver,
+                            process,
+                            deadline=deadline if deadline is not None else startup_deadline,
+                            cancelled=lambda: cancel_event.is_set() or self._cancel_event.is_set(),
+                            cancelled_at=cancelled_at,
+                            grace_seconds=self._cancel_grace_seconds,
+                        )
+                    except ReceiveInterrupted as interrupted:
+                        raise ScratchComputeError(
+                            "cancelled" if interrupted.reason == "cancelled"
+                            else "worker_startup_timeout" if deadline is None
+                            else "worker_timeout"
+                        ) from None
                     except (EOFError, OSError):
                         raise ScratchComputeError("worker_failed") from None
                     if not isinstance(message, Mapping):
                         raise ScratchComputeError("worker_output_invalid")
                     if message.get("ok") is True and message.get("event") == "ready":
                         if not released:
+                            if cancel_event.is_set() or self._cancel_event.is_set():
+                                # Stop came before the worker was released, so nothing has
+                                # run yet: it must never be told to go.
+                                raise ScratchComputeError("cancelled")
                             released = True
                             try:
                                 worker_job = _contain_worker(process, SCRATCH_WORKER_JOB_LIMITS)
