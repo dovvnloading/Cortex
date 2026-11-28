@@ -876,6 +876,35 @@ class ExecutionRepository:
         )
         return [self._job_from_row(row) for row in rows]
 
+    def nonterminal_jobs(self, *, owner: str) -> list[ExecutionJob]:
+        """Every unfinished job of one owner, oldest first.
+
+        For startup recovery, which must see all of them: list_jobs is a
+        task-tray listing, capped at 200 and ordered for display.
+        """
+        if not owner:
+            raise ValueError("owner must be non-empty")
+        now = self._now()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT j.*,
+                       COALESCE(
+                           CASE
+                               WHEN a.state = 'pending' AND a.expires_at <= ? THEN 'expired'
+                               ELSE a.state
+                           END,
+                           'not_required'
+                       ) AS approval_state
+                FROM execution_jobs j
+                LEFT JOIN execution_approvals a ON a.job_id = j.job_id
+                WHERE j.owner = ? AND j.status NOT IN ('succeeded', 'failed', 'cancelled')
+                ORDER BY j.created_at, j.job_id
+                """,
+                (now, owner),
+            ).fetchall()
+        return [self._job_from_row(row) for row in rows]
+
     def list_job_listings(
         self,
         *,
@@ -1190,6 +1219,10 @@ class ExecutionRepository:
                 raise ApprovalPolicyError("fake.v1 does not require approval.")
             if job["status"] in TerminalExecutionStatus:
                 raise ApprovalTransitionError("Terminal jobs cannot request approval.")
+            if job["status"] == "cancelling":
+                # Stop was pressed before the prompt existed; asking the user
+                # to approve work they already cancelled is never right.
+                raise ApprovalTransitionError("Cancelled jobs cannot request approval.")
             existing = connection.execute(
                 "SELECT state FROM execution_approvals WHERE job_id = ?",
                 (job_id,),
@@ -1652,7 +1685,16 @@ class ExecutionRepository:
             ).fetchone()
         return None if row is None else str(row["lease_owner"])
 
-    def recover_expired_leases(self) -> list[str]:
+    def recover_expired_leases(self, *, include_live: bool = False) -> list[str]:
+        """Reclaim job leases whose holder is gone and return those jobs.
+
+        By default only expired leases are taken. ``include_live`` takes every
+        job lease whatever its expiry. Only a coordinator that has just
+        claimed exclusive supervisor ownership at startup, before it has
+        launched anything, may pass it: the launcher's instance lock means the
+        previous holder was a process that has exited, so its leases are dead
+        even when their timestamps say otherwise.
+        """
         now = datetime.now(timezone.utc)
         now_text = now.isoformat()
         recovered: list[str] = []
@@ -1662,9 +1704,9 @@ class ExecutionRepository:
                 SELECT j.job_id, j.status FROM execution_jobs j
                 JOIN execution_leases l ON l.job_id = j.job_id
                 WHERE j.status IN ('queued', 'running', 'cancelling')
-                  AND l.lease_expires_at <= ?
+                  AND (? OR l.lease_expires_at <= ?)
                 """,
-                (now_text,),
+                (1 if include_live else 0, now_text),
             ).fetchall()
             for row in rows:
                 job_id = str(row["job_id"])
