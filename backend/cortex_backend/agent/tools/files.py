@@ -229,6 +229,14 @@ class _Files:
             self._canonical(cursor)
         return cursor
 
+    def _is_directory(self, path: str) -> bool:
+        """Whether ``path`` names a real directory in the copy (no link is followed)."""
+        try:
+            self._directory(path)
+        except FileToolError:
+            return False
+        return True
+
     def _file(self, path: str, *, create_parents: bool = False, required: bool = True
               ) -> tuple[str, Path, os.stat_result | None]:
         relative = _file_name(path)
@@ -436,9 +444,10 @@ class _Files:
         selector = _glob_pattern(_string(args, "glob", default="**"))
         self._check(context)
         if location not in {"", "."}:
-            try:
-                _file_name(location)
-            except FileToolError:
+            # Decided by what is on disk, not by the name: a folder called
+            # src.py is a valid file name too, and was refused as a file that
+            # is not regular instead of being searched.
+            if self._is_directory(location):
                 directory = _directory_name(location)
                 self._directory(directory)
                 paths: Iterator[str] = self._files(directory, context)

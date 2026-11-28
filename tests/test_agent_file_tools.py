@@ -121,6 +121,22 @@ def test_grep_python_re_and_line_numbers(workcopy: tuple[Path, ToolRegistry]) ->
     assert _denied(registry, "grep", pattern="(") == "invalid_regex"
 
 
+@pytest.mark.parametrize("folder", ["src.py", "pkg", "lib.ts"])
+def test_grep_searches_a_folder_whose_name_looks_like_a_file(
+    workcopy: tuple[Path, ToolRegistry], folder: str
+) -> None:
+    """#581: a folder named src.py passed the file-name check, was then refused
+    as "not a regular file", and was never searched."""
+    root, registry = workcopy
+    (root / folder).mkdir()
+    (root / folder / "example.py").write_text("def greet():\n    return 1\n", encoding="utf-8")
+
+    result, searched = _call(registry, "grep", pattern="def greet", path=folder, glob="**/*.py")
+
+    assert result.success, searched
+    assert searched["hits"] == [{"path": f"{folder}/example.py", "line": 1, "text": "def greet():"}]
+
+
 def test_read_file_range_preserves_bytes_and_full_sha(workcopy: tuple[Path, ToolRegistry]) -> None:
     root, registry = workcopy
     contents = (root / "src" / "sample.py").read_bytes()
