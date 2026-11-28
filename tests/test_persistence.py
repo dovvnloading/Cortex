@@ -972,6 +972,75 @@ def test_quarantined_files_keep_the_legacy_directory_and_are_never_touched(
     assert quarantined.read_text(encoding="utf-8") == "{not json"
 
 
+_FROZEN_EPOCH = 1_767_225_600  # 2026-01-01T00:00:00Z
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        # Naive "now" is local time, which is what .timestamp() reads it as.
+        return datetime.fromtimestamp(_FROZEN_EPOCH, tz=tz)
+
+
+def test_a_quarantined_file_never_replaces_one_preserved_earlier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#649: with the name and its same-second fallback both taken, the older copy was overwritten."""
+    manager, legacy = _legacy_manager(tmp_path)
+    quarantine = legacy / "quarantine"
+    quarantine.mkdir()
+    (quarantine / "chat.json").write_text("first preserved", encoding="utf-8")
+    (quarantine / f"chat_{_FROZEN_EPOCH}.json").write_text("second preserved", encoding="utf-8")
+    (legacy / "chat.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(storage, "datetime", _FrozenDatetime)
+
+    result = manager.migrate_from_json_if_needed()
+
+    assert result.quarantined == 1
+    assert not (legacy / "chat.json").exists()
+    preserved = sorted(path.read_text(encoding="utf-8") for path in quarantine.iterdir())
+    assert preserved == ["first preserved", "second preserved", "{not json"]
+
+
+def test_a_quarantine_that_cannot_move_the_file_leaves_it_and_no_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    source = _legacy_chat(legacy, "broken", valid=False)
+    real_replace = os.replace
+
+    def refuse(src, dst, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(src)) == os.path.normcase(str(source)):
+            raise PermissionError(errno.EACCES, "held by another program")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", refuse)
+    result = manager.migrate_from_json_if_needed()
+    monkeypatch.undo()
+
+    assert result.quarantined == 0
+    assert source.read_text(encoding="utf-8") == "{not json"
+    assert list((legacy / "quarantine").iterdir()) == []
+
+
+def test_an_archived_chat_never_replaces_a_file_in_an_archive_from_the_same_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, legacy = _legacy_manager(tmp_path)
+    _legacy_chat(legacy, "one")
+    archive = tmp_path / f"chat_history_migrated_{_FROZEN_EPOCH}"
+    archive.mkdir()
+    (archive / "one.json").write_text("archived by an earlier pass", encoding="utf-8")
+    monkeypatch.setattr(storage, "datetime", _FrozenDatetime)
+
+    result = manager.migrate_from_json_if_needed()
+
+    assert result.migrated == 1
+    contents = sorted(path.read_text(encoding="utf-8") for path in archive.iterdir())
+    assert len(contents) == 2
+    assert "archived by an earlier pass" in contents
+
+
 def test_a_stray_file_keeps_the_legacy_directory(tmp_path: Path) -> None:
     manager, legacy = _legacy_manager(tmp_path)
     _legacy_chat(legacy, "one")

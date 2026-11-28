@@ -20,6 +20,7 @@ from cortex_backend.execution.code_execution import (
 )
 from cortex_backend.execution import code_execution
 from cortex_backend.execution.local_process import _stop_process
+from cortex_backend.execution.recipe_coordinator import ExecutionShutdownIncomplete
 from cortex_backend.execution.repository import LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
 from support import wait_until
@@ -724,7 +725,9 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     monkeypatch.setattr(repository, "claim_supervisor_lease", blocked_claim)
     coordinator.startup_recover()
     assert renewal_entered.wait(timeout=3.0)
-    coordinator.shutdown(timeout=0)
+    # A renewal still inside SQLite is not a clean stop (#618).
+    with pytest.raises(ExecutionShutdownIncomplete):
+        coordinator.shutdown(timeout=0)
 
     with pytest.raises(RuntimeError, match="still stopping"):
         coordinator.startup_recover()
@@ -736,6 +739,8 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     old_thread.join(timeout=3.0)
     assert not old_thread.is_alive()
 
+    # Retrying the stop finishes it; only then can the coordinator restart.
+    coordinator.shutdown(timeout=1.0)
     coordinator.startup_recover()
     assert coordinator._supervisor_thread is not old_thread
 

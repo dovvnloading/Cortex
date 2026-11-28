@@ -10,6 +10,7 @@ AppPaths and both carry verified backups. Reading legacy JSON chat files is a
 migration path DatabaseManager offers, not what this module is.
 """
 
+import errno
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ from cortex_backend.repositories.sqlite_backup import (
     adopt_orphaned_sidecars,
     failure_detail,
     find_interrupted_recovery,
+    has_sqlite_header,
     move_sidecars,
     open_at_rest,
     put_sidecars_back,
@@ -53,6 +55,67 @@ from cortex_backend.repositories.sqlite_schema import (
     prepare_database,
     stored_version,
 )
+
+
+_FREE_NAME_ATTEMPTS = 16
+
+
+def _move_beside_never_replacing(source: str, directory: str) -> str:
+    """Move ``source`` into ``directory`` under a name nothing there has yet; return the new path.
+
+    Quarantine and archive folders hold the only copy of what they preserve.
+    Choosing a name by checking it was free and then moving onto it let a
+    second file replace the first when the fallback name -- the same second's
+    timestamp -- was taken too, and shutil.move replaces whatever is there.
+    The name is reserved here with an exclusive create, and the source moved
+    onto that empty reservation, so nothing that was already preserved is
+    ever overwritten. On failure the source is left where it was.
+    """
+    os.makedirs(directory, exist_ok=True)
+    stem, extension = os.path.splitext(os.path.basename(source))
+    names = [f"{stem}{extension}", f"{stem}_{int(datetime.now().timestamp())}{extension}"]
+    names += [f"{stem}_{uuid4().hex[:12]}{extension}" for _ in range(_FREE_NAME_ATTEMPTS)]
+    for name in names:
+        destination = os.path.join(directory, name)
+        try:
+            with open(destination, "xb"):
+                pass
+        except FileExistsError:
+            continue
+        try:
+            try:
+                os.replace(source, destination)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                # Another volume: copy into the reservation, then let go of
+                # the source, as shutil.move does.
+                shutil.copyfile(source, destination)
+                os.unlink(source)
+        except OSError:
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+            raise
+        return destination
+    raise FileExistsError(errno.EEXIST, "No free name to preserve the file under.", directory)
+
+
+def _parse_stored_json(text: str | bytes) -> object:
+    """Parse JSON read from a file on disk; any parse failure is a ValueError.
+
+    The decoder recurses once per nesting level, so a few thousand ``[`` --
+    far under any byte ceiling -- raise RecursionError. No recovery path
+    expects that: a damaged memory file stopped startup before its intact
+    backup was tried, and one such legacy chat file aborted the migration
+    instead of being quarantined. As a ValueError it takes the path every
+    other unreadable file takes.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError:
+        raise ValueError("stored JSON nests too deeply") from None
 
 
 def _utc_now_iso() -> str:
@@ -113,10 +176,17 @@ def _message_select_list(fields: Sequence[str]) -> str:
 # Every possible projection is compiled from literal schema columns at import.
 # A request only selects an existing statement by its validated field set;
 # no caller-supplied text can become part of a SQL statement.
+#
+# A conversation is in the order its turns were written, which is the order of
+# their row ids: every path that writes messages (a new turn, a fork, a legacy
+# import) inserts them in transcript order, and a regenerated reply is updated
+# in place. The timestamp is only what the turn displays. Ordering by it put a
+# reply before its own question when the clock stepped back (an NTP
+# correction, a manual change), and moved a regenerated reply to the end.
 _MESSAGE_SELECT_QUERIES: dict[frozenset[str], str] = {
     frozenset(names): (
         "SELECT " + _message_select_list(names)
-        + " FROM messages WHERE thread_id = ? ORDER BY timestamp ASC, id ASC"
+        + " FROM messages WHERE thread_id = ? ORDER BY id ASC"
     )
     for count in range(1, len(_MESSAGE_FIELD_COLUMNS) + 1)
     for names in combinations(_MESSAGE_FIELD_COLUMNS, count)
@@ -485,7 +555,8 @@ class DatabaseManager:
         b-tree checks, no index cross-check) for a copy that was just written
         page-for-page from a source that already passed the full one.
         """
-        if not os.path.exists(path):
+        if not os.path.exists(path) or not has_sqlite_header(path):
+            # An empty file passes SQLite's checks as an empty database.
             return False
         connection: sqlite3.Connection | None = None
         try:
@@ -549,8 +620,9 @@ class DatabaseManager:
         swap has succeeded and used to put the older file back if it has not, so
         both generations end up where they were. A crash in between leaves the
         second name beside the others rather than losing the file. Where the
-        file system cannot make a hard link the swap goes ahead without that
-        protection.
+        file system cannot make a hard link the older file is moved to that
+        name instead (and moved back if the swap fails); if it cannot even be
+        moved, the swap is abandoned rather than overwrite it unprotected.
         """
         temporary_path: str | None = None
         try:
@@ -568,11 +640,14 @@ class DatabaseManager:
             displaced_to: str | None = None
             older_file_kept_as: str | None = None
             if displace_existing_to is not None and os.path.exists(destination):
-                older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
+                older_file_kept_as, older_file_moved = cls._keep_under_spare_name(displace_existing_to)
                 try:
                     replace_with_retry(destination, displace_existing_to)
                 except OSError:
-                    cls._drop_spare_name(older_file_kept_as)
+                    if older_file_moved:
+                        cls._restore_from_spare_name(older_file_kept_as, displace_existing_to)
+                    else:
+                        cls._drop_spare_name(older_file_kept_as)
                     raise
                 displaced_to = displace_existing_to
             try:
@@ -612,30 +687,35 @@ class DatabaseManager:
                     ) from exc
 
     @staticmethod
-    def _link_to_spare_name(path: str) -> str | None:
-        """Give an existing file a second name beside it and return that name.
+    def _keep_under_spare_name(path: str) -> tuple[str | None, bool]:
+        """Keep an existing file under a spare name beside it; return the name and whether it moved.
 
-        ``os.replace`` onto ``path`` would otherwise destroy the file. Nothing
-        is moved, so ``path`` is where it always was; returns None when there is
-        no file, or when the file system cannot make a hard link.
+        ``os.replace`` onto ``path`` would otherwise destroy the file. A hard
+        link gives it a second name and leaves ``path`` where it was. Where the
+        file system cannot make one, the file is renamed to the spare name
+        instead, which frees ``path`` without destroying anything: carrying on
+        with neither used to let a failed rotation lose the older backup for
+        good. A file that can be neither linked nor moved raises ``OSError``,
+        so the rotation stops before touching it. Returns ``(None, False)``
+        when there is no file.
         """
         if not os.path.exists(path):
-            return None
+            return None, False
         spare = os.path.join(
             os.path.dirname(path) or ".", f".{os.path.basename(path)}.{uuid4().hex}.old"
         )
         try:
             os.link(path, spare)
         except (OSError, NotImplementedError):
-            logging.warning(
-                "Could not protect the older database backup while rotating; carrying on without."
-            )
-            return None
-        return spare
+            pass
+        else:
+            return spare, False
+        replace_with_retry(path, spare)
+        return spare, True
 
     @staticmethod
     def _drop_spare_name(spare: str | None) -> None:
-        """Remove a name made by ``_link_to_spare_name``; the file keeps its other one."""
+        """Remove a spare name; for a hard link the file keeps its other one."""
         if spare is None:
             return
         try:
@@ -1242,23 +1322,16 @@ class DatabaseManager:
             payload = stream.read(MAX_LEGACY_CHAT_FILE_BYTES + 1)
         if len(payload) > MAX_LEGACY_CHAT_FILE_BYTES:
             raise ValueError("legacy chat file exceeds the supported size")
-        return json.loads(payload.decode('utf-8'))
+        return _parse_stored_json(payload.decode('utf-8'))
 
     def _quarantine_legacy_file(self, file_path: str) -> str:
-        quarantine_dir = os.path.join(self.legacy_history_dir, 'quarantine')
-        os.makedirs(quarantine_dir, exist_ok=True)
-        destination = os.path.join(quarantine_dir, os.path.basename(file_path))
-        if os.path.exists(destination):
-            destination = os.path.join(
-                quarantine_dir,
-                f"{os.path.splitext(os.path.basename(file_path))[0]}_{int(datetime.now().timestamp())}.json",
-            )
-        return shutil.move(file_path, destination)
+        return _move_beside_never_replacing(
+            file_path, os.path.join(self.legacy_history_dir, 'quarantine')
+        )
 
     @staticmethod
     def _archive_legacy_file(file_path: str, archive_dir: str) -> str:
-        os.makedirs(archive_dir, exist_ok=True)
-        return shutil.move(file_path, os.path.join(archive_dir, os.path.basename(file_path)))
+        return _move_beside_never_replacing(file_path, archive_dir)
 
     @staticmethod
     def _retired_directory_name(directory: str) -> str | None:
@@ -1344,7 +1417,7 @@ class DatabaseManager:
             return False
         stored = conn.execute(
             "SELECT role, content, sources, thoughts, attachments "
-            "FROM messages WHERE thread_id = ? ORDER BY timestamp, id",
+            "FROM messages WHERE thread_id = ? ORDER BY id",
             (chat_data["id"],),
         )
         for message in chat_data["messages"]:
@@ -1828,7 +1901,7 @@ class DatabaseManager:
                     WHERE id = (
                         SELECT id FROM messages 
                         WHERE thread_id = ? AND role = 'assistant' 
-                        ORDER BY timestamp DESC, id DESC
+                        ORDER BY id DESC
                         LIMIT 1
                     )
                 """, (thread_id,))
@@ -2161,7 +2234,7 @@ class PermanentMemoryManager:
     @classmethod
     def _read_memos(cls, path: str) -> list[str]:
         with open(path, encoding='utf-8') as stream:
-            return cls._validate_memo_data(json.load(stream))
+            return cls._validate_memo_data(_parse_stored_json(stream.read()))
 
     @classmethod
     def _atomic_copy_memos(cls, source: str, destination: str) -> None:
@@ -2353,9 +2426,11 @@ class PermanentMemoryManager:
     def _save_memos(self):
         """Validate and atomically replace the memory file, retaining a backup."""
         directory = os.path.dirname(os.path.abspath(self.memory_file_path))
-        os.makedirs(directory, exist_ok=True)
         temporary_path = None
         try:
+            # Inside the try: a folder that cannot be created is a failed save
+            # like any other, so the caller restores the list it changed.
+            os.makedirs(directory, exist_ok=True)
             fd, temporary_path = tempfile.mkstemp(
                 prefix=f"{os.path.basename(self.memory_file_path)}.",
                 suffix='.tmp',
@@ -2367,7 +2442,7 @@ class PermanentMemoryManager:
                 os.fsync(stream.fileno())
 
             with open(temporary_path, encoding='utf-8') as stream:
-                self._validate_memo_data(json.load(stream))
+                self._validate_memo_data(_parse_stored_json(stream.read()))
             self._prepare_primary_for_save()
             if os.path.exists(self.memory_file_path):
                 self._atomic_copy_memos(self.memory_file_path, self.backup_file_path)
@@ -2411,7 +2486,8 @@ class PermanentMemoryManager:
             self.memos = normalized
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
 
@@ -2441,7 +2517,8 @@ class PermanentMemoryManager:
             self.memos = self.normalize_memos(memos)
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
             logging.info("Permanent memory updated with %s memos.", len(self.memos))
@@ -2453,6 +2530,7 @@ class PermanentMemoryManager:
             self.memos.clear()
             try:
                 self._save_memos()
-            except PersistenceError:
+            except BaseException:
+                # Whatever stopped the save, what was not saved is not kept.
                 self.memos = previous_memos
                 raise
