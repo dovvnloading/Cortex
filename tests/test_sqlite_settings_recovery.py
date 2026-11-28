@@ -842,3 +842,26 @@ def test_a_crash_between_setting_the_log_aside_and_moving_the_primary_recovers_n
     assert recovered.recovery_report is not None
     adopted = Path(f"{recovered.recovery_report.quarantined_path}-wal")
     assert adopted.read_bytes() == b"newest committed frames"
+
+
+def test_a_settings_primary_truncated_to_zero_bytes_is_recovered_not_trusted(tmp_path: Path):
+    """An empty file passed the integrity check and replaced the settings with defaults (#636)."""
+    repository, original = _repository_with_valid_backup(tmp_path)
+    backup_before = repository.backup_path.read_bytes()
+    for suffix in ("-wal", "-shm"):
+        Path(str(repository.db_path) + suffix).unlink(missing_ok=True)
+    repository.db_path.write_bytes(b"")
+
+    recovered = SQLiteSettingsRepository(repository.db_path)
+
+    assert recovered.load().settings == original
+    assert repository.backup_path.read_bytes() == backup_before
+
+
+def test_an_empty_backup_never_passes_the_backup_check(tmp_path: Path):
+    from cortex_backend.repositories.sqlite_backup import quick_check_at_rest
+
+    empty = tmp_path / "empty.sqlite"
+    empty.write_bytes(b"")
+
+    assert quick_check_at_rest(empty, time_limit=5) is False

@@ -35,6 +35,7 @@ from cortex_backend.repositories.sqlite_backup import (
     adopt_orphaned_sidecars,
     failure_detail,
     find_interrupted_recovery,
+    has_sqlite_header,
     move_sidecars,
     open_at_rest,
     put_sidecars_back,
@@ -485,7 +486,8 @@ class DatabaseManager:
         b-tree checks, no index cross-check) for a copy that was just written
         page-for-page from a source that already passed the full one.
         """
-        if not os.path.exists(path):
+        if not os.path.exists(path) or not has_sqlite_header(path):
+            # An empty file passes SQLite's checks as an empty database.
             return False
         connection: sqlite3.Connection | None = None
         try:

@@ -193,6 +193,24 @@ def open_at_rest(path: str | os.PathLike[str]) -> sqlite3.Connection:
     return sqlite3.connect(uri, timeout=SNAPSHOT_WAIT_SECONDS, uri=True)
 
 
+_SQLITE_HEADER = b"SQLite format 3\x00"
+
+
+def has_sqlite_header(path: str | os.PathLike[str]) -> bool:
+    """Whether the file starts with SQLite's 16-byte header.
+
+    SQLite opens an empty file as an empty database, and every integrity
+    check passes on it, so a database truncated to zero bytes looked healthy:
+    it was kept as the primary, backed up, and rotated the real backups out.
+    Every database Cortex writes has this header from its first page on.
+    """
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except OSError:
+        return False
+
+
 def quick_check_at_rest(path: str | os.PathLike[str], *, time_limit: float) -> bool:
     """Whether a backup passes ``PRAGMA quick_check``, giving up after ``time_limit`` seconds.
 
@@ -201,6 +219,8 @@ def quick_check_at_rest(path: str | os.PathLike[str], *, time_limit: float) -> b
     older, verified generation out of its slot, and not knowing is a reason to
     keep the older one. The file is opened with :func:`open_at_rest`.
     """
+    if not has_sqlite_header(path):
+        return False
     deadline = time.monotonic() + time_limit
     connection: sqlite3.Connection | None = None
     try:
