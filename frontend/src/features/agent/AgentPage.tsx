@@ -104,7 +104,8 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
     if (!canStart || !folderConsent || (provider && !cloudConsent)) return;
     const started = await agent.start({
       goal: goal.trim(),
-      project_root: root.trim(),
+      // Exactly the folder the user approved: trimming could name another (#684).
+      project_root: root,
       mode,
       model,
       confirmed_project: folderConsent,

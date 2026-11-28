@@ -106,6 +106,19 @@ describe("AgentPage", () => {
     expect(screen.getByRole("checkbox", { name: /I approve Cortex reading/i, hidden: true })).not.toBeChecked();
   });
 
+  it("sends exactly the approved folder path, never a trimmed one (#684)", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    page(api);
+    await user.click(screen.getByRole("button", { name: "Explain this project" }));
+    await user.type(screen.getByRole("textbox", { name: "Project folder" }), "/tmp/cortex-project ");
+    await user.click(screen.getByRole("checkbox", { name: /I approve Cortex reading and copying/i }));
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    await waitFor(() => expect(api.startAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+      project_root: "/tmp/cortex-project ",
+    })));
+  });
+
   it("uses the existing ApprovalCard and posts only a one-time human decision before resuming", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
