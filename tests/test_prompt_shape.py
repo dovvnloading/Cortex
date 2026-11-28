@@ -473,6 +473,81 @@ AI: a" is a
         assert "left out" in turns[0]["content"]
 
 
+class _PromptRecorder:
+    def __init__(self) -> None:
+        self.prompts: list[list[dict]] = []
+
+    def chat(self, *, model, messages, options, think=None, **kwargs):
+        del model, options, think, kwargs
+        self.prompts.append(messages)
+        return {"message": {"content": "ok"}}
+
+
+def _note_in_current_message(prompt: list[dict]) -> bool:
+    from cortex_backend.services.history_window import HISTORY_OMISSION_NOTE
+
+    return HISTORY_OMISSION_NOTE in str(prompt[-1]["content"])
+
+
+def test_the_model_is_told_history_was_left_out_even_when_no_exchange_fits() -> None:
+    """#611: the note could only open a kept user turn, so when the one earlier
+    exchange did not fit, the model read the follow-up as a new conversation."""
+    history = [
+        {"role": "user", "content": "x" * 20_000},
+        {"role": "assistant", "content": "A short answer."},
+    ]
+    budget = {
+        "query": "And what did I ask before?",
+        "permanent_memories": [],
+        "memories_enabled": False,
+        "user_system_instructions": None,
+        "num_ctx": 2048,
+        "bypass_system_prompt": True,
+    }
+    transcript, turns = SynthesisAgent.fit_history(history, **budget)
+    assert turns == [], "the oversized exchange does not fit"
+    client = _PromptRecorder()
+
+    SynthesisAgent("m", "m", "m", client, bypass_system_prompt=True).generate(
+        budget["query"], transcript, [], False, None, options={"num_ctx": 2048}, history_messages=turns
+    )
+
+    (prompt,) = client.prompts
+    assert [message["role"] for message in prompt] == ["user"], "no exchange is invented"
+    assert _note_in_current_message(prompt)
+    limit = 2048 - SynthesisAgent.output_token_reservation(2048)
+    assert SynthesisAgent.estimate_prompt_tokens(prompt) <= limit
+
+
+def test_measured_trimming_that_drops_the_last_exchange_keeps_the_note(monkeypatch) -> None:
+    turns = [{"role": "user", "content": "OLD question"}, {"role": "assistant", "content": "OLD answer"}]
+    client = _PromptRecorder()
+    agent = SynthesisAgent("m", "m", "m", client, bypass_system_prompt=True)
+
+    def measured(prompt, _options, _cancel):
+        # The tokenizer finds the old exchange far larger than estimated.
+        return 50_000 if any("OLD" in str(message.get("content", "")) for message in prompt) else 50
+
+    monkeypatch.setattr(agent, "_exact_prompt_tokens", measured)
+    agent.generate("next", "User: OLD question\nAI: OLD answer", [], False, None,
+                   options={"num_ctx": 4096}, history_messages=turns)
+
+    (prompt,) = client.prompts
+    assert [message["role"] for message in prompt] == ["user"]
+    assert "OLD" not in str(prompt)
+    assert _note_in_current_message(prompt)
+
+
+def test_a_turn_with_nothing_left_out_carries_no_note() -> None:
+    client = _PromptRecorder()
+    SynthesisAgent("m", "m", "m", client, bypass_system_prompt=True).generate(
+        "first question", "No history available.", [], False, None, options={"num_ctx": 4096}, history_messages=[]
+    )
+
+    (prompt,) = client.prompts
+    assert not _note_in_current_message(prompt)
+
+
 def test_transcript_and_structured_renderings_pair_turns_identically() -> None:
     """One pairing rule, two renderings: neither holds a turn the other lacks.
 
