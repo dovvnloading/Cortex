@@ -269,3 +269,75 @@ def test_the_code_profile_keeps_its_own_event_names(coordinator):
     assert finished is not None
     assert (finished.status, finished.error) == ("failed", "runtime_error")
     assert repository.events(job.job_id)[-1].event == "code.failed"
+
+
+# --- transient store failures are retried (#625) ------------------------------
+
+
+def _fail_once(repository: ExecutionRepository, monkeypatch, name: str) -> list[str]:
+    real = getattr(repository, name)
+    failed: list[str] = []
+
+    def flaky(*args, **kwargs):
+        if not failed:
+            failed.append(name)
+            raise ExecutionRepositoryError("SQLite execution operation failed.")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(repository, name, flaky)
+    return failed
+
+
+def test_a_one_off_read_failure_still_records_the_outcome(execution_repository, monkeypatch):
+    job = _running_job(execution_repository, "job-flaky-read")
+    failed = _fail_once(execution_repository, monkeypatch, "get_job")
+
+    recorded = finish_unsuccessful_job(
+        execution_repository,
+        job.job_id,
+        failure_code="worker_failed",
+        cancel_requested=Event().is_set,
+        wording=WORDING,
+    )
+
+    monkeypatch.undo()
+    assert failed == ["get_job"]
+    assert recorded is True
+    assert execution_repository.get_job(job.job_id).status == "failed"
+
+
+def test_a_one_off_write_failure_still_records_the_outcome(execution_repository, monkeypatch):
+    job = _running_job(execution_repository, "job-flaky-write")
+    failed = _fail_once(execution_repository, monkeypatch, "transition")
+
+    recorded = finish_unsuccessful_job(
+        execution_repository,
+        job.job_id,
+        failure_code="cancelled",
+        cancel_requested=Event().is_set,
+        wording=WORDING,
+    )
+
+    monkeypatch.undo()
+    assert failed == ["transition"]
+    assert recorded is True
+    assert execution_repository.get_job(job.job_id).status == "cancelled"
+
+
+def test_a_lasting_outage_is_reported_as_not_recorded(execution_repository, monkeypatch):
+    job = _running_job(execution_repository, "job-outage")
+
+    def broken(job_id, **kwargs):
+        raise ExecutionRepositoryError("SQLite execution operation failed.")
+
+    monkeypatch.setattr(execution_repository, "transition", broken)
+
+    recorded = finish_unsuccessful_job(
+        execution_repository,
+        job.job_id,
+        failure_code="worker_failed",
+        cancel_requested=Event().is_set,
+        wording=WORDING,
+    )
+
+    assert recorded is False
