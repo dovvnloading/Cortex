@@ -314,6 +314,32 @@ def test_console_launcher_keeps_the_console_and_reaches_uvicorns_own_logger(
     assert "uvicorn record" in console.getvalue()
 
 
+def test_uvicorns_own_console_output_is_redacted_like_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#668: uvicorn's console handler wrote the raw exception before the
+    runtime handler's filter ran, so only the file was redacted."""
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+    launcher_main._configure_logging(tmp_path, "info")
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43126, log_level="info")
+
+    try:
+        raise RuntimeError("PRIVATE_TEST_MARKER from a request body")
+    except RuntimeError:
+        logging.getLogger("uvicorn.error").error("Exception in ASGI application", exc_info=True)
+    logging.getLogger("uvicorn").warning("token=%s", "sk-live-PRIVATE_TEST_MARKER-0123456789abcdef")
+
+    for output in (console.getvalue(), _runtime_log_text(tmp_path)):
+        assert "Exception in ASGI application" in output
+        assert "RuntimeError" in output
+        assert "PRIVATE_TEST_MARKER" not in output
+    # One copy each: the filter is added once, not once per server built.
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43127, log_level="info")
+    for handler in logging.getLogger("uvicorn").handlers:
+        assert sum(isinstance(item, launcher_main._RedactingFilter) for item in handler.filters) == 1
+
+
 @pytest.mark.parametrize(
     ("level", "shown", "hidden"),
     [
