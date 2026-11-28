@@ -107,7 +107,10 @@ def _project(tmp_path: Path) -> Path:
     return root
 
 
-def _app(tmp_path: Path, *, enabled: bool = True, run_store: AgentRunStore | None = None):
+def _app(
+    tmp_path: Path, *, enabled: bool = True, run_store: AgentRunStore | None = None,
+    checkpoint_store: object | None = None,
+):
     dependencies = build_demo_dependencies()
     if enabled:
         settings = dependencies.settings.load().settings
@@ -119,6 +122,7 @@ def _app(tmp_path: Path, *, enabled: bool = True, run_store: AgentRunStore | Non
         agent_run_store=run_store,
         agent_chat_client=object(),
         agent_loop_factory=FakeAgentLoop,
+        workspace_checkpoint_store=checkpoint_store,
     )
     return app
 
@@ -141,6 +145,102 @@ def _run_done(client: TestClient, headers: dict[str, str], run_id: str, status: 
         lambda: client.get(f"{ROOT}/{run_id}", headers=headers).json()["status"] == status,
         describe=f"agent run {status}",
     )
+
+
+def _end_session(app, headers: dict[str, str]) -> None:
+    from dataclasses import replace
+
+    manager = app.state.session_manager
+    digest = manager._digest(headers["Authorization"].removeprefix("Bearer "))
+    manager._sessions[digest] = replace(
+        manager._sessions[digest], expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+
+def _accepted_run(client: TestClient, app, headers: dict[str, str], project: Path):
+    created = client.post(ROOT, headers=headers, json=_start(project))
+    assert created.status_code == 202, created.text
+    run_id = created.json()["id"]
+    _run_done(client, headers, run_id)
+    wait_until(lambda: not app.state.agent_workflow._live[run_id].driving)
+    return run_id, client.post(f"{ROOT}/{run_id}/accept", headers=headers, json={
+        "paths": ["app.py"], "confirmed": True,
+    })
+
+
+def _journal(tmp_path: Path):
+    from cortex_backend.services.workspace_checkpoint import WorkspaceCheckpointStore
+
+    return WorkspaceCheckpointStore(tmp_path / "private-data" / "workspace_checkpoints.sqlite")
+
+
+CHECKPOINTS = "/api/v1/workspace-checkpoints"
+
+
+def test_an_ended_sessions_checkpoint_can_be_discarded_and_frees_the_journal(tmp_path, monkeypatch) -> None:
+    """#575: once its session ended, an Agent checkpoint could be neither
+    restored nor discarded, and it kept the journal full for every later
+    accept."""
+    from cortex_backend.services import workspace_checkpoint as journal
+
+    monkeypatch.setattr(journal, "MAX_TOTAL_CHECKPOINTS", 1)
+    project = _project(tmp_path)
+    app = _app(tmp_path, checkpoint_store=_journal(tmp_path))
+    with TestClient(app) as client:
+        first = session_headers(client, app)
+        first_run, accepted = _accepted_run(client, app, first, project)
+        assert accepted.status_code == 200, accepted.text
+        second = _second_session(client, app)
+        # Session isolation stays: a live session's checkpoint is not listed.
+        assert client.get(CHECKPOINTS, headers=second).json()["checkpoints"] == []
+
+        _end_session(app, first)
+        (project / "app.py").write_bytes(SOURCE)
+        _second_run, blocked = _accepted_run(client, app, second, project)
+        _assert_code(blocked, 409, "checkpoint_limit")
+
+        listed = client.get(CHECKPOINTS, headers=second).json()["checkpoints"]
+        assert [item["id"] for item in listed] == [f"agent-workcopy-{first_run}"]
+        assert listed[0]["paths"] == ["app.py"]
+        assert "goal" not in listed[0]
+        discarded = client.post(
+            f"{CHECKPOINTS}/agent-workcopy-{first_run}/discard", headers=second, json={"confirmed": True},
+        )
+        assert discarded.status_code == 200, discarded.text
+        assert (project / "app.py").read_bytes() == SOURCE
+        assert client.get(CHECKPOINTS, headers=second).json()["checkpoints"] == []
+
+        retried = client.post(f"{ROOT}/{_second_run}/accept", headers=second, json={
+            "paths": ["app.py"], "confirmed": True,
+        })
+        assert retried.status_code == 200, retried.text
+        assert (project / "app.py").read_bytes() == STAGED
+
+
+def test_an_ended_sessions_checkpoint_restores_with_the_agents_own_undo(tmp_path) -> None:
+    project = _project(tmp_path)
+    (project / "removed.py").write_bytes(b"gone = True\n")
+    app = _app(tmp_path, checkpoint_store=_journal(tmp_path))
+    with TestClient(app) as client:
+        first = session_headers(client, app)
+        run_id, accepted = _accepted_run(client, app, first, project)
+        assert accepted.status_code == 200, accepted.text
+        assert (project / "app.py").read_bytes() == STAGED
+        _end_session(app, first)
+        second = _second_session(client, app)
+        target = f"{CHECKPOINTS}/agent-workcopy-{run_id}/restore"
+        assert client.get(CHECKPOINTS, headers=second).json()["checkpoints"][0]["id"] == f"agent-workcopy-{run_id}"
+
+        _assert_code(client.post(target, headers=second, json={"confirmed": False}), 403, "consent_required")
+        restored = client.post(target, headers=second, json={"confirmed": True})
+
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["paths"] == ["app.py"]
+        assert (project / "app.py").read_bytes() == SOURCE
+        assert (project / "removed.py").read_bytes() == b"gone = True\n"
+        assert client.get(CHECKPOINTS, headers=second).json()["checkpoints"] == []
+        # The run itself stays with the session that ended.
+        assert client.get(f"{ROOT}/{run_id}", headers=second).status_code == 404
 
 
 def _second_session(client: TestClient, app) -> dict[str, str]:

@@ -7,7 +7,7 @@ silently re-approving an operation. No tool can write to the real checkout.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 
 EventKind = Literal["step", "output", "approval", "status"]
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
+
+# Every Agent run's recovery checkpoint id starts with this.
+AGENT_CHECKPOINT_PREFIX = "agent-workcopy-"
 
 
 class AgentWorkflowError(RuntimeError):
@@ -711,6 +715,68 @@ class AgentRuns:
             if self._owned(run_id, owner).status not in _TERMINAL or managed.driving:
                 raise AgentWorkflowError("busy")
             return managed.copy.accept(paths, confirmed=confirmed)
+
+    def _recovery_journal(self) -> WorkspaceCheckpointStore | None:
+        if self._checkpoint_store is not None:
+            return self._checkpoint_store
+        database = self._directory() / "workspace_checkpoints.sqlite"
+        return WorkspaceCheckpointStore(database) if database.is_file() else None
+
+    def adopt_orphaned_checkpoints(self, *, owner: str, live_owners: Collection[str]) -> int:
+        """Hand checkpoints of sessions that have ended to the installation owner (#575).
+
+        A run's checkpoint belongs to the bearer session that accepted it, and
+        only that session's Undo could use it. Once the session ended nothing
+        could restore or discard it, yet it kept counting against the shared
+        journal's limits until accepts failed with ``checkpoint_limit``. The
+        Saved recovery checkpoints panel now picks these up, so the user can
+        restore or discard each with its own confirmation. Runs themselves
+        stay session-scoped: only the checkpoint's metadata is listed. Best
+        effort; nothing is adopted when the journal cannot be read.
+        """
+        try:
+            store = self._recovery_journal()
+            if store is None:
+                return 0
+            return store.adopt(id_prefix=AGENT_CHECKPOINT_PREFIX, owner=owner, keep_owners=live_owners)
+        except (AgentWorkflowError, WorkspaceCheckpointError) as exc:
+            logger.warning("Agent checkpoint adoption failed (%s).", type(exc).__name__)
+            return 0
+
+    def restore_adopted_checkpoint(
+        self, checkpoint_id: str, *, owner: str, confirmed: bool,
+    ) -> dict[str, object]:
+        """Restore an adopted Agent checkpoint with the Agent's own undo rules.
+
+        The panel's ordinary restore does not know an Agent record's markers
+        for created and deleted files, so this path verifies and restores it
+        exactly as the run's Undo would.
+        """
+        if confirmed is not True:
+            raise WorkspaceCheckpointError("consent_required")
+        run_id = checkpoint_id.removeprefix(AGENT_CHECKPOINT_PREFIX)
+        if run_id == checkpoint_id:
+            raise WorkspaceCheckpointError("checkpoint_missing")
+        try:
+            store = self._recovery_journal()
+        except AgentWorkflowError as exc:
+            raise WorkspaceCheckpointError("storage_unavailable") from exc
+        if store is None:
+            raise WorkspaceCheckpointError("checkpoint_missing")
+        with self._lock:
+            managed = self._live.get(run_id)
+            if managed is not None and managed.driving:
+                raise WorkspaceCheckpointError("busy")
+            record = store.get(owner=owner, checkpoint_id=checkpoint_id)
+            try:
+                paths = restore(
+                    record.root, run_id, confirmed=True, data_dir=self._directory(), owner=owner,
+                )
+            except WorkCopyError as exc:
+                raise WorkspaceCheckpointError(exc.code) from exc
+            except (AgentWorkflowError, OSError) as exc:
+                raise WorkspaceCheckpointError("restore_failed") from exc
+        return {"status": "restored", "paths": list(paths), "checkpoint_id": checkpoint_id}
 
     def undo(self, run_id: str, *, owner: str, confirmed: bool) -> tuple[str, ...]:
         """Restore only journaled originals after explicit, owner-scoped consent.

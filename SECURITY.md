@@ -126,8 +126,12 @@ The separate Project workspace desktop page has been retired: old
 **Saved recovery checkpoints** panel in Agent mode remains available
 even when Agent execution is disabled. It lists installation-owned
 legacy Project workspace checkpoints, with separately confirmed restore
-and discard; it does not show Agent-run checkpoints. Those use their
-run's own confirmed, session-scoped **Undo** action.
+and discard. An Agent run's checkpoint uses its run's own confirmed,
+session-scoped **Undo** action while that bearer session lasts; once the
+session has ended, the panel lists the checkpoint's metadata (folder, file
+paths, times) so it can be restored or discarded with its own
+confirmation and stops holding journal space. The run itself, its goal and
+its steps stay with the ended session.
 
 The Windows AppContainer launcher uses a fresh low-privilege profile. It
 grants write permission only to the work copy. Permitted toolchain folders

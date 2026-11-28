@@ -172,6 +172,16 @@ class SessionManager:
                 self._sessions[digest] = principal
             return principal
 
+    def active_session_ids(self) -> frozenset[str]:
+        """The ids of sessions that can still authenticate; never their tokens."""
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            return frozenset(
+                principal.session_id
+                for principal in self._sessions.values()
+                if principal.expires_at > now
+            )
+
     def cleanup_expired(self, *, limit: int | None = None) -> int:
         """Remove a bounded batch of expired sessions without exposing tokens.
 

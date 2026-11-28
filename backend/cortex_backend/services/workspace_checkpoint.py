@@ -14,7 +14,7 @@ service: only approved, bounded, indexed source files are captured.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -418,6 +418,29 @@ class WorkspaceCheckpointStore:
                     "UPDATE checkpoints SET state = 'active', updated_at = ? WHERE id = ?",
                     (self._current_time(), checkpoint_id),
                 )
+
+    def adopt(self, *, id_prefix: str, owner: str, keep_owners: Collection[str]) -> int:
+        """Give ``owner`` the checkpoints under ``id_prefix`` whose owner is gone.
+
+        Only the owner column changes: saved bytes, state and timestamps stay
+        as they are, and no project file is touched. Owners in
+        ``keep_owners`` (and ``owner`` itself) keep their records.
+        """
+        if not id_prefix:
+            raise ValueError("id_prefix must not be empty")
+        kept = {owner, *keep_owners}
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id, owner FROM checkpoints WHERE substr(id, 1, ?) = ?",
+                (len(id_prefix), id_prefix),
+            ).fetchall()
+            moved = [str(row[0]) for row in rows if str(row[1]) not in kept]
+            for checkpoint_id in moved:
+                connection.execute(
+                    "UPDATE checkpoints SET owner = ? WHERE id = ?", (owner, checkpoint_id),
+                )
+            return len(moved)
 
     def delete(self, *, owner: str, checkpoint_id: str) -> None:
         """Delete only after an explicit discard or verified finished restore."""

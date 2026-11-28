@@ -99,6 +99,20 @@ def _call(function: Callable[..., Any], **kwargs: Any) -> Any:
         ) from None
 
 
+_AGENT_CHECKPOINT_PREFIX = "agent-workcopy-"
+
+
+def _adopt_orphaned_agent_checkpoints(request: Request, principal: SessionPrincipal) -> None:
+    """List an ended session's Agent checkpoints here, where they can be retired (#575)."""
+    agent = getattr(request.app.state, "agent_workflow", None)
+    manager = getattr(request.app.state, "session_manager", None)
+    if agent is None or manager is None:
+        return
+    agent.adopt_orphaned_checkpoints(
+        owner=principal.installation_principal_id, live_owners=manager.active_session_ids(),
+    )
+
+
 def register(router: APIRouter, *, require_session, dependencies) -> None:
     del dependencies
     # All methods and requests use the same bearer-session dependency as chat.
@@ -109,6 +123,7 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         principal: SessionPrincipal = Depends(require_session),
     ) -> Any:
         """Metadata only: never send saved source bytes to the browser."""
+        _adopt_orphaned_agent_checkpoints(request, principal)
         return {"checkpoints": _call(
             request.app.state.workspace_workflow.list_checkpoints,
             owner=principal.installation_principal_id,
@@ -119,6 +134,13 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
         checkpoint_id: str, payload: ConfirmWorkspace, request: Request,
         principal: SessionPrincipal = Depends(require_session),
     ) -> Any:
+        if checkpoint_id.startswith(_AGENT_CHECKPOINT_PREFIX):
+            return _call(
+                request.app.state.agent_workflow.restore_adopted_checkpoint,
+                owner=principal.installation_principal_id,
+                checkpoint_id=checkpoint_id,
+                confirmed=payload.confirmed,
+            )
         return _call(
             request.app.state.workspace_workflow.restore_checkpoint,
             owner=principal.installation_principal_id,

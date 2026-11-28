@@ -332,6 +332,36 @@ def test_limits_and_owners_fail_closed_without_half_records(tmp_path, monkeypatc
         store.delete(owner="wrong-installation", checkpoint_id="checkpoint-a")
 
 
+def test_adopt_moves_only_prefixed_records_of_owners_that_are_gone(tmp_path):
+    """#575: an ended session's Agent checkpoint gets a reachable owner."""
+    root, source = _project(tmp_path)
+    store = _store(tmp_path)
+    info = root.lstat()
+    contents = source.read_bytes()
+
+    def prepare(owner: str, identifier: str) -> None:
+        store.prepare(
+            owner=owner, checkpoint_id=identifier, root=root,
+            root_identity=(info.st_dev, info.st_ino),
+            candidates={"app.py": (contents, contents.replace(b"42", b"43"), source.stat().st_mode)},
+        )
+
+    prepare("ended-session", "agent-workcopy-ended")
+    prepare("live-session", "agent-workcopy-live")
+    prepare("another-ended-session", "legacy-workspace")
+    before = store.get(owner="ended-session", checkpoint_id="agent-workcopy-ended")
+
+    moved = store.adopt(id_prefix="agent-workcopy-", owner="installation-a", keep_owners={"live-session"})
+
+    assert moved == 1
+    adopted = store.get(owner="installation-a", checkpoint_id="agent-workcopy-ended")
+    assert (adopted.files, adopted.state, adopted.updated_at) == (before.files, before.state, before.updated_at)
+    assert store.get(owner="live-session", checkpoint_id="agent-workcopy-live").owner == "live-session"
+    assert store.get(owner="another-ended-session", checkpoint_id="legacy-workspace").owner == "another-ended-session"
+    assert store.adopt(id_prefix="agent-workcopy-", owner="installation-a", keep_owners={"live-session"}) == 0
+    assert source.read_bytes() == contents
+
+
 def test_discard_only_erases_backup_after_confirmation(tmp_path):
     workflow, store, session_id, source = _workflow(tmp_path)
     _stage(workflow, session_id, source)
