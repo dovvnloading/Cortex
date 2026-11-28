@@ -36,10 +36,13 @@ jobs:
       BRANCH: chore/dependency-refresh
     steps:
       # The push at the end needs the token that checkout stores, so this is
-      # the one checkout that keeps credentials.
+      # the one checkout that keeps credentials. Always main: the pull request
+      # targets main, so a refresh dispatched from another branch must not
+      # carry that branch's commits into it.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
+          ref: refs/heads/main
           persist-credentials: true
 
       - name: Set up Python
@@ -78,12 +81,21 @@ jobs:
             return
           }
           $existing = gh pr list --head $env:BRANCH --state open --json number --jq '.[0].number'
+          # The checkout fetched only main, so there is no remote-tracking ref
+          # for an earlier refresh branch and a bare --force-with-lease would
+          # expect it not to exist. Read its tip and lease on exactly that:
+          # an empty value means "must not exist yet".
+          $remote = git ls-remote --heads origin "refs/heads/$($env:BRANCH)"
+          if ($LASTEXITCODE -ne 0) { throw "Could not read the remote refresh branch." }
+          $observed = if ($remote) { ("$remote" -split '\s+')[0] } else { "" }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B $env:BRANCH
           git add requirements.lock.txt requirements-dev.lock.txt frontend/package-lock.json
           git commit -m "chore(deps): refresh the dependency locks"
-          git push --force-with-lease origin $env:BRANCH
+          if ($LASTEXITCODE -ne 0) { throw "Committing the refreshed locks failed." }
+          git push "--force-with-lease=refs/heads/$($env:BRANCH):$observed" origin "HEAD:refs/heads/$($env:BRANCH)"
+          if ($LASTEXITCODE -ne 0) { throw "Pushing the refresh branch failed." }
           if ($existing) {
             Write-Host "Updated the open pull request #$existing."
             return
