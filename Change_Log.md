@@ -154,6 +154,9 @@ are named where they apply.
 
 Chat and streaming
 
+- Preserve Unicode answer text while streaming: envelope recognition now uses
+  the finished-answer parser's case-insensitive matching on original text,
+  avoiding stray tags or lost characters at chunk boundaries (issue #573).
 - Stop keeps the part of the answer already on screen instead of erasing it
   (#279; see "Stop Keeps the Answer" below).
 - Stop is honoured during translation (#252), and a turn that was already
