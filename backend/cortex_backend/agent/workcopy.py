@@ -428,6 +428,40 @@ def _git(root: Path, *arguments: str, max_bytes: int = MAX_GIT_TREE_BYTES) -> by
     return result.stdout
 
 
+# The work copy's own Git history: Git tools never use the source project's
+# metadata, which the linked worktree's .git file points at.
+SHADOW_GIT_DIR = ".cortex-agent-git"
+_SHADOW_EXCLUDES = ".cortex-agent-git/\n.cortex-agent-git-home/\n.cortex-agent-tmp/\n"
+
+
+def _init_shadow_baseline(copy: Path) -> None:
+    """Commit the work copy's starting contents as the baseline of its own history.
+
+    The Git tool used to create this history at its first call, from the files
+    as they were then: an edit made before any Git call was swallowed into the
+    baseline, so git_status and git_diff showed nothing and the requested
+    commit came out empty (#582). Here it is made before the model has run,
+    from exactly what the work copy started with. A fresh bare repository has
+    no configuration, and system and global configuration are disabled, so no
+    hook, filter or attribute driver from the project can run.
+    """
+    if os.path.lexists(copy / SHADOW_GIT_DIR):
+        raise WorkCopyError("unsafe_path")
+    _git(copy, "init", "--bare", "-q", SHADOW_GIT_DIR)
+    exclude = copy / SHADOW_GIT_DIR / "info" / "exclude"
+    if _is_reparse(exclude.lstat()) or not exclude.is_file():
+        raise WorkCopyError("unsafe_path")
+    exclude.write_text(_SHADOW_EXCLUDES, encoding="utf-8")
+    isolated = (
+        f"--git-dir={SHADOW_GIT_DIR}", "--work-tree=.", "-c", "core.bare=false",
+        "-c", "commit.gpgSign=false", "-c", "diff.external=",
+        "-c", f"core.attributesFile={os.devnull}", "-c", "submodule.recurse=false",
+        "-c", "user.name=Cortex Agent", "-c", "user.email=agent@cortex.invalid",
+    )
+    _git(copy, *isolated, "add", "--all", "--", ".")
+    _git(copy, *isolated, "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", "Work-copy baseline")
+
+
 def _head(root: Path) -> str | None:
     try:
         metadata = (root / ".git").lstat()
@@ -502,6 +536,11 @@ class WorkCopy:
         self._lock = RLock()
         self._discarded = False
 
+    @property
+    def has_git_baseline(self) -> bool:
+        """Whether this copy has its own Git history with its starting contents."""
+        return self._git_worktree
+
     @classmethod
     def create(
         cls, project_root: str | os.PathLike[str], run_id: str, confirmed: bool = True,
@@ -560,6 +599,8 @@ class WorkCopy:
                 for relative, item in source.items():
                     _write(destination, relative, item.contents, item.mode)
                 baseline = _snapshot(destination, ignores)
+                if git:
+                    _init_shadow_baseline(destination)
                 _check_root(root, root_identity)
                 return cls(
                     root=root, path=destination, data_dir=private, run_id=run_id,
