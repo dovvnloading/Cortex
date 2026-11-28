@@ -23,7 +23,7 @@ import ssl
 import struct
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
@@ -32,6 +32,8 @@ from uuid import uuid4
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+
+from .stoppable_http import StoppedBeforeResponse, open_unless_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,32 @@ _MAX_SPLIT_PARTS = 256
 # It contains only names, stable file identities and a request digest, never
 # signed download URLs or bearer tokens. The cap prevents unbounded JSON reads.
 _SPLIT_JOURNAL_PATTERN = re.compile(r"^\.split-publish-[0-9a-f]{32}\.json$")
+# A transfer stages into ``.download-<uuid>.part`` and removes it itself, but
+# a hard exit skips that, and every retry staged under a new name: the space
+# was lost for good, out of sight of the model list. Staging left untouched
+# this long belongs to no live transfer -- a live one writes continuously,
+# and a stalled one gives up within _STALL_WINDOW_SECONDS -- and is removed.
+_STAGING_NAME_PATTERN = re.compile(r"^\.download-[0-9a-f]{32}\.part$")
+_ABANDONED_STAGING_SECONDS = 10 * 60
+
+
+def _reclaim_abandoned_staging(directory: Path) -> None:
+    """Remove download staging an earlier transfer left in ``directory``."""
+    cutoff = time.time() - _ABANDONED_STAGING_SECONDS
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if _STAGING_NAME_PATTERN.fullmatch(entry.name) is None:
+            continue
+        try:
+            status = entry.lstat()
+            if not stat.S_ISREG(status.st_mode) or status.st_mtime > cutoff:
+                continue
+            entry.unlink()
+        except OSError:
+            logger.debug("Could not remove abandoned download staging.")
 _SPLIT_STAGING_PATTERN = re.compile(r"^\.download-[0-9a-f]{32}\.part$")
 _MAX_SPLIT_JOURNAL_BYTES = 192 * 1024
 _HF_BLOB_URL_PATTERN = re.compile(r"^(https://huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
@@ -379,14 +407,24 @@ def split_gguf_parts(url: str, filename: str) -> tuple[tuple[str, str], ...] | N
     ``name-00003-of-00003.gguf``, and no single part is usable alone. Given the
     URL and file name of any one part this names all of them, in order, with the
     other parts' URLs built by swapping the part number in the URL's last path
-    segment. ``None`` means an ordinary single file (including a name that only
-    looks like a part but is not consistent, such as part 5 of 3).
+    segment. ``None`` means an ordinary single file, or a set of one part.
+
+    A name that is a part of a split model this cannot fetch -- more parts
+    than are supported, or an impossible part number such as 5 of 3 -- raises
+    ``GGUFDownloadError``: downloading it as a single file only produced a
+    part the models folder will never list.
     """
     match = _SPLIT_NAME_PATTERN.fullmatch(filename)
     if match is None:
         return None
     count, index = int(match.group("total")), int(match.group("index"))
-    if not 2 <= count <= _MAX_SPLIT_PARTS or not 1 <= index <= count:
+    if not 1 <= index <= count:
+        raise GGUFDownloadError("This file name claims a part number that its split model does not have.")
+    if count > _MAX_SPLIT_PARTS:
+        raise GGUFDownloadError(
+            f"This split model has {count} parts; Cortex can download at most {_MAX_SPLIT_PARTS}."
+        )
+    if count < 2:
         return None
     parts = urlsplit(url)
     directory, _, tail = parts.path.rpartition("/")
@@ -634,14 +672,22 @@ def download_gguf(
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
     allow_overwrite: bool = False,
+    commit: Callable[[], bool] | None = None,
 ) -> Path:
-    """Stream a validated GGUF into ``directory`` without clobbering a model."""
+    """Stream a validated GGUF into ``directory`` without clobbering a model.
+
+    ``commit`` is called once, right before the model is published. Returning
+    False means Stop won: nothing is published and the download reports
+    cancellation. Returning True means the result is committed: a later Stop
+    can no longer win, so the published model is never rolled back for one.
+    """
     if not isinstance(target_filename, str) or _SAFE_FILENAME_PATTERN.fullmatch(target_filename) is None:
         raise GGUFDownloadError("The target filename must be a plain '.gguf' filename.")
     if not isinstance(url, str) or _contains_control_character(url):
         raise GGUFDownloadError("The download URL contains invalid control characters.")
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
+    _reclaim_abandoned_staging(directory)
     destination = directory / target_filename
     if destination.exists() and not allow_overwrite:
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
@@ -664,15 +710,19 @@ def download_gguf(
         ).run()
         _validate_gguf_file(temp_path)
         _raise_if_cancelled(cancellation_event)
+        if commit is not None and not commit():
+            raise GGUFDownloadError("Download cancelled.")
+        committed = commit is not None
         staged_identity = _file_identity(temp_path) if not allow_overwrite else None
         _publish(temp_path, destination, allow_overwrite=allow_overwrite)
         published = True
         # Publication can race Stop. For a new file, roll back only the model
         # this transfer created; never unlink a concurrent writer's replacement.
-        if not allow_overwrite:
+        # Once committed, Stop no longer wins and nothing is rolled back for it.
+        if not allow_overwrite and not committed:
             _raise_if_cancelled(cancellation_event)
         reporter.success(destination.stat().st_size)
-        if not allow_overwrite:
+        if not allow_overwrite and not committed:
             _raise_if_cancelled(cancellation_event)
     except BaseException:
         if published and not allow_overwrite:
@@ -703,8 +753,13 @@ def download_gguf_set(
     http_client: httpx.Client | None = None,
     max_download_bytes: int | None = None,
     min_free_space_bytes: int | None = None,
+    commit: Callable[[], bool] | None = None,
 ) -> tuple[Path, ...]:
     """Fetch every ``(url, filename)`` part of a split model, all or nothing.
+
+    ``commit`` works as in ``download_gguf``: called once before the first
+    part is published, False cancels with nothing published, True means a
+    later Stop no longer rolls the set back.
 
     Parts download one after another into staging files, each validated as it
     arrives, and are moved into ``directory`` only once every one is complete. A
@@ -732,6 +787,7 @@ def download_gguf_set(
         raise GGUFDownloadError("The parts of a split model must have different file names.")
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
+    _reclaim_abandoned_staging(directory)
     destinations = [directory / name for name in names]
     # A previous Cortex process may have died after publishing shard one.
     # Its fsynced journal predates that publication and proves exactly which
@@ -782,15 +838,22 @@ def download_gguf_set(
                 )
             journal_identities.append(identity)
         _raise_if_cancelled(cancellation_event)
+        if commit is not None and not commit():
+            raise GGUFDownloadError("Download cancelled.")
+        # After a commit Stop no longer wins: the set is finished, not undone.
+        stop_still_counts = commit is None
         publication_journal = _write_split_publication_journal(
             parts, staged, journal_identities, directory
         )
         for staging_path, destination in zip(staged, destinations, strict=True):
-            _raise_if_cancelled(cancellation_event)
+            if stop_still_counts:
+                _raise_if_cancelled(cancellation_event)
             _publish(staging_path, destination, allow_overwrite=False)
-            _raise_if_cancelled(cancellation_event)
+            if stop_still_counts:
+                _raise_if_cancelled(cancellation_event)
         reporter.success(fetched_bytes)
-        _raise_if_cancelled(cancellation_event)
+        if stop_still_counts:
+            _raise_if_cancelled(cancellation_event)
         complete = True
     finally:
         # Best effort, and every file gets its turn: a file that cannot be
@@ -1196,8 +1259,11 @@ class _GGUFTransfer:
             delay = _RETRY_BASE_DELAY_SECONDS * 2 ** max(stalled - 1, 0)
             self._wait(min(_RETRY_MAX_DELAY_SECONDS, max(delay, retry_after)))
 
+    def _stop_requested(self) -> bool:
+        return self._cancellation_event is not None and self._cancellation_event.is_set()
+
     def _raise_if_cancelled(self) -> None:
-        if self._cancellation_event is not None and self._cancellation_event.is_set():
+        if self._stop_requested():
             raise GGUFDownloadError("Download cancelled.")
 
     def _wait(self, seconds: float) -> None:
@@ -1243,24 +1309,40 @@ class _GGUFTransfer:
         """Follow redirects by hand, validating every hop, and yield the final response."""
         current_url = _validate_download_url(self._url)
         for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
-            with self._client.stream(
-                "GET",
-                current_url,
-                headers=_request_headers(current_url, resume),
-                follow_redirects=False,
-                timeout=_DOWNLOAD_TIMEOUT,
-            ) as response:
-                if response.is_redirect:
-                    if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
-                        raise GGUFDownloadError("The download exceeded the redirect limit.")
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise GGUFDownloadError("The download redirect did not include a target URL.")
-                    current_url = _validate_download_url(urljoin(current_url, location))
-                    continue
-                _validate_download_url(str(response.url))
-                yield response
-                return
+            # Each hop is checked for Stop, and waiting for a hop's headers is
+            # done so that Stop ends it too: entering the stream blocks until
+            # the headers arrive, which a stalled server or CDN can delay for
+            # the whole read timeout.
+            self._raise_if_cancelled()
+
+            def open_hop(url: str = current_url) -> AbstractContextManager[httpx.Response]:
+                return self._client.stream(
+                    "GET",
+                    url,
+                    headers=_request_headers(url, resume),
+                    follow_redirects=False,
+                    timeout=_DOWNLOAD_TIMEOUT,
+                )
+
+            try:
+                with open_unless_stopped(
+                    open_hop,
+                    self._stop_requested if self._cancellation_event is not None else None,
+                    name="cortex-gguf-open",
+                ) as response:
+                    if response.is_redirect:
+                        if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
+                            raise GGUFDownloadError("The download exceeded the redirect limit.")
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise GGUFDownloadError("The download redirect did not include a target URL.")
+                        current_url = _validate_download_url(urljoin(current_url, location))
+                        continue
+                    _validate_download_url(str(response.url))
+                    yield response
+                    return
+            except StoppedBeforeResponse:
+                raise GGUFDownloadError("Download cancelled.") from None
         raise GGUFDownloadError("The download exceeded the redirect limit.")  # pragma: no cover
 
     def _request(self, resume: _ResumePoint | None) -> bool:

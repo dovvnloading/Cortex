@@ -766,6 +766,18 @@ class ExecutionRepository:
                 raise exc
             return job, False
 
+    def find_job_for_request(self, *, owner: str, request_id: str) -> ExecutionJob | None:
+        """The job already admitted for this owner's request id, if any."""
+
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT job_id FROM execution_jobs WHERE owner = ? AND request_id = ?",
+                (owner, request_id),
+            ).fetchone()
+        if existing is None:
+            return None
+        return self.get_job(str(existing["job_id"]), owner=owner)
+
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
         with self.connect() as connection:
             row = self._read_job(connection, job_id, self._now())
@@ -2145,22 +2157,40 @@ class ExecutionRepository:
                 ).fetchall()
             for artifact_row in artifact_rows:
                 artifact_id = str(artifact_row["artifact_id"])
+                stored_path = str(artifact_row["path"])
                 quarantine = self.quarantine_root / f"{artifact_id}-{uuid4().hex}.artifact"
                 try:
-                    path = self._validated_cleanup_path(self._stored_path(artifact_row["path"]))
+                    path = self._validated_cleanup_path(self._stored_path(stored_path))
                     self._validated_quarantine_path(quarantine)
-                    self._record_artifact_cleanup(artifact_id, path, quarantine)
                 except ArtifactCleanupRejected as exc:
                     self._discard_artifact_rows(artifact_id, exc)
                     skipped += 1
                     continue
                 except ArtifactCleanupBlocked as exc:
-                    _LOGGER.debug("Skipped an expired artifact (%s).", type(exc).__name__)
+                    # Record it anyway, untouched. Without a tombstone it stays
+                    # at the head of this query and every pass selects it again,
+                    # so it starves every artifact behind it (#619). A tombstone
+                    # re-validates both paths before touching any file, and one
+                    # that is still blocked rotates to the back of the queue.
+                    _LOGGER.debug("Deferred an expired artifact (%s).", type(exc).__name__)
+                    try:
+                        self._record_artifact_cleanup(
+                            artifact_id, stored_path, self._stored_text(quarantine)
+                        )
+                    except ExecutionRepositoryError:
+                        pass  # Selected again next pass.
                     skipped += 1
                     continue
-                reclaimed, deferred = self._finish_artifact_cleanup(
-                    artifact_id, str(path), str(quarantine), "pending"
+                # Another pass may have recorded this artifact first, with its
+                # own quarantine path, and already moved the file there (#620).
+                # Carry on from the tombstone that was persisted, never from
+                # this pass's own unrecorded guess.
+                recorded = self._record_artifact_cleanup(
+                    artifact_id, self._stored_text(path), self._stored_text(quarantine)
                 )
+                if recorded is None:
+                    continue  # Already finished and removed by the other pass.
+                reclaimed, deferred = self._finish_artifact_cleanup(artifact_id, *recorded)
                 removed_artifacts += reclaimed
                 skipped += deferred
 
@@ -2280,9 +2310,17 @@ class ExecutionRepository:
         return path
 
     def _record_artifact_cleanup(
-        self, artifact_id: str, path: Path, quarantine: Path
-    ) -> None:
+        self, artifact_id: str, path_text: str, quarantine_text: str
+    ) -> tuple[str, str, str] | None:
+        """Record a cleanup tombstone unless one exists; return the persisted one.
+
+        Returns ``(path, quarantine_path, state)`` as stored -- which is another
+        pass's row when that pass recorded this artifact first -- or None when
+        that pass has since finished and removed it.
+        """
+
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 INSERT INTO execution_artifact_cleanup
@@ -2290,8 +2328,18 @@ class ExecutionRepository:
                 VALUES (?, ?, ?, 'pending', ?)
                 ON CONFLICT(artifact_id) DO NOTHING
                 """,
-                (artifact_id, self._stored_text(path), self._stored_text(quarantine), self._now()),
+                (artifact_id, path_text, quarantine_text, self._now()),
             )
+            row = connection.execute(
+                """
+                SELECT path, quarantine_path, state
+                FROM execution_artifact_cleanup WHERE artifact_id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["path"]), str(row["quarantine_path"]), str(row["state"])
 
     def _resume_artifact_cleanup(self, *, limit: int) -> tuple[int, int]:
         """Finish up to ``limit`` recorded tombstones; return (reclaimed, skipped)."""

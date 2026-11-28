@@ -74,7 +74,9 @@ def _mixed_messages(rng: random.Random, count: int) -> list[dict]:
 def _reference_select_history(messages: list[dict], **kwargs) -> list[dict]:
     """The pre-optimisation walk, rendering every candidate from scratch.
 
-    It keeps the retention rule the selection has now: a contiguous run of the
+    It keeps the budget rule the selection has now -- the larger of the
+    transcript and the one-message-per-turn rendering (#600) -- and the
+    retention rule: a contiguous run of the
     newest exchanges, ending at the first user turn that does not fit (the walk
     used to skip such a turn and carry on, which left a hole in the middle of
     the conversation). What this reference deliberately does *not* share with
@@ -82,7 +84,7 @@ def _reference_select_history(messages: list[dict], **kwargs) -> list[dict]:
     scratch instead of being built up chunk by chunk, and that is what these
     tests hold the two to.
     """
-    from cortex_backend.services.history_window import with_omission_note
+    from cortex_backend.services.history_window import with_omission_note, with_omission_note_on_turns
     from cortex_backend.services.llm import PromptTemplate
 
     limit = max(256, int(kwargs["num_ctx"])) - SynthesisAgent.output_token_reservation(kwargs["num_ctx"])
@@ -108,7 +110,29 @@ def _reference_select_history(messages: list[dict], **kwargs) -> list[dict]:
             bypass_system_prompt=kwargs["bypass_system_prompt"],
             host_observations=kwargs["host_observations"],
         )
-        if SynthesisAgent.estimate_prompt_tokens(prompt) > limit:
+        # A turn is usually sent with its history as one message per turn, and
+        # the walk budgets for whichever of the two renderings is larger (#600).
+        # Built from scratch here too: the walk's running per-turn cost must
+        # agree with it.
+        turns = SynthesisAgent._paired_history_messages(candidate)
+        if index > 0 and turns:
+            turns = with_omission_note_on_turns(turns)
+        structured = PromptTemplate.build_synthesis_prompt(
+            kwargs["query"],
+            "",
+            kwargs["permanent_memories"],
+            kwargs["memories_enabled"],
+            kwargs["user_system_instructions"],
+            kwargs["attachments"],
+            code_execution_eligible=kwargs["code_execution_eligible"],
+            bypass_system_prompt=kwargs["bypass_system_prompt"],
+            host_observations=kwargs["host_observations"],
+            history_messages=tuple(turns),
+        )
+        if max(
+            SynthesisAgent.estimate_prompt_tokens(prompt),
+            SynthesisAgent.estimate_prompt_tokens(structured),
+        ) > limit:
             break
         selected = candidate
     return selected

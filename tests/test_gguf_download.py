@@ -637,7 +637,7 @@ def test_gguf_download_job_failure_reports_the_specific_reason(monkeypatch, tmp_
     already-safe-to-show reason (refusing to overwrite, out of disk space,
     not a GGUF file) with "Job failed. Please try again."."""
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, commit=None):
         del url, filename, directory, progress_callback, cancellation_event
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
 
@@ -674,7 +674,7 @@ def test_gguf_download_runs_independently_of_the_models_job_kind(monkeypatch, tm
     was added instead of reusing "models" (which only allows one active job)."""
     release_download = threading.Event()
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, commit=None):
         del url, cancellation_event
         if progress_callback:
             progress_callback(GGUFDownloadProgress(filename=filename, status="starting"))
@@ -2670,15 +2670,32 @@ def test_split_gguf_parts_names_every_part_in_order() -> None:
     [
         ("https://example.com/model.gguf", "model.gguf"),
         ("https://example.com/model-00001-of-00001.gguf", "model-00001-of-00001.gguf"),  # one part is one file
-        ("https://example.com/model-00005-of-00003.gguf", "model-00005-of-00003.gguf"),  # part 5 of 3
-        ("https://example.com/model-00000-of-00003.gguf", "model-00000-of-00003.gguf"),
-        ("https://example.com/model-00001-of-00999.gguf", "model-00001-of-00999.gguf"),  # over the cap
         ("https://example.com/model-1-of-3.gguf", "model-1-of-3.gguf"),  # not the five-digit form
         ("https://example.com/elsewhere/other.gguf", "model-00001-of-00003.gguf"),  # url is not this file
     ],
 )
 def test_split_gguf_parts_leaves_ordinary_files_alone(url: str, filename: str) -> None:
     assert split_gguf_parts(url, filename) is None
+
+
+@pytest.mark.parametrize(
+    ("url", "filename"),
+    [
+        ("https://example.com/model-00005-of-00003.gguf", "model-00005-of-00003.gguf"),  # part 5 of 3
+        ("https://example.com/model-00000-of-00003.gguf", "model-00000-of-00003.gguf"),
+        ("https://example.com/model-00001-of-00257.gguf", "model-00001-of-00257.gguf"),  # one over the cap
+        ("https://example.com/model-00001-of-00999.gguf", "model-00001-of-00999.gguf"),
+    ],
+)
+def test_a_split_part_that_cannot_be_fetched_is_refused_not_downloaded_alone(url: str, filename: str) -> None:
+    """Such a name used to download as a single file the models folder never lists (#645)."""
+    with pytest.raises(GGUFDownloadError):
+        split_gguf_parts(url, filename)
+
+
+def test_the_largest_supported_split_is_still_accepted() -> None:
+    parts = split_gguf_parts("https://example.com/model-00001-of-00256.gguf", "model-00001-of-00256.gguf")
+    assert parts is not None and len(parts) == 256
 
 
 def test_split_gguf_parts_keeps_the_suffix_case_of_the_given_name() -> None:
@@ -2993,7 +3010,7 @@ def _download_job(client: TestClient, headers: dict[str, str], payload: dict[str
 def test_the_download_route_fetches_a_split_model_as_one_job(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_download_gguf_set(parts, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf_set(parts, directory, *, progress_callback=None, cancellation_event=None, commit=None):
         del cancellation_event
         captured["parts"], captured["directory"] = parts, Path(directory)
         assert progress_callback is not None
@@ -3028,7 +3045,7 @@ def test_the_download_route_fetches_a_split_model_as_one_job(monkeypatch, tmp_pa
 def test_the_download_route_saves_a_subfolder_file_under_its_basename(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None):
+    def fake_download_gguf(url, filename, directory, *, progress_callback=None, cancellation_event=None, commit=None):
         del progress_callback, cancellation_event
         captured.update(url=url, filename=filename, directory=Path(directory))
         return Path(directory) / filename
@@ -3059,3 +3076,89 @@ def test_the_download_route_rejects_a_path_that_escapes_the_repository(tmp_path:
             headers=_session(client, app),
         )
     assert response.status_code == 400
+
+
+# --- the registry's commit boundary sits before publication (#643) ------------
+
+
+def _serving(content: bytes) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)))
+
+
+def test_a_stop_that_wins_the_commit_publishes_nothing(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    models = tmp_path / "models"
+
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf(
+            "https://example.com/model.gguf", "model.gguf", models,
+            http_client=_serving(content), cancellation_event=threading.Event(), commit=lambda: False,
+        )
+
+    assert not (models / "model.gguf").exists()
+    assert not any(path.name.startswith(".download-") for path in models.iterdir())
+
+
+def test_a_stop_after_the_commit_no_longer_undoes_the_install(tmp_path: Path) -> None:
+    """The registry recorded such a Stop as cancelled while the model stayed installed (#643)."""
+    content = _valid_gguf_content(tmp_path)
+    models = tmp_path / "models"
+    stop = threading.Event()
+
+    def commit_then_stop() -> bool:
+        stop.set()  # Stop arrives just after the commit was accepted
+        return True
+
+    path = download_gguf(
+        "https://example.com/model.gguf", "model.gguf", models,
+        http_client=_serving(content), cancellation_event=stop, commit=commit_then_stop,
+    )
+
+    assert path == models / "model.gguf"
+    assert path.read_bytes() == content
+
+
+def test_a_split_set_honours_the_commit_both_ways(tmp_path: Path) -> None:
+    content = _valid_gguf_content(tmp_path)
+    parts = tuple(
+        (f"https://example.com/model-0000{n}-of-00002.gguf", f"model-0000{n}-of-00002.gguf") for n in (1, 2)
+    )
+    refused = tmp_path / "refused"
+    with pytest.raises(GGUFDownloadError, match="cancelled"):
+        download_gguf_set(
+            parts, refused, http_client=_serving(content),
+            cancellation_event=threading.Event(), commit=lambda: False,
+        )
+    assert not any(path.suffix == ".gguf" for path in refused.iterdir())
+
+    accepted = tmp_path / "accepted"
+    stop = threading.Event()
+
+    def commit_then_stop() -> bool:
+        stop.set()
+        return True
+
+    published = download_gguf_set(
+        parts, accepted, http_client=_serving(content), cancellation_event=stop, commit=commit_then_stop,
+    )
+    assert all(path.exists() for path in published)
+
+
+def test_the_download_route_refuses_an_unsupported_split_before_any_transfer(monkeypatch, tmp_path: Path) -> None:
+    """A 257-part name used to download as one useless file and report success (#645)."""
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("nothing may be downloaded for a refused request")
+
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf", must_not_run)
+    monkeypatch.setattr("cortex_backend.api.routers.models.download_gguf_set", must_not_run)
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",), default_gguf_models_dir=tmp_path)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/models/gguf/downloads",
+            json={"source": "huggingface", "repo_id": "owner/name", "filename": "model-00001-of-00257.gguf"},
+            headers=_session(client, app),
+        )
+
+    assert response.status_code == 400
+    assert "256" in response.json()["detail"]

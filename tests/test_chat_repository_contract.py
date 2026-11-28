@@ -262,7 +262,8 @@ def test_sqlite_partial_read_statements_are_prebuilt_from_schema_columns() -> No
     assert len(queries) == (1 << len(MESSAGE_FIELDS)) - 1
     assert queries[frozenset(("id", "stats"))] == (
         "SELECT id, generation_stats_json AS stats FROM messages "
-        "WHERE thread_id = ? ORDER BY timestamp ASC, id ASC"
+        # Written order, not the clock's (#648).
+        "WHERE thread_id = ? ORDER BY id ASC"
     )
     assert all(query.count("?") == 1 for query in queries.values())
     assert frozenset(("id", "content FROM messages; --")) not in queries
