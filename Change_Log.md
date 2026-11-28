@@ -37,6 +37,13 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   journals, authenticated recovery/workspace APIs and the read-only CLI
   remain available without data migration or automatic source writes.
 
+### Fixed
+
+- The release workflow builds only an existing tag that points at the
+  verified commit: a dispatched name is resolved as a tag, never a branch of
+  the same name, and the draft is created with `--verify-tag` only after
+  checking the tag still names that commit (#715; #728).
+
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
