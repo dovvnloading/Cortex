@@ -130,6 +130,27 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 - A build killed between its two renames no longer leaves the source launch
   without a bundle: the newest complete backup is restored first (#669;
   #739).
+- A brief store error while recording how a job ended no longer leaves the
+  job running with no worker: the write is retried, and a job still
+  unfinished is picked up by startup recovery (#625; #741).
+- A code result close to the 64 KiB limit is measured the same way by the
+  worker and the app, so a valid result is no longer refused, and a result
+  whose dictionary keys were shortened says it was truncated (#594, #599;
+  #741).
+- Stop during attachment staging ends the job as cancelled instead of as a
+  storage failure, and a later output that fails to save, or an image job
+  whose completion cannot be recorded, no longer leaves earlier outputs
+  published (#596, #597, #598; #741).
+- Artifact retention keeps moving past an expired artifact whose path cannot
+  be checked, and two overlapping passes no longer orphan a quarantined file
+  (#619, #620; #741).
+- Run workspaces of finished jobs that a crash left behind are removed at
+  startup; links and junctions are never followed (#621; #741).
+- Retrying an image request after its input expired returns the original job
+  instead of a 404 (#578; #741).
+- A folder name with an emoji or another character outside the Basic
+  Multilingual Plane no longer makes every AppContainer launch fail (#615;
+  #741).
 
 ### Security
 
