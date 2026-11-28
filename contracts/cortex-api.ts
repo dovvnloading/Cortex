@@ -46,6 +46,7 @@ export interface AgentRunResponse {
   updated: string;
   stop_reason?: string | null;
   undo_available?: boolean;
+  copy_available?: boolean;
 }
 
 export interface AgentSSEEvent {

@@ -181,6 +181,11 @@
             "title": "Budgets",
             "type": "object"
           },
+          "copy_available": {
+            "default": false,
+            "title": "Copy Available",
+            "type": "boolean"
+          },
           "created": {
             "title": "Created",
             "type": "string"

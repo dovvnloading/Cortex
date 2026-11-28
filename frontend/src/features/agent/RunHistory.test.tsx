@@ -119,9 +119,9 @@ describe("RunHistory", () => {
     }
     expect(screen.queryByText("<marquee>unexpected</marquee>")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Agent run history" }).querySelector("marquee")).toBeNull();
-    expect(screen.getByRole("button", { name: "Delete run: running" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Delete run: waiting_approval" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Delete run: interrupted" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard work copy: running" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard work copy: waiting_approval" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard work copy: interrupted" })).toBeEnabled();
   });
 
   it("uses a clearly labeled fallback when the current API omits the goal", async () => {
@@ -182,7 +182,7 @@ describe("RunHistory", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("never discards without a warning that the work copy will be removed", async () => {
+  it("discards only the work copy after a warning, and keeps the run (#680)", async () => {
     const entry = run("delete-me", { goal: "Disposable task", status: "failed" });
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => init?.method === "POST"
       ? jsonResponse({ discarded: true })
@@ -192,10 +192,10 @@ describe("RunHistory", () => {
     const onOpen = vi.fn();
     const user = userEvent.setup();
     render(<RunHistory onOpen={onOpen} />);
-    const remove = await screen.findByRole("button", { name: "Delete run: Disposable task" });
+    const remove = await screen.findByRole("button", { name: "Discard work copy: Disposable task" });
 
     await user.click(remove);
-    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/work copy will be removed/i));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/Discard this run's work copy\? The run stays in history/i));
     expect(postCalls(fetcher)).toHaveLength(0);
     expect(remove).toBeEnabled();
 
@@ -204,8 +204,10 @@ describe("RunHistory", () => {
     await user.keyboard("{Enter}");
     await waitFor(() => expect(postCalls(fetcher)).toHaveLength(1));
     expect(postCalls(fetcher)[0][0]).toBe("/api/v1/agent/runs/delete-me/discard");
-    expect(await screen.findByText("No agent runs yet.")).toBeInTheDocument();
-    expect(screen.getByText("The run's work copy was removed.")).toBeInTheDocument();
+    expect(await screen.findByText(/The run's work copy was removed\. Accepted project edits can still be undone/)).toBeInTheDocument();
+    // The run and its undo stay reachable; only a second discard is gone.
+    expect(screen.getByRole("button", { name: "Open run: Disposable task" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Discard work copy: Disposable task" })).toBeDisabled();
     expect(onOpen).not.toHaveBeenCalled();
   });
 
@@ -223,11 +225,20 @@ describe("RunHistory", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not resume the run. Try again.");
     expect(screen.getByText("Interrupted")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Delete run: Goal interrupted" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not delete the run. Try again.");
+    await user.click(screen.getByRole("button", { name: "Discard work copy: Goal interrupted" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not discard the work copy. Try again.");
     expect(screen.getByRole("button", { name: "Open run: Goal interrupted" })).toBeInTheDocument();
     expect(screen.queryByText(/private stack trace/i)).not.toBeInTheDocument();
     expect(postCalls(fetcher)).toHaveLength(2);
+  });
+
+  it("offers no discard for a run whose work copy is already gone (#680)", async () => {
+    const entry = { ...run("gone", { status: "completed" }), copy_available: false };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ runs: [entry] }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<RunHistory onOpen={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "Discard work copy: Goal gone" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Open run: Goal gone" })).toBeEnabled();
   });
 
   it("does not treat an unsuccessful or malformed discard response as deletion", async () => {
@@ -240,8 +251,8 @@ describe("RunHistory", () => {
     const user = userEvent.setup();
     render(<RunHistory onOpen={vi.fn()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Delete run: Goal keep" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not delete the run.");
+    await user.click(await screen.findByRole("button", { name: "Discard work copy: Goal keep" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not discard the work copy.");
     expect(screen.getByRole("button", { name: "Open run: Goal keep" })).toBeInTheDocument();
   });
 

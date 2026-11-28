@@ -287,6 +287,19 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     setRun(null);
   };
 
+  /** Re-read the shown run's state, e.g. after its work copy was discarded (#680). */
+  const refresh = async (id: string): Promise<void> => {
+    if (!enabled || currentRunRef.current !== id) return;
+    try {
+      const fresh = await api.get(id);
+      if (currentRunRef.current !== id || fresh.id !== id) return;
+      statusRef.current = fresh.status;
+      setRun(fresh);
+    } catch {
+      // The panel shows the run as it was; the next open reads it again.
+    }
+  };
+
   const decide = async (seq: number, decision: DecideAgentApproval["decision"]): Promise<void> => {
     if (!enabled || busy || !run || !pendingApproval || pendingApproval.seq !== seq) return;
     setBusy("deciding");
@@ -351,6 +364,6 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
 
   return {
     run, events, pendingApproval, modelCheck, checkingModel, error, connection, busy, resumeRequired,
-    start, open, forget, decide, resume, stop,
+    start, open, forget, refresh, decide, resume, stop,
   };
 }

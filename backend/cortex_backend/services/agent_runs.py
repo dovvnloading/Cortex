@@ -592,6 +592,17 @@ class AgentRuns:
         self._expire_active()
         return self._owned(run_id, owner)
 
+    def copy_available(self, run_id: str, *, owner: str) -> bool:
+        """Whether the run's work copy still exists in this process (#680).
+
+        A discarded or restart-orphaned run stays in history with its undo
+        checkpoint; only its copy is gone, and with it review and discard.
+        """
+        with self._lock:
+            self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            return managed is not None and managed.owner == owner
+
     def undo_available(self, run_id: str, *, owner: str) -> bool:
         """Report an owner-bound checkpoint, never local acceptance UI state.
 

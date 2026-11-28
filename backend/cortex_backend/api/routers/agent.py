@@ -57,6 +57,8 @@ class AgentRunResponse(AgentModel):
     updated: str
     stop_reason: str | None = None
     undo_available: bool = False
+    # The work copy still exists, so its changes can be reviewed or discarded.
+    copy_available: bool = False
 
 
 class AgentRunListResponse(AgentModel):
@@ -172,6 +174,7 @@ def _response(run: AgentRun, workflow: AgentRuns, owner: str) -> AgentRunRespons
         status=run.status, budgets=run.budgets, created=run.created,
         updated=run.updated, stop_reason=run.stop_reason,
         undo_available=workflow.undo_available(run.id, owner=owner),
+        copy_available=workflow.copy_available(run.id, owner=owner),
     )
 
 

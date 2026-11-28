@@ -267,7 +267,10 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
           )}
 
           {TERMINAL.has(agent.run.status) && (
-            <AgentChangesPanel key={agent.run.id} api={agentApi} runId={agent.run.id}
+            // A copy discarded from history remounts the panel, which then
+            // shows recovery only (#680).
+            <AgentChangesPanel key={agent.run.id + ":" + String(agent.run.copy_available !== false)}
+              api={agentApi} runId={agent.run.id}
               onRecoveryChanged={() => setRecoveryRefreshKey((current) => current + 1)} />
           )}
         </section>
@@ -277,7 +280,8 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
       <RunHistory
         api={agentApi}
         onOpen={openHistory}
-        onDiscarded={(runId) => agent.forget(runId)}
+        // The run stays, with its undo checkpoint; only its copy is gone.
+        onDiscarded={(runId) => void agent.refresh(runId)}
         // Status is part of the key so the list refetches when the active run
         // finishes, instead of keeping the "Running" it read at the start.
         refreshKey={agent.run ? `${agent.run.id}:${agent.run.status}` : undefined}

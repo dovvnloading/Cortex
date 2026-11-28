@@ -549,6 +549,34 @@ describe("AgentPage", () => {
     expect(api.undoAgentChanges).not.toHaveBeenCalled();
   });
 
+  it("keeps the open run, with its undo, after history discards its work copy (#680)", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    let copy = true;
+    api.agentRuns.mockImplementation(async () => ({ runs: [{ ...run, copy_available: copy }] }));
+    api.agentRun.mockImplementation(async () => ({ ...run, undo_available: true, copy_available: copy }));
+    api.discardAgentRun.mockImplementation(async () => { copy = false; return { discarded: true }; });
+    const changeset = api.agentChangeset.getMockImplementation()!;
+    // As the server does: no copy, no changeset.
+    api.agentChangeset.mockImplementation(async (runId: string) => {
+      if (!copy) throw new Error("copy unavailable");
+      return changeset(runId);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    page(api);
+
+    await user.click(await screen.findByRole("button", { name: "Open run: Goal unavailable" }));
+    await screen.findByRole("alertdialog", { name: "Review agent changes" });
+    await user.keyboard("{Escape}");
+    await user.click(await screen.findByRole("button", { name: "Discard work copy: Goal unavailable" }));
+    await waitFor(() => expect(api.discardAgentRun).toHaveBeenCalledWith("run-1"));
+
+    // The run is still shown, and its review now offers recovery only.
+    expect(await screen.findByRole("button", { name: "Discard work copy: Goal unavailable" })).toBeDisabled();
+    expect(screen.getByRole("region", { name: "Current agent run" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Undo previously accepted changes" })).toBeVisible();
+  });
+
   it("offers separately confirmed recovery when a past work copy is gone", async () => {
     const user = userEvent.setup();
     const api = fakeClient();

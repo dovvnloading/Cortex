@@ -527,9 +527,13 @@ def test_accept_requires_explicit_confirmation_and_discard_keeps_checkout(tmp_pa
         assert client.get(target, headers=headers).json()["undo_available"] is True
         assert client.get(ROOT, headers=headers).json()["runs"][0]["undo_available"] is True
         assert client.get(target + "/changeset", headers=headers).json()["changes"] == []
+        assert client.get(target, headers=headers).json()["copy_available"] is True
         discarded = client.post(target + "/discard", headers=headers)
         assert discarded.status_code == 200
         assert discarded.json() == {"discarded": True}
+        # #680: the run stays, with its undo checkpoint, but no copy.
+        after = client.get(target, headers=headers).json()
+        assert (after["copy_available"], after["undo_available"]) == (False, True)
         assert client.get(target, headers=headers).json()["undo_available"] is True
         _assert_code(client.get(target + "/changeset", headers=headers), 409, "copy_unavailable")
         _assert_code(client.post(target + "/discard", headers=headers), 409, "copy_unavailable")

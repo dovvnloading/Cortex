@@ -5,7 +5,7 @@ import type { AgentApi } from "./agentApi";
 
 // The current run-list contract does not include goals. Display one when a
 // future API supplies it, but never substitute a path, command, or file text.
-type RunSummary = Pick<AgentRunResponse, "id" | "project_root" | "status" | "created"> & {
+type RunSummary = Pick<AgentRunResponse, "id" | "project_root" | "status" | "created" | "copy_available"> & {
   goal?: string;
 };
 
@@ -44,6 +44,7 @@ function isRunSummary(value: unknown): value is RunSummary {
     && typeof run.project_root === "string"
     && typeof run.status === "string"
     && typeof run.created === "string"
+    && (run.copy_available === undefined || typeof run.copy_available === "boolean")
     && (run.goal === undefined || typeof run.goal === "string");
 }
 
@@ -60,6 +61,11 @@ function parseRuns(value: unknown): RunSummary[] {
     const bTime = Date.parse(b.created);
     return (Number.isNaN(bTime) ? -Infinity : bTime) - (Number.isNaN(aTime) ? -Infinity : aTime);
   });
+}
+
+/** A finished run whose copy still exists; an older server sends no copy field. */
+function canDiscard(run: RunSummary): boolean {
+  return DISCARDABLE.has(run.status) && run.copy_available !== false;
 }
 
 function projectFolder(projectRoot: string): string {
@@ -119,11 +125,11 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
   const act = async (run: RunSummary, action: RunAction) => {
     if (busyId !== null) return;
     if (action === "resume" && run.status !== "interrupted") return;
-    if (action === "discard" && !DISCARDABLE.has(run.status)) return;
+    if (action === "discard" && !canDiscard(run)) return;
 
     const prompt = action === "resume"
       ? "Resume this interrupted agent run? It may continue changing its work copy."
-      : "Delete this agent run? The work copy will be removed. Any previously accepted project edits remain until explicitly undone.";
+      : "Discard this run's work copy? The run stays in history. Any previously accepted project edits remain until explicitly undone.";
     if (!window.confirm(prompt)) return;
 
     setBusyId(run.id);
@@ -146,10 +152,13 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
         if (payload === null || typeof payload !== "object" || !("discarded" in payload) || payload.discarded !== true) {
           throw new Error("Discard not acknowledged");
         }
+        // The run and its undo checkpoint remain; only the copy is gone (#680).
         setState((current) => current.phase === "ready"
-          ? { ...current, runs: current.runs.filter((item) => item.id !== run.id) }
+          ? { ...current, runs: current.runs.map((item) => item.id === run.id
+            ? { ...item, copy_available: false }
+            : item) }
           : current);
-        setNotice("The run's work copy was removed.");
+        setNotice("The run's work copy was removed. Accepted project edits can still be undone from the run.");
         onDiscarded?.(run.id);
       } else {
         if (!isRunSummary(payload) || payload.id !== run.id) throw new Error("Invalid resume response");
@@ -164,7 +173,7 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
     } catch {
       setActionError(action === "resume"
         ? "Could not resume the run. Try again."
-        : "Could not delete the run. Try again.");
+        : "Could not discard the work copy. Try again.");
     } finally {
       setBusyId(null);
     }
@@ -231,10 +240,10 @@ export function RunHistory({ onOpen, fetcher, api, onDiscarded, refreshKey }: Ru
                   <button
                     type="button"
                     className="button button-secondary"
-                    disabled={busyId !== null || !DISCARDABLE.has(run.status)}
+                    disabled={busyId !== null || !canDiscard(run)}
                     onClick={() => void act(run, "discard")}
-                    aria-label={`Delete run: ${goal}`}
-                  >Delete</button>
+                    aria-label={`Discard work copy: ${goal}`}
+                  >Discard work copy</button>
                 </div>
               </li>
             );
