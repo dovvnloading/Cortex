@@ -101,6 +101,10 @@ class LocalScratchAttempt:
                         raise ScratchComputeError("worker_output_invalid")
                     if message.get("ok") is True and message.get("event") == "ready":
                         if not released:
+                            if cancel_event.is_set() or self._cancel_event.is_set():
+                                # Stop came before the worker was released, so nothing has
+                                # run yet: it must never be told to go.
+                                raise ScratchComputeError("cancelled")
                             released = True
                             try:
                                 worker_job = _contain_worker(process, SCRATCH_WORKER_JOB_LIMITS)
