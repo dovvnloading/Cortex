@@ -22,7 +22,7 @@ describe("pending chat-group creation", () => {
 
   it("does not silently overwrite an unconfirmed create for a different folder", () => {
     const original = beginGroupCreate("Research");
-    expect(() => beginGroupCreate("Planning")).toThrow(/previous group creation/);
+    expect(() => beginGroupCreate("Planning")).toThrow(/Creating the group "Research" was not confirmed/);
     expect(readPendingGroupCreate()).toEqual(original);
     clearGroupCreate("wrong-id");
     expect(readPendingGroupCreate()).toEqual(original);

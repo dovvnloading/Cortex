@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatGroup, ChatSummary } from "../../../../contracts/cortex-api";
 import { ChatLibrary } from "./ChatLibrary";
+import { abandonGroupCreate, beginGroupCreate, readPendingGroupCreate } from "../../lib/pendingGroupCreate";
 
 const chat = (id: string, title: string, groupId: string | null = null): ChatSummary => ({
   id,
@@ -90,6 +91,25 @@ describe("ChatLibrary", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/^1 result$/);
     view.rerender(<ChatLibrary {...view.props} query="nothing" />);
     expect(screen.getByRole("status")).toHaveTextContent("0 results");
+  });
+
+  it("offers the unconfirmed group's name, and an explicit way to abandon it (#695)", async () => {
+    const user = userEvent.setup();
+    beginGroupCreate("Lost folder");
+    const onCreateGroup = vi.fn().mockResolvedValue(true);
+    renderLibrary({ onCreateGroup });
+
+    await user.click(screen.getByRole("button", { name: "New group" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Group name")).toHaveValue("Lost folder");
+    expect(within(dialog).getByText(/was not confirmed, so it may already exist/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: /Abandon/ }));
+    expect(readPendingGroupCreate()).toBeNull();
+    expect(within(dialog).getByLabelText("Group name")).toHaveValue("");
+    // A different group can be created now.
+    expect(() => beginGroupCreate("Another folder")).not.toThrow();
+    abandonGroupCreate();
   });
 
   it("files chats under their group and leaves the rest ungrouped", () => {

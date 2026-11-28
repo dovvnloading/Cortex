@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Form
 import { Archive, ChevronRight, Folder, FolderInput, FolderPlus, Pencil, Search, Trash2 } from "lucide-react";
 import type { ChatGroup, ChatSummary } from "../../../../contracts/cortex-api";
 import { displayChatTitle } from "../../lib/chatTitle";
+import { abandonGroupCreate, readPendingGroupCreate } from "../../lib/pendingGroupCreate";
 import { parseMessageTimestamp } from "../../lib/messageTime";
 import { Dialog, DialogContent } from "../../shared/ui/Dialog";
 
@@ -202,6 +203,11 @@ export function ChatLibrary({
         <GroupNameDialog
           title="New group"
           submitLabel="Create group"
+          // An unconfirmed create is the only one that can go next: start
+          // from its name, and let the user give it up explicitly (#695).
+          initialValue={readPendingGroupCreate()?.name ?? ""}
+          pendingName={readPendingGroupCreate()?.name ?? null}
+          onAbandonPending={abandonGroupCreate}
           onClose={() => setCreatingGroup(false)}
           onSave={onCreateGroup}
         />
@@ -515,17 +521,23 @@ function GroupNameDialog({
   title,
   submitLabel,
   initialValue = "",
+  pendingName = null,
+  onAbandonPending,
   onClose,
   onSave,
 }: {
   title: string;
   submitLabel: string;
   initialValue?: string;
+  /** The name of an earlier create whose outcome is unknown. */
+  pendingName?: string | null;
+  onAbandonPending?: () => void;
   onClose: () => void;
   onSave: (name: string) => Promise<void | boolean>;
 }) {
   const [name, setName] = useState(initialValue);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(pendingName);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -546,6 +558,26 @@ function GroupNameDialog({
       <DialogContent>
         <Dialog.Title>{title}</Dialog.Title>
         <form onSubmit={submit} className="stack-lg">
+          {pending && (
+            <div role="status" className="stack-sm">
+              <p>
+                Creating the group &ldquo;{pending}&rdquo; was not confirmed, so it may already exist.
+                Create it again to recover it without a duplicate, or abandon it to create a different group.
+              </p>
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => {
+                  onAbandonPending?.();
+                  setPending(null);
+                  if (name.trim() === pending) setName("");
+                }}
+              >
+                Abandon &ldquo;{pending}&rdquo;
+              </button>
+            </div>
+          )}
           <label className="field-label" htmlFor="group-name">Group name
             <input
               id="group-name"

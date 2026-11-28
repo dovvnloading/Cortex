@@ -66,7 +66,7 @@ export function beginGroupCreate(name: string): PendingGroupCreate {
   if (existing) {
     if (existing.name !== normalized) {
       throw new Error(
-        "A previous group creation was not confirmed. Retry that name before creating another.",
+        `Creating the group "${existing.name}" was not confirmed. Create it again to recover it, or abandon it, before creating another.`,
       );
     }
     return existing;
@@ -77,6 +77,15 @@ export function beginGroupCreate(name: string): PendingGroupCreate {
   const intent = { name: normalized, requestId, createdAt: Date.now() };
   store(intent);
   return intent;
+}
+
+/**
+ * Forget an unconfirmed create the user chose to give up (#695). The group
+ * may still have been created; this only drops the key that could recover it
+ * without a duplicate.
+ */
+export function abandonGroupCreate(): void {
+  store(null);
 }
 
 export function clearGroupCreate(requestId: string): void {
