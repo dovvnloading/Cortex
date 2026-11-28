@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentModelNames, localModelNames } from "./localModels";
+import { agentModelNames, chatModelNames, localModelNames } from "./localModels";
 
 describe("agentModelNames", () => {
   const inventory = {
@@ -25,5 +25,20 @@ describe("agentModelNames", () => {
 
   it("does not hide a model that only the compact list reports", () => {
     expect(agentModelNames({ installed_models: ["nomic-embed-text:latest"] })).toEqual(["nomic-embed-text:latest"]);
+  });
+});
+
+describe("chatModelNames", () => {
+  it("never offers an embedding-only model for chat (#719)", () => {
+    const inventory = {
+      installed_models: ["qwen3:8b", "nomic-embed-text:latest"],
+      models: [
+        { name: "qwen3:8b", capabilities: ["completion"] },
+        { name: "nomic-embed-text:latest", capabilities: ["embedding"] },
+        { name: "gguf:local.gguf", source: "gguf" as const },
+      ],
+    };
+    expect(chatModelNames(inventory)).toEqual(["gguf:local.gguf", "qwen3:8b"]);
+    expect(agentModelNames(inventory)).toEqual(chatModelNames(inventory));
   });
 });

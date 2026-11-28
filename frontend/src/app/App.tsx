@@ -23,7 +23,7 @@ import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
 import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
-import { agentModelNames, cloudModelProvider, displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
+import { agentModelNames, chatModelNames, cloudModelProvider, displayModelName, isGGUFModel } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
 import { persistLatestWrite, type LatestWrite } from "../lib/latestWrite";
 import {
@@ -1227,7 +1227,8 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
   // unknown rather than empty: an empty stand-in with no connection report.
   const inventoryLoading = models === null;
   const inventory = models ?? LOADING_MODELS;
-  const localModels = localModelNames(inventory);
+  // Chat choices and availability use the models that can chat (#719).
+  const localModels = chatModelNames(inventory);
   const agentModels = agentModelNames(inventory);
   const chatModels = [...localModels, ...cloud.models];
   const hasLocalInventory = Array.isArray(inventory.installed_models) || Array.isArray(inventory.models);

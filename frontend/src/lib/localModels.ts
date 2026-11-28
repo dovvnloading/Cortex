@@ -20,15 +20,23 @@ export function localModelNames(models: Pick<ModelResponse, "installed_models" |
 }
 
 /**
- * Local models an Agent run can use: every installed model except those whose
- * reported capabilities rule out chat, such as embedding-only models. A model
- * with no capability report (an older server, a GGUF file) stays listed.
+ * Local models that can chat: every installed model except those whose
+ * reported capabilities rule out completion, such as embedding-only models. A
+ * model with no capability report (an older server, a GGUF file) stays listed.
+ * Chat, translation and Agent runs all need completion; offering an
+ * embedding-only model for chat marked it ready for answers it cannot give
+ * (#719).
  */
-export function agentModelNames(models: Pick<ModelResponse, "installed_models" | "models">): string[] {
+export function chatModelNames(models: Pick<ModelResponse, "installed_models" | "models">): string[] {
   const cannotChat = new Set((models.models ?? [])
     .filter((model) => (model.capabilities?.length ?? 0) > 0 && !model.capabilities?.includes("completion"))
     .map((model) => model.name.trim()));
   return localModelNames(models).filter((name) => !cannotChat.has(name));
+}
+
+/** Local models an Agent run can use: the ones that can chat. */
+export function agentModelNames(models: Pick<ModelResponse, "installed_models" | "models">): string[] {
+  return chatModelNames(models);
 }
 
 /** Ollama tags never contain this prefix, so it unambiguously identifies a

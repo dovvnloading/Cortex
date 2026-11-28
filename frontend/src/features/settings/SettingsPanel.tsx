@@ -7,7 +7,7 @@ import type {
   ModelResponse,
 } from "../../../../contracts/cortex-api";
 import { CLOUD_SAMPLING_NOTE, GENERATION_DEFAULTS, resolveGenerationValues, type ParamKey } from "../../lib/generationParams";
-import { cloudModelProvider, displayModelName, isGGUFModel, localModelNames, modelFacts, modelSource } from "../../lib/localModels";
+import { chatModelNames, cloudModelProvider, displayModelName, isGGUFModel, modelFacts, modelSource } from "../../lib/localModels";
 import { registerNavigationGuard } from "../../lib/navigation";
 import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
 import { Select } from "../../shared/ui/Select";
@@ -232,7 +232,8 @@ export function SettingsPanel({
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  const installedModels = localModelNames(models);
+  // Chat and translation both need a model that can generate text (#719).
+  const installedModels = chatModelNames(models);
   const appearance = draft.appearance ?? {};
   const generation = draft.generation ?? {};
   const execution = draft.execution ?? {};
