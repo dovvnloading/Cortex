@@ -162,7 +162,9 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
   // The run shown now. A late callback for another run must not touch it (#683).
   const currentRunRef = useRef<string | null>(null);
   const runId = run?.id ?? null;
-  currentRunRef.current = runId;
+  // start, open and forget set it as they change the run; this keeps it in
+  // step with any other change, outside render.
+  useEffect(() => { currentRunRef.current = runId; }, [runId]);
   const resumeRequired = Boolean(run && !TERMINAL.has(run.status)
     && (resumeFailed || run.resume_required === true));
 
