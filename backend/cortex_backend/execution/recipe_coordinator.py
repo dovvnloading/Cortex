@@ -59,6 +59,16 @@ _RECIPE_WORDING = UnsuccessfulJobWording(
 )
 
 
+class ExecutionShutdownIncomplete(RuntimeError):
+    """Shutdown timed out with work still running.
+
+    The coordinator keeps its supervisor ownership and its record of the
+    unfinished threads; calling shutdown again retries. ExecutionLifecycle
+    treats this like any failed stop: the coordinator stays held and no second
+    one is built beside it.
+    """
+
+
 class RecipeExecutionError(RuntimeError):
     """Stable, redacted coordinator failure category."""
 
@@ -272,6 +282,10 @@ class RecipeExecutionCoordinator:
         deadline = time.monotonic() + timeout
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # A worker that is still unwinding can still write to the store,
+            # so ownership is not given up and a clean stop is not reported.
+            raise ExecutionShutdownIncomplete("image recipe workers are still stopping")
         if self._supervisor_lease_active:
             self.repository.release_supervisor_lease(lease_owner=self._supervisor_owner)
             self._supervisor_lease_active = False
@@ -607,6 +621,7 @@ class RecipeExecutionCoordinator:
 
 __all__ = [
     "DEFAULT_RECIPE_RETENTION_SECONDS",
+    "ExecutionShutdownIncomplete",
     "MAX_RECIPE_RETENTION_SECONDS",
     "RecipeExecutionCoordinator",
     "RecipeExecutionError",
