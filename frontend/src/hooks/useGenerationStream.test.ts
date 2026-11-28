@@ -304,6 +304,39 @@ describe("useGenerationStream", () => {
     expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-8": true });
   });
 
+  it("clears an earlier translation warning when the regenerated answer is translated (#674)", async () => {
+    // A regenerated answer keeps its message id.
+    useChatStore.setState({ untranslatedMessageIds: { "assistant-10": true, "assistant-11": true } });
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-retranslated", "thread-retranslated", onCompleted, vi.fn()); });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    act(() => {
+      emitEvent({
+        event_id: 1, event: "generation.completed", job_id: "job-retranslated", thread_id: "thread-retranslated",
+        data: { assistant_message_id: "assistant-10", translation_error: null },
+      });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({ "assistant-11": true });
+
+    // The status fallback reconciles it the same way.
+    const generationStatus = vi.fn().mockResolvedValue({
+      job_id: "job-retranslated-status", kind: "generation", status: "succeeded", sequence: 2,
+      result: { assistant_message_id: "assistant-11" },
+    });
+    const fallback = renderHook(() => useGenerationStream(
+      fakeApi({ streamGeneration: vi.fn().mockRejectedValue(new Error("connection dropped")), generationStatus }),
+      ignoreSessionExpiry,
+    ));
+    const fallbackCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { fallback.result.current.start("job-retranslated-status", "thread-r2", fallbackCompleted, vi.fn()); });
+    await waitFor(() => expect(fallbackCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().untranslatedMessageIds).toEqual({});
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

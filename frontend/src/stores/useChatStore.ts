@@ -129,6 +129,7 @@ interface ChatStoreState {
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
   markUntranslated: (messageId: string) => void;
+  clearUntranslated: (messageId: string) => void;
   /** Replace a message's pending suggestions; an empty list forgets them (a regenerated answer has new ones). */
   setProposedMemories: (messageId: string, memos: readonly string[]) => void;
   /** Drop one suggestion, whether it was saved or declined. */
@@ -297,6 +298,13 @@ export const useChatStore = create<ChatStoreState>((set) => ({
         ? state
         : { untranslatedMessageIds: { ...state.untranslatedMessageIds, [messageId]: true } }
     )),
+  clearUntranslated: (messageId) =>
+    set((state) => {
+      if (!state.untranslatedMessageIds[messageId]) return state;
+      const next = { ...state.untranslatedMessageIds };
+      delete next[messageId];
+      return { untranslatedMessageIds: next };
+    }),
   setProposedMemories: (messageId, memos) =>
     set((state) => {
       const current = state.proposedMemoriesByMessage[messageId];

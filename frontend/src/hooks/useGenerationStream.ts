@@ -150,13 +150,23 @@ function hasSavedStoppedAnswer(value: unknown): boolean {
   return typeof id === "string" && id.length > 0;
 }
 
-/** A job result whose translation failed carries the untranslated answer and a translation_error. */
-function noteTranslationFailure(value: unknown): void {
+/**
+ * Record whether a finished answer is translated.
+ *
+ * A job result whose translation failed carries the untranslated answer and a
+ * translation_error. A regenerated answer keeps its message id, so a result
+ * without one must also clear an earlier failure for that id: the warning
+ * stayed on a successfully translated replacement (#674).
+ */
+function noteTranslationResult(value: unknown): void {
   if (!value || typeof value !== "object") return;
   const result = value as { translation_error?: unknown; assistant_message_id?: unknown };
-  if (typeof result.translation_error !== "string" || !result.translation_error) return;
   if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
-  useChatStore.getState().markUntranslated(result.assistant_message_id);
+  if (typeof result.translation_error === "string" && result.translation_error) {
+    useChatStore.getState().markUntranslated(result.assistant_message_id);
+  } else {
+    useChatStore.getState().clearUntranslated(result.assistant_message_id);
+  }
 }
 
 // Mirrors the backend's bounds (api/routes.py). The list is data from a model,
@@ -381,7 +391,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
-                  noteTranslationFailure(data);
+                  noteTranslationResult(data);
                   const clearRequested = hasClearRequest(data);
                   completion = clearRequested
                     ? onCompleted(job.threadId, true, job.jobId)
@@ -430,7 +440,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   // duplicate-send Retry from the status fallback.
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 } else {
-                  noteTranslationFailure(snapshot.result);
+                  noteTranslationResult(snapshot.result);
                   noteProposedMemories(snapshot.result);
                 }
                 const clearRequested = snapshot.status === "succeeded" && hasClearRequest(snapshot.result);
