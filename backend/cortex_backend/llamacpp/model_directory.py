@@ -301,6 +301,12 @@ class GGUFModelDirectory:
             files: list[Path] = []
             for entry in entries:
                 try:
+                    # The resolver loads a model only if its real location is
+                    # inside the folder, so a link out of it -- to a folder or
+                    # to a file -- is not followed here either. Listing it
+                    # offered a model that could then never be loaded.
+                    if not entry.resolve().is_relative_to(root):
+                        continue
                     if entry.is_dir():
                         if depth < MAX_SCAN_DEPTH and not entry.name.startswith("."):
                             pending.append((entry, depth + 1))

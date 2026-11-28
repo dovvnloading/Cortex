@@ -67,6 +67,7 @@ from .errors import (
 )
 from .extra_args import validate_extra_args
 from .gguf_metadata import read_gguf_metadata
+from .model_directory import to_model_id
 from .launch_failure import (
     LaunchFailureCode,
     classify_child_exit,
@@ -677,6 +678,8 @@ class LlamaServerManager:
         self._process: subprocess.Popen | None = None
         self._starting_process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
+        # The inventory id of the loaded model, fixed when it was loaded.
+        self._loaded_model_id: str | None = None
         # What was requested with ``-c`` for the running server. Reuse
         # decisions key off this, not the read-back value below: relaunching
         # with the same arguments cannot yield a larger window, so treating a
@@ -922,15 +925,22 @@ class LlamaServerManager:
                 return None
             return ServerHandle(base_url=self._base_url, model_path=model_path, api_key=self._api_key)
 
+    def _model_id_for(self, model_path: Path) -> str:
+        """The inventory id of ``model_path``: its path under the models folder now."""
+        try:
+            relative = model_path.resolve().relative_to(self._models_directory().resolve())
+        except (OSError, ValueError):
+            return to_model_id(model_path.name)
+        return to_model_id(relative.as_posix())
+
     @property
     def status(self) -> LlamaCppRuntimeStatus:
         with self._state_lock:
             state = self._state
-            loaded_model = (
-                f"gguf:{self._loaded_model_path.name}"
-                if state == "ready" and self._loaded_model_path is not None
-                else None
-            )
+            # The same id the inventory lists, subfolder included: the bare
+            # file name made two models called model.gguf indistinguishable
+            # and named an id the inventory did not have.
+            loaded_model = self._loaded_model_id if state == "ready" else None
             last_error = self._last_error
             last_failure_code = self._last_failure_code
             last_restart_reason = self._last_restart_reason
@@ -1532,6 +1542,7 @@ class LlamaServerManager:
         self._process = None
         self._starting_process = None
         self._loaded_model_path = None
+        self._loaded_model_id = None
         self._loaded_num_ctx = None
         self._loaded_context = None
         self._base_url = None
@@ -1920,12 +1931,14 @@ class LlamaServerManager:
                 props = self._probe_props(base_url, api_key=api_key, model_path=model_path)
                 if props is not None:
                     loaded_context = _context_from_props(props)
+                    loaded_model_id = self._model_id_for(model_path)
                     with self._state_lock:
                         if cancellation_event.is_set():
                             raise LlamaCppError("The local model runtime startup was cancelled.")
                         self._process = process
                         self._starting_process = None
                         self._loaded_model_path = model_path
+                        self._loaded_model_id = loaded_model_id
                         self._loaded_num_ctx = num_ctx
                         self._loaded_context = loaded_context
                         self._base_url = base_url
