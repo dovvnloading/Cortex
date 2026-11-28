@@ -616,8 +616,15 @@ class WorkspaceCodingSessions:
 
     @staticmethod
     def _stop_check(session: CodingSession) -> None:
+        """Stop the check's whole process tree, whether or not the runner itself still runs.
+
+        This returned as soon as the runner had exited. A child that kept the
+        output pipe open then held the check (and the workspace lock) past its
+        timeout and past Stop, since only the tree's job or process group
+        reaches it (#590).
+        """
         process = session.check_process
-        if process is None or process.poll() is not None:
+        if process is None:
             return
         if session.check_job is not None:
             session.check_job.close()
@@ -629,14 +636,17 @@ class WorkspaceCodingSessions:
             if callable(kill_group) and kill_signal is not None:
                 with suppress(OSError):
                     kill_group(process.pid, kill_signal)
-        with suppress(OSError):
-            process.kill()
+        if process.poll() is None:
+            with suppress(OSError):
+                process.kill()
 
     def cancel(self, *, owner: str, session_id: str) -> dict[str, bool]:
         session = self._get(owner=owner, session_id=session_id)
         session.cancel_research.set()
         session.cancel_check.set()
-        active = session.check_process is not None and session.check_process.poll() is None
+        # Running until check() lets go of it, even after the runner itself
+        # exits: what it started can still be running.
+        active = session.check_process is not None
         if active:
             self._stop_check(session)
         return {"cancelled": active}

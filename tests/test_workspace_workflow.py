@@ -130,6 +130,57 @@ def test_model_preview_stage_is_kept_for_explicit_apply(tmp_path):
     assert path.read_bytes().endswith(b"44\r\n")
 
 
+_RUNNER_THAT_LEAVES_A_CHILD = (
+    "import subprocess, sys\n"
+    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+    " stdout=sys.stdout, stderr=sys.stderr)\n"
+    "print('runner done', flush=True)\n"
+)
+
+
+def _check_in_background(workflow, session):
+    import threading
+
+    outcome: dict = {}
+
+    def run() -> None:
+        outcome["result"] = workflow.check(owner="owner", session_id=session, command="pytest", confirmed=True)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+@pytest.mark.parametrize("ending", ["cancel", "timeout"])
+def test_a_check_ends_even_when_its_runner_left_a_child_holding_the_output(
+    tmp_path, monkeypatch, ending: str
+):
+    """#590: Stop and the timeout returned at once when the runner had exited,
+    so a child keeping the pipe open held the check and the workspace lock."""
+    import sys
+    import time
+
+    from cortex_backend.services import workspace_workflow as module
+
+    monkeypatch.setitem(module.CHECK_COMMANDS, "pytest", (sys.executable, "-c", _RUNNER_THAT_LEAVES_A_CHILD))
+    if ending == "timeout":
+        monkeypatch.setattr(module, "MAX_CHECK_SECONDS", 2)
+    workflow, session, _path = _session(tmp_path)
+    started = time.monotonic()
+    thread, outcome = _check_in_background(workflow, session)
+    if ending == "cancel":
+        live = workflow._get(owner="owner", session_id=session)
+        while live.check_process is None or live.check_process.poll() is None:
+            assert time.monotonic() - started < 20, "the runner never finished"
+            time.sleep(0.05)
+        workflow.cancel(owner="owner", session_id=session)
+
+    thread.join(timeout=15)
+
+    assert not thread.is_alive(), "the check stayed blocked on the child's output"
+    assert outcome["result"]["status"] == ("cancelled" if ending == "cancel" else "timed_out")
+
+
 def test_only_fixed_explicit_commands_are_accepted(tmp_path):
     workflow, session, path = _session(tmp_path)
     for command in ("cmd /c del *", "pytest; rm -rf", "shell"):
