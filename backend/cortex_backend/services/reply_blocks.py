@@ -209,6 +209,72 @@ def quoted_spans(text: str) -> list[tuple[int, int]]:
     return combined
 
 
+# Envelopes whose payload is one JSON value. Their closing tag can legitimately
+# appear inside a JSON string ("the literal </memory_command> delimiter"), so it
+# ends the block only outside one.
+JSON_ENVELOPE_TAGS = frozenset({"memory_command", "code_execution_request"})
+
+
+class JsonCloserScanner:
+    """Find a closing tag outside any JSON string, across as many reads as needed.
+
+    The state (position, inside a string, after a backslash) carries over, so a
+    caller that receives the payload in chunks scans each character once. The
+    closing tag itself holds no quote or backslash, so it never changes the
+    string state it is being matched against.
+    """
+
+    def __init__(self, closing: str) -> None:
+        self._closing = closing.lower()
+        self._position = 0
+        self._in_string = False
+        self._escaped = False
+
+    def find(self, text: str) -> int:
+        """Index in ``text`` where the closing tag starts, or -1 if not (yet) found.
+
+        ``text`` must be the payload read so far, from its first character,
+        growing between calls.
+        """
+        closing = self._closing
+        size = len(closing)
+        index = self._position
+        while index < len(text):
+            char = text[index]
+            if self._in_string:
+                if self._escaped:
+                    self._escaped = False
+                elif char == "\\":
+                    self._escaped = True
+                elif char == '"':
+                    self._in_string = False
+            elif char == '"':
+                self._in_string = True
+            elif char == "<":
+                if len(text) - index < size:
+                    break  # the rest of a possible closer has not arrived
+                if text[index:index + size].lower() == closing:
+                    self._position = index
+                    return index
+            index += 1
+        self._position = index
+        return -1
+
+
+def json_envelope_end(text: str, start: int, closing: str) -> int:
+    """Where the closing tag of a JSON envelope whose payload starts at ``start`` begins.
+
+    The first closer outside a JSON string. When there is none -- the payload
+    is not valid JSON, say an unbalanced quote -- the first literal closer, as
+    before, so a malformed command can never swallow the rest of the answer.
+    -1 when the closing tag never appears.
+    """
+    found = JsonCloserScanner(closing).find(text[start:])
+    if found != -1:
+        return start + found
+    return text.lower().find(closing.lower(), start)
+
+
 def extract_tag_blocks(text: str, tag: str) -> tuple[list[TagBlock], str]:
     """Find every live ``<tag>`` block and return them with ``text`` minus them.
 
@@ -239,13 +305,19 @@ def extract_tag_blocks(text: str, tag: str) -> tuple[list[TagBlock], str]:
             position = found.end()
             continue
         kept.append(text[copied:found.start()])
-        end = closing.search(text, found.end())
-        if end is None:
+        if tag.lower() in JSON_ENVELOPE_TAGS:
+            # A closer inside a JSON string is part of the payload (#612).
+            close_at = json_envelope_end(text, found.end(), f"</{tag}>")
+            close_end = close_at + len(tag) + 3
+        else:
+            end = closing.search(text, found.end())
+            close_at, close_end = (-1, -1) if end is None else (end.start(), end.end())
+        if close_at == -1:
             blocks.append(TagBlock(text[found.end():].strip(), closed=False))
             copied = len(text)
             break
-        blocks.append(TagBlock(text[found.end():end.start()].strip(), closed=True))
-        copied = position = end.end()
+        blocks.append(TagBlock(text[found.end():close_at].strip(), closed=True))
+        copied = position = close_end
     kept.append(text[copied:])
     return blocks, "".join(kept)
 

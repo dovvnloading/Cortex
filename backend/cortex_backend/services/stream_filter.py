@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from cortex_backend.services.reply_blocks import JSON_ENVELOPE_TAGS, JsonCloserScanner
+
 
 # Every block the cleaner strips, as (opening, closing) literals, compared
 # case-insensitively.
@@ -90,6 +92,9 @@ class EnvelopeStreamFilter:
         self._emit = emit
         self._pending = ""
         self._closing: str | None = None
+        # Set while inside a JSON envelope: its closer counts only outside a
+        # JSON string, as in the cleaner (#612).
+        self._json_scanner: JsonCloserScanner | None = None
         # Whether any real answer text has been shown or consumed yet. Until
         # then a ``<think>`` block is still the reply's leading reasoning.
         self._answer_started = False
@@ -109,10 +114,22 @@ class EnvelopeStreamFilter:
         mid-envelope, and the half-written block belongs in neither the live
         stream nor the finished answer.
         """
+        while self._closing is not None and self._json_scanner is not None:
+            # No closer outside a JSON string ever came. The cleaner then ends
+            # the block at the first literal closer, if there is one; so does
+            # this, and what follows it is answer text again.
+            literal = self._pending.lower().find(self._closing.lower())
+            if literal == -1:
+                break
+            self._pending = self._pending[literal + len(self._closing):]
+            self._closing = None
+            self._json_scanner = None
+            self._drain()
         if self._closing is None and self._pending:
             self._show(self._pending)
         self._pending = ""
         self._closing = None
+        self._json_scanner = None
 
     def _show(self, text: str) -> None:
         self._emit(text)
@@ -122,12 +139,16 @@ class EnvelopeStreamFilter:
     def _drain(self) -> None:
         while True:
             if self._closing is not None:
-                end = self._pending.lower().find(self._closing.lower())
+                if self._json_scanner is not None:
+                    end = self._json_scanner.find(self._pending)
+                else:
+                    end = self._pending.lower().find(self._closing.lower())
                 if end == -1:
                     # Still inside a block: hold everything.
                     return
                 self._pending = self._pending[end + len(self._closing):]
                 self._closing = None
+                self._json_scanner = None
                 continue
 
             opening_at, opening, closing = self._next_opening()
@@ -136,6 +157,8 @@ class EnvelopeStreamFilter:
                     self._show(self._pending[:opening_at])
                 self._pending = self._pending[opening_at + len(opening):]
                 self._closing = closing
+                tag = opening.strip("<>").lower()
+                self._json_scanner = JsonCloserScanner(closing) if tag in JSON_ENVELOPE_TAGS else None
                 self._answer_started = True
                 continue
 

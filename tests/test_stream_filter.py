@@ -126,6 +126,12 @@ _CLEANED_REPLIES = [
     'Working. <MEMORY_COMMAND>{"add":["a < b"',
     "if a < b and c > d then",
     "List<int> values",
+    # A closing tag inside a JSON string is payload, not the end (#612).
+    'Noted.\n<memory_command>{"add":["User\'s project documents the literal </memory_command> delimiter."],"clear":false}</memory_command>',
+    'Saved.<memory_command>{"add":["She wrote \\"</memory_command>\\" twice"],"clear":false}</memory_command> Done.',
+    'Run:<code_execution_request>{"language":"python","source":"print(\'</code_execution_request>\')"}</code_execution_request> ok',
+    # Not valid JSON (an unbalanced quote): the first literal closer ends it.
+    'Saved.<memory_command>{"add":["unbalanced]}</memory_command> Still here.',
 ]
 
 

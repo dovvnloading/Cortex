@@ -386,6 +386,40 @@ def test_a_stray_backtick_never_reaches_past_its_paragraph(between: str) -> None
     assert command == MemoryCommand(("User likes tea",), False)
 
 
+def test_a_closing_tag_inside_a_json_string_does_not_end_the_command() -> None:
+    """#612: the first closing tag ended the block even inside the JSON string,
+    so the proposal was thrown away and half its JSON leaked into the answer."""
+    reply = (
+        "Noted." + chr(10) + '<memory_command>{"add":["User\'s project documents the literal '
+        '</memory_command> delimiter."],"clear":false}</memory_command>'
+    )
+
+    _agent, answer, _thoughts, command = _parse(reply)
+
+    assert answer.strip() == "Noted."
+    assert command == MemoryCommand(("User's project documents the literal </memory_command> delimiter.",), False)
+
+
+def test_an_escaped_quote_does_not_end_the_json_string() -> None:
+    reply = 'Ok. <memory_command>{"add":["She wrote \\"</memory_command>\\" twice"],"clear":false}</memory_command>'
+
+    _agent, answer, _thoughts, command = _parse(reply)
+
+    assert answer.strip() == "Ok."
+    assert command == MemoryCommand(('She wrote "</memory_command>" twice',), False)
+
+
+def test_a_malformed_command_still_ends_at_its_first_closer_and_keeps_the_answer() -> None:
+    """Without a closer outside a string there is no valid JSON to protect, and
+    the rest of the answer must not be swallowed as part of the block."""
+    reply = 'Saved. <memory_command>{"add":["unbalanced]}</memory_command> Still here.'
+
+    _agent, answer, _thoughts, command = _parse(reply)
+
+    assert answer == "Saved.  Still here."
+    assert not command.has_actions
+
+
 def test_a_command_after_a_closed_code_fence_is_still_applied() -> None:
     reply = f"```python\nprint('hi')\n```\nSaved. {_TEA_COMMAND}"
 
