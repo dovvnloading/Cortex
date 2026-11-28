@@ -256,6 +256,14 @@ class LocalExecutionCoordinator:
                 reason=request.intent_summary.strip(),
             )
         except Exception as exc:
+            if isinstance(exc, ApprovalTransitionError):
+                # Stop can land between admitting the job and writing its
+                # approval; the repository then refuses the approval. Finish
+                # the cancellation here, because no worker exists yet to do it.
+                current = self.repository.get_job(job.job_id, owner=request.owner)
+                if current is not None and current.status in {"cancelling", "cancelled"}:
+                    self._finish_code_failure(job.job_id, Event(), "cancelled")
+                    return self.repository.get_job(job.job_id, owner=request.owner) or current
             try:
                 self.repository.transition(
                     job.job_id,
@@ -385,9 +393,14 @@ class LocalExecutionCoordinator:
                         owner=owner,
                         decision="denied",
                     )
-                except Exception:
+                    return self.repository.get_job(job_id, owner=owner) or job
+                except ApprovalTransitionError:
+                    # The snapshot above is stale: another client approved
+                    # (or the job ended) after it was read. Stop must still
+                    # win over an approval that has not launched anything, so
+                    # fall through to the ordinary cancellation below instead
+                    # of reporting success without cancelling.
                     pass
-                return self.repository.get_job(job_id, owner=owner) or job
             with self._code_lock:
                 code_event = self._code_cancel_events.get(job_id)
                 code_attempt = self._code_attempts.get(job_id)
@@ -642,7 +655,14 @@ class LocalExecutionCoordinator:
             # in between wakes the wait below instead of being slept through.
             seen = changes.version
             current = self.repository.get_job(job_id)
-            if current is None or current.approval_state != "pending" or cancel_event.is_set():
+            if (
+                current is None
+                or current.approval_state != "pending"
+                or cancel_event.is_set()
+                # A durable Stop that this thread's event never saw (it came
+                # before the event existed) ends the wait as well.
+                or current.status in {"cancelling", "cancelled"}
+            ):
                 return current
             remaining = self.repository.pending_approval_seconds(job_id)
             timeout = _APPROVAL_RECHECK_SECONDS
