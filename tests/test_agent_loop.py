@@ -95,6 +95,43 @@ def _loop(
     return AgentLoop(store, client, "local/llama:1", registry, budgets or {}, **args)
 
 
+def test_the_wall_clock_budget_interrupts_a_model_request_in_flight(tmp_path: Path) -> None:
+    """#605: the budget was checked only after the request returned, so one
+    stalled reply held the worker for the transport's ten-minute timeout."""
+    import time
+
+    class _StalledClient(ScriptedClient):
+        def chat(self, **kwargs: Any) -> dict[str, object]:
+            self.requests.append(kwargs)
+            cancel = kwargs.get("cancellation_event")
+            assert cancel is not None
+            cancel.wait(10)
+            return {"message": {"content": ""}, "done_reason": "cancelled"}
+
+    store, run_id = _store(tmp_path, budgets={"max_seconds": 0.3})
+    loop = _loop(store, _StalledClient(), _registry(_simple_handler([])), budgets={"max_seconds": 0.3})
+
+    started = time.monotonic()
+    result = loop.run(run_id)
+
+    assert time.monotonic() - started < 3, "the deadline did not reach the model request"
+    assert (result.status, result.stop_reason) == ("failed", "wall_clock_budget")
+
+
+def test_a_model_error_after_the_deadline_is_reported_as_the_deadline(tmp_path: Path) -> None:
+    class _ClosedOnDeadline(ScriptedClient):
+        def chat(self, **kwargs: Any) -> dict[str, object]:
+            kwargs["cancellation_event"].wait(10)
+            raise ConnectionError("the transport was closed")
+
+    store, run_id = _store(tmp_path, budgets={"max_seconds": 0.3})
+    loop = _loop(store, _ClosedOnDeadline(), _registry(_simple_handler([])), budgets={"max_seconds": 0.3})
+
+    result = loop.run(run_id)
+
+    assert (result.status, result.stop_reason) == ("failed", "wall_clock_budget")
+
+
 def _simple_handler(calls: list[str]) -> Callable[[ToolCall, ToolContext], ToolResult]:
     def handle(call: ToolCall, context: ToolContext) -> ToolResult:
         assert not context.stopped()

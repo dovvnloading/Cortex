@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from _thread import LockType
 from dataclasses import dataclass, field
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -137,6 +137,9 @@ ContextProvider = Callable[[AgentRun], str]
 AfterTool = Callable[[AgentStep], None]
 BeforeFinal = Callable[[], None]
 
+
+# How often a model request in flight checks Stop and the run's deadline.
+_DEADLINE_POLL_SECONDS = 0.05
 
 # The most of a final answer the run's output carries.
 MAX_FINAL_OUTPUT_CHARS = 16_000
@@ -313,6 +316,30 @@ class AgentLoop:
         state.queued.clear()
         state.pending = None
         return self._result(run_id, state, status, reason, answer=answer)
+
+    def _bounded_cancellation(self, state: _State) -> tuple[Event, Callable[[], None]]:
+        """An event set by Stop or when the run's wall-clock budget runs out.
+
+        A model request used to get the Stop event alone, and the budget was
+        looked at only once the request returned: one slow or stalled reply
+        held the Agent worker for the transport's ten-minute read timeout,
+        long past a two-minute budget (#605). Returns the event and a function
+        that stops watching.
+        """
+        bounded = Event()
+        finished = Event()
+
+        def watch() -> None:
+            while not finished.wait(_DEADLINE_POLL_SECONDS):
+                if self._interruption(state) is not None:
+                    bounded.set()
+                    return
+
+        if self._interruption(state) is not None:
+            bounded.set()
+        else:
+            Thread(target=watch, name="cortex-agent-deadline", daemon=True).start()
+        return bounded, finished.set
 
     def _interruption(self, state: _State) -> str | None:
         if state.cancellation.is_set():
@@ -628,10 +655,11 @@ class AgentLoop:
             if reason is not None:
                 return self._stop(run_id, state, "cancelled" if reason == "cancelled" else "failed", reason)
             state.model_calls += 1
+            bounded, stop_watching = self._bounded_cancellation(state)
             try:
                 turn: ModelTurn = call_model(
                     self.client, model=self.model, messages=messages, tools=self.registry.specs(),
-                    options=dict(self.model_options), cancellation_event=state.cancellation,
+                    options=dict(self.model_options), cancellation_event=bounded,
                     protocol_path=self.protocol_path,
                 )
             except ProtocolError:
@@ -644,11 +672,24 @@ class AgentLoop:
                     return self._stop(run_id, state, "failed", "invalid_model_replies")
                 continue
             except Exception:
+                interrupted = self._interruption(state)
+                if interrupted is not None:
+                    # A transport cut short by Stop or the deadline reports that
+                    # however it likes; the reason is the interruption.
+                    self.run_store.append_step(
+                        run_id, owner=self.owner, kind="model", summary="Model request interrupted",
+                        result={"outcome": "interrupted"},
+                    )
+                    return self._stop(
+                        run_id, state, "cancelled" if interrupted == "cancelled" else "failed", interrupted,
+                    )
                 self.run_store.append_step(
                     run_id, owner=self.owner, kind="model", summary="Model request failed",
                     result={"outcome": "error"},
                 )
                 return self._stop(run_id, state, "failed", "model_error")
+            finally:
+                stop_watching()
             reason = self._interruption(state)
             if reason is not None or turn.finish == "cancelled":
                 self.run_store.append_step(
