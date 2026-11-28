@@ -2686,6 +2686,28 @@ def test_a_marker_from_before_the_cache_format_is_a_miss(
     assert stored == {"format": frontend_module._INSTALL_CACHE_FORMAT, "lock_digest": "lock-a"}
 
 
+def test_a_source_build_installs_every_dependency_type_whatever_the_environment_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#670: NODE_ENV=production made npm ci leave out TypeScript and Vite, and
+    that tree was cached under the lockfile's digest, so every later build
+    reused it and failed even after the setting was gone."""
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("NPM_CONFIG_OMIT", "dev optional peer")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        commands.append(command)
+        (cwd / "node_modules").mkdir()
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build"), "lock", tmp_path / "cache")
+
+    (command,) = commands
+    assert command[1] == "ci"
+    assert {"--include=dev", "--include=optional", "--include=peer"} <= set(command[2:])
+
+
 def test_the_install_cache_keeps_npm_bin_links_as_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
