@@ -603,6 +603,21 @@ class AgentRuns:
             managed = self._live.get(run_id)
             return managed is not None and managed.owner == owner
 
+    def resume_required(self, run_id: str, *, owner: str) -> bool:
+        """Whether the run is parked after a recorded decision, waiting for Resume (#682).
+
+        Recording a decision moves the run to running, but only an explicit
+        Resume schedules it. A client whose Resume request failed, or that
+        reopened the run, had no way to know Resume was still needed.
+        """
+        with self._lock:
+            run = self._owned(run_id, owner)
+            managed = self._live.get(run_id)
+            return (
+                managed is not None and managed.owner == owner and not managed.driving
+                and self._active_id == run_id and run.status == "running"
+            )
+
     def undo_available(self, run_id: str, *, owner: str) -> bool:
         """Report an owner-bound checkpoint, never local acceptance UI state.
 

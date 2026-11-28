@@ -144,7 +144,9 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"idle" | "live" | "reconnecting">("idle");
   const [busy, setBusy] = useState<"starting" | "deciding" | "stopping" | "resuming" | "opening" | null>(null);
-  const [resumeRequired, setResumeRequired] = useState(false);
+  // Set when a recorded decision's Resume request failed; the server's
+  // resume_required covers a reopened run (#682).
+  const [resumeFailed, setResumeFailed] = useState(false);
   const [followVersion, setFollowVersion] = useState(0);
   const cursorRef = useRef(0);
   const statusRef = useRef<string | null>(null);
@@ -152,6 +154,8 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
   const currentRunRef = useRef<string | null>(null);
   const runId = run?.id ?? null;
   currentRunRef.current = runId;
+  const resumeRequired = Boolean(run && !TERMINAL.has(run.status)
+    && (resumeFailed || run.resume_required === true));
 
   useEffect(() => {
     if (!enabled || !runId) return;
@@ -242,7 +246,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       statusRef.current = created.status;
       currentRunRef.current = created.id;
       setEvents([]);
-      setResumeRequired(false);
+      setResumeFailed(false);
       setRun(created);
       setFollowVersion((previous) => previous + 1);
       return true;
@@ -265,7 +269,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       statusRef.current = selected.status;
       currentRunRef.current = selected.id;
       setEvents([]);
-      setResumeRequired(false);
+      setResumeFailed(false);
       setRun(selected);
       setFollowVersion((previous) => previous + 1);
     } catch (cause) {
@@ -283,8 +287,21 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
     statusRef.current = null;
     currentRunRef.current = null;
     setEvents([]);
-    setResumeRequired(false);
+    setResumeFailed(false);
     setRun(null);
+  };
+
+  /** After a decision error, show what the server now holds and follow it again. */
+  const reconcile = async (id: string): Promise<void> => {
+    try {
+      const fresh = await api.get(id);
+      if (currentRunRef.current !== id || fresh.id !== id) return;
+      statusRef.current = fresh.status;
+      setRun(fresh);
+      setFollowVersion((previous) => previous + 1);
+    } catch {
+      // Keep the error already shown.
+    }
   };
 
   /** Re-read the shown run's state, e.g. after its work copy was discarded (#680). */
@@ -314,14 +331,18 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
         const resumed = await api.resume(run.id);
         statusRef.current = resumed.status;
         setRun(resumed);
-        setResumeRequired(false);
+        setResumeFailed(false);
         setFollowVersion((previous) => previous + 1);
       } catch (cause) {
-        setResumeRequired(true);
+        setResumeFailed(true);
         setError(describeApiError(cause, "Approval was saved, but the run could not resume. Choose Resume run."));
       }
     } catch (cause) {
       setError(describeApiError(cause, "This approval could not be saved. Review it again."));
+      // The approval may have expired, or the decision may have been saved
+      // before the response was lost: show the run as the server has it.
+      // Nothing is approved or resumed automatically (#677, #682).
+      await reconcile(run.id);
     } finally {
       setBusy(null);
     }
@@ -335,7 +356,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       const updated = await api.resume(run.id);
       statusRef.current = updated.status;
       setRun(updated);
-      setResumeRequired(false);
+      setResumeFailed(false);
       setFollowVersion((previous) => previous + 1);
     } catch (cause) {
       setError(describeApiError(cause, "Could not resume the run."));
@@ -352,7 +373,7 @@ export function useAgentRun(api: AgentApi, enabled: boolean) {
       const cancelled = await api.stop(run.id);
       statusRef.current = cancelled.status;
       setRun(cancelled);
-      setResumeRequired(false);
+      setResumeFailed(false);
       // A stream parked at an approval must wake up to show cancellation.
       setFollowVersion((previous) => previous + 1);
     } catch (cause) {

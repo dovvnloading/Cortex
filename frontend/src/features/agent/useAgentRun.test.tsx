@@ -179,6 +179,41 @@ describe("useAgentRun", () => {
     expect(result.current.run?.id).toBe("run-b");
   });
 
+  it("offers Resume for a reopened run that the server says is waiting for it (#682)", async () => {
+    const api = fakeApi();
+    vi.mocked(api.get).mockResolvedValue({ ...run, status: "running", resume_required: true });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.open(run.id); });
+    expect(result.current.resumeRequired).toBe(true);
+
+    await act(async () => { await result.current.resume(); });
+
+    expect(api.resume).toHaveBeenCalledWith(run.id);
+    expect(api.decide).not.toHaveBeenCalled();
+    expect(result.current.resumeRequired).toBe(false);
+  });
+
+  it("re-reads the run when a decision's response is lost, without approving again (#682)", async () => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "approval", { seq: 4, request: { tool: "run_command", command: "pytest", plain_text: "Run the tests." } }));
+      onEvent(sse(2, "status", { status: "waiting_approval" }));
+    });
+    vi.mocked(api.decide).mockRejectedValue(new Error("network down"));
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.pendingApproval?.seq).toBe(4));
+    // The decision was saved before its response was lost.
+    vi.mocked(api.get).mockResolvedValue({ ...run, status: "running", resume_required: true });
+
+    await act(async () => { await result.current.decide(4, "allow_once"); });
+
+    expect(api.decide).toHaveBeenCalledTimes(1);
+    expect(api.resume).not.toHaveBeenCalled();
+    expect(result.current.run?.status).toBe("running");
+    expect(result.current.resumeRequired).toBe(true);
+  });
+
   it("reports the one-time model check while it runs and the result it ends with", async () => {
     const api = fakeApi();
     let emit: ((event: AgentSSEEvent) => void) | null = null;

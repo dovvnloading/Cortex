@@ -206,6 +206,11 @@
             "title": "Project Root",
             "type": "string"
           },
+          "resume_required": {
+            "default": false,
+            "title": "Resume Required",
+            "type": "boolean"
+          },
           "status": {
             "title": "Status",
             "type": "string"

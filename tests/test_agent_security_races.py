@@ -203,6 +203,30 @@ def test_stop_after_a_decision_without_resume_ends_the_run_and_frees_the_slot(
         manager.close()
 
 
+def test_a_run_parked_after_its_decision_reports_that_it_needs_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#682: a client that lost its Resume request could not tell from the
+    run that Resume was still needed, so reopening it lost the action."""
+    monkeypatch.setattr(agent_runs, "fetch_url", lambda url, *, approved: "reference")
+    model = _Replies(_tool("web_fetch", {"url": "https://example.invalid/once"}), _final())
+    manager = AgentRuns(data_dir=tmp_path / "data", chat_client=model)
+    project = _project(tmp_path)
+    try:
+        run = _start(manager, project)
+        _await(manager, run.id, "waiting_approval")
+        assert manager.resume_required(run.id, owner=_OWNER) is False
+        seq, _request = _pending(manager, run.id)
+        manager.approval(run.id, owner=_OWNER, seq=seq, decision="allow_once")
+
+        assert manager.resume_required(run.id, owner=_OWNER) is True
+        manager.resume(run.id, owner=_OWNER)
+        _await(manager, run.id, "completed")
+        assert manager.resume_required(run.id, owner=_OWNER) is False
+    finally:
+        manager.close()
+
+
 def test_foreign_owner_and_other_run_sequences_never_transfer_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
