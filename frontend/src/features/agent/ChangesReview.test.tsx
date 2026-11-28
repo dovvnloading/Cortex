@@ -117,6 +117,31 @@ describe("ChangesReview", () => {
     expect(onDiscard).not.toHaveBeenCalled();
   });
 
+  it("explains the 32-file limit and accepts a batch within it (#681)", async () => {
+    const user = userEvent.setup();
+    const many: FileChange[] = Array.from({ length: 33 }, (_, index) => ({
+      path: `src/file${index}.ts`, kind: "modify",
+      diff: `--- a/src/file${index}.ts
++++ b/src/file${index}.ts
+@@ -1 +1 @@
+-a
++b
+`,
+    }));
+    const { onAccept } = renderReview({ changes: many });
+    const accept = screen.getByRole("button", { name: "Accept selected to project" });
+    expect(accept).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("33 files are selected. Accept at most 32 at a time");
+    await user.click(accept);
+    expect(screen.queryByRole("group", { name: "Accept confirmation" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "Select src/file32.ts" }));
+    expect(screen.queryByText(/Accept at most 32/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Accept selected to project" }));
+    await user.click(screen.getByRole("button", { name: "Confirm accept" }));
+    expect(onAccept).toHaveBeenCalledExactlyOnceWith(many.slice(0, 32).map((change) => change.path));
+  });
+
   it("disables acceptance for no selected files and for an empty changeset", async () => {
     const user = userEvent.setup();
     const { onAccept } = renderReview();

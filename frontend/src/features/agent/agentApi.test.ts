@@ -64,6 +64,8 @@ describe("Agent API transport", () => {
     const agent = createAgentApi(client as unknown as CortexApi);
     await expect(agent.accept("r 1", ["app.py"], false)).rejects.toThrow(/confirm acceptance/i);
     await expect(agent.accept("r 1", [], true)).rejects.toThrow(/Select changed files/i);
+    const tooMany = Array.from({ length: 33 }, (_, index) => `f${index}.py`);
+    await expect(agent.accept("r 1", tooMany, true)).rejects.toThrow(/at most 32 files/i);
     await expect(agent.discard("r 1", false)).rejects.toThrow(/Confirm discard/i);
     await expect(agent.undo("r 1", false)).rejects.toThrow(/Confirm undo/i);
     expect(client.acceptAgentChanges).not.toHaveBeenCalled();

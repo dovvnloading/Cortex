@@ -1,5 +1,6 @@
 import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertDialog, DialogContent } from "../../shared/ui/Dialog";
+import { MAX_ACCEPT_PATHS } from "./agentApi";
 
 /** One entry from the workcopy changeset, with its path supplied by the caller. */
 export type FileChange = {
@@ -113,6 +114,9 @@ export function ChangesReview({
   const unchecked = selection.signature === signature ? selection.unchecked : [];
   const expanded = folds.signature === signature ? folds.expanded : [];
   const selectedPaths = changes.filter((change) => !unchecked.includes(change.path)).map((change) => change.path);
+  // One accept takes at most this many files; a larger selection used to be
+  // refused only after its confirmation (#681).
+  const overLimit = selectedPaths.length > MAX_ACCEPT_PATHS;
   const confirmationCurrent = confirmation !== null
     && confirmation.signature === signature
     && (confirmation.action !== "accept" || (
@@ -184,7 +188,8 @@ export function ChangesReview({
 
   const completeConfirmation = () => {
     if (!confirmation || !confirmationCurrent || busy) return;
-    if (confirmation.action === "accept" && !accepted && confirmation.paths.length > 0) {
+    if (confirmation.action === "accept" && !accepted && confirmation.paths.length > 0
+      && confirmation.paths.length <= MAX_ACCEPT_PATHS) {
       setConfirmation(null);
       onAccept([...confirmation.paths]);
     } else if (confirmation.action === "discard" && !accepted) {
@@ -239,6 +244,11 @@ export function ChangesReview({
         {error && <p role="alert" className="coding-error">{error}</p>}
         {notice && <p role="status">{notice}</p>}
 
+        {overLimit && (
+          <p role="alert" className="coding-error">
+            {selectedPaths.length} files are selected. Accept at most {MAX_ACCEPT_PATHS} at a time: clear some, accept the rest, then accept the others.
+          </p>
+        )}
         {changes.length === 0 ? (
           <p>No files to review.</p>
         ) : (
@@ -360,9 +370,11 @@ export function ChangesReview({
               ref={acceptButtonRef}
               type="button"
               className="button button-primary"
-              disabled={selectedPaths.length === 0 || busy}
+              disabled={selectedPaths.length === 0 || overLimit || busy}
               onClick={() => {
-                if (selectedPaths.length > 0) setConfirmation({ action: "accept", signature, paths: [...selectedPaths] });
+                if (selectedPaths.length > 0 && !overLimit) {
+                  setConfirmation({ action: "accept", signature, paths: [...selectedPaths] });
+                }
               }}
             >
               Accept selected to project

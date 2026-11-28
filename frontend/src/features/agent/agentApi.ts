@@ -12,6 +12,9 @@ import type {
 import type { CortexApi } from "../../api/client";
 import { cloudModelProvider } from "../../lib/localModels";
 
+/** The most files one accept request takes (the server's limit). */
+export const MAX_ACCEPT_PATHS = 32;
+
 export type AgentApi = {
   start: (payload: StartAgentRun) => Promise<AgentRunResponse>;
   list: () => Promise<AgentRunListResponse>;
@@ -65,7 +68,10 @@ export function createAgentApi(client: CortexApi): AgentApi {
       return result;
     }),
     accept(runId, paths, confirmed) {
-      if (confirmed !== true || paths.length < 1 || paths.length > 32
+      if (paths.length > MAX_ACCEPT_PATHS) {
+        return Promise.reject(new Error("Accept at most " + MAX_ACCEPT_PATHS + " files at a time."));
+      }
+      if (confirmed !== true || paths.length < 1
         || paths.some((path) => typeof path !== "string" || !path.trim())
         || new Set(paths).size !== paths.length) {
         return Promise.reject(new Error("Select changed files and explicitly confirm acceptance."));
