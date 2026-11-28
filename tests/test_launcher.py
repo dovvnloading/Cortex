@@ -14,6 +14,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -2505,6 +2506,157 @@ def test_stale_staging_directory_removal_failure_is_logged_not_raised(
     assert "Could not remove stale frontend build directory" in caplog.text
 
 
+def _write_install_marker(cache_root: Path, digest: str) -> None:
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"format": frontend_module._INSTALL_CACHE_FORMAT, "lock_digest": digest}),
+        encoding="utf-8",
+    )
+
+
+def _cache_with(cache_root: Path, digest: str, content: str) -> None:
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text(content, encoding="utf-8")
+    _write_install_marker(cache_root, digest)
+
+
+def _recording_npm_ci(monkeypatch: pytest.MonkeyPatch, content: str) -> list[Path]:
+    calls: list[Path] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        calls.append(cwd)
+        node_modules = cwd / "node_modules"
+        node_modules.mkdir(parents=True)
+        (node_modules / "package.json").write_text(content, encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+    return calls
+
+
+def _fresh_build_root(tmp_path: Path, name: str) -> Path:
+    root = tmp_path / name
+    root.mkdir()
+    return root
+
+
+def test_a_cache_refresh_that_fails_mid_copy_is_never_a_hit_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#664: the old marker survived a failed copy and vouched for a partial tree."""
+    cache_root = tmp_path / "cache"
+    _cache_with(cache_root, "lock-a", '{"a": true}')
+    calls = _recording_npm_ci(monkeypatch, '{"b": true}')
+    real_copytree = shutil.copytree
+
+    def copy_partway(source, destination, *args, **kwargs):
+        if Path(source).parent.name.startswith("build"):
+            Path(destination).mkdir(parents=True)
+            (Path(destination) / "half.txt").write_text("partial", encoding="utf-8")
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(frontend_module.shutil, "copytree", copy_partway)
+    build_b = _fresh_build_root(tmp_path, "build-b")
+    frontend_module._install_if_needed(build_b, "lock-b", cache_root)
+    monkeypatch.setattr(frontend_module.shutil, "copytree", real_copytree)
+
+    # The build itself still has its dependencies; only the cache was not saved.
+    assert (build_b / "node_modules" / "package.json").read_text(encoding="utf-8") == '{"b": true}'
+    assert not (cache_root / frontend_module.INSTALL_MANIFEST_NAME).exists()
+    assert [entry.name for entry in cache_root.iterdir()] == ["node_modules"]
+
+    # Back on the first lockfile: whatever the cache holds is not trusted.
+    calls.clear()
+    build_a = _fresh_build_root(tmp_path, "build-a")
+    frontend_module._install_if_needed(build_a, "lock-a", cache_root)
+    assert calls == [build_a], "a cache without a marker for its tree was reused"
+
+
+def test_a_refresh_interrupted_before_its_marker_is_written_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The new tree in place under the old marker gave lockfile A lockfile B's tree."""
+    cache_root = tmp_path / "cache"
+    _cache_with(cache_root, "lock-a", '{"a": true}')
+    calls = _recording_npm_ci(monkeypatch, '{"b": true}')
+    real_replace = os.replace
+    marker = cache_root / frontend_module.INSTALL_MANIFEST_NAME
+
+    def refuse_marker(source, destination, *args, **kwargs):
+        if Path(destination) == marker:
+            raise PermissionError(errno.EACCES, "held by another program")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(frontend_module.os, "replace", refuse_marker)
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build-b"), "lock-b", cache_root)
+    monkeypatch.setattr(frontend_module.os, "replace", real_replace)
+
+    assert not marker.exists()
+    assert not list(cache_root.glob("*.tmp"))
+    calls.clear()
+    build_a = _fresh_build_root(tmp_path, "build-a")
+    frontend_module._install_if_needed(build_a, "lock-a", cache_root)
+    assert calls == [build_a]
+    assert (build_a / "node_modules" / "package.json").read_text(encoding="utf-8") == '{"b": true}'
+
+
+def test_a_marker_from_before_the_cache_format_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Its tree may hold ``.bin`` links copied as files (#665), so it is rebuilt once."""
+    cache_root = tmp_path / "cache"
+    (cache_root / "node_modules").mkdir(parents=True)
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "lock-a"}), encoding="utf-8"
+    )
+    calls = _recording_npm_ci(monkeypatch, '{"fresh": true}')
+    build = _fresh_build_root(tmp_path, "build")
+
+    frontend_module._install_if_needed(build, "lock-a", cache_root)
+
+    assert calls == [build]
+    stored = json.loads((cache_root / frontend_module.INSTALL_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert stored == {"format": frontend_module._INSTALL_CACHE_FORMAT, "lock_digest": "lock-a"}
+
+
+def test_the_install_cache_keeps_npm_bin_links_as_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#665: .bin/tsc was copied as the file it points to, so its relative
+    imports resolved against .bin and every cached build failed."""
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to("elsewhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+    probe.unlink()
+    link_target = os.path.join("..", "typescript", "bin", "tsc")
+
+    def fake_npm_ci(command: list[str], *, cwd: Path) -> None:
+        tsc = cwd / "node_modules" / "typescript" / "bin" / "tsc"
+        tsc.parent.mkdir(parents=True)
+        tsc.write_text("require('../lib/tsc.js')", encoding="utf-8")
+        bin_dir = cwd / "node_modules" / ".bin"
+        bin_dir.mkdir()
+        (bin_dir / "tsc").symlink_to(link_target)
+
+    monkeypatch.setattr(frontend_module, "_run", fake_npm_ci)
+    cache_root = tmp_path / "cache"
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build-1"), "lock", cache_root)
+
+    def no_npm(*_args, **_kwargs):
+        pytest.fail("npm ci should not run on a cache hit")
+
+    monkeypatch.setattr(frontend_module, "_run", no_npm)
+    second = _fresh_build_root(tmp_path, "build-2")
+    frontend_module._install_if_needed(second, "lock", cache_root)
+
+    for tsc in (cache_root / "node_modules" / ".bin" / "tsc", second / "node_modules" / ".bin" / "tsc"):
+        assert tsc.is_symlink(), f"{tsc} was copied as a file"
+        assert os.readlink(tsc) == link_target
+        assert tsc.read_text(encoding="utf-8") == "require('../lib/tsc.js')"
+
+
 def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2514,9 +2666,7 @@ def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
     cached_modules = cache_root / "node_modules"
     cached_modules.mkdir(parents=True)
     (cached_modules / "package.json").write_text("{}", encoding="utf-8")
-    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
-        json.dumps({"lock_digest": "abc123"}), encoding="utf-8"
-    )
+    _write_install_marker(cache_root, "abc123")
 
     def fail_run(*_args, **_kwargs):
         pytest.fail("npm ci should not run on a cache hit")
@@ -2537,9 +2687,7 @@ def test_install_cache_miss_runs_npm_ci_when_lockfile_changes(
     cached_modules = cache_root / "node_modules"
     cached_modules.mkdir(parents=True)
     (cached_modules / "package.json").write_text('{"old": true}', encoding="utf-8")
-    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
-        json.dumps({"lock_digest": "old-digest"}), encoding="utf-8"
-    )
+    _write_install_marker(cache_root, "old-digest")
 
     calls: list[Path] = []
 
