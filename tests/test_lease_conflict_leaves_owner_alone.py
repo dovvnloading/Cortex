@@ -12,7 +12,11 @@ from threading import Event
 
 from cortex_backend.execution.local_runtime import LocalExecutionCoordinator
 from cortex_backend.execution.recipe_coordinator import RecipeExecutionCoordinator
-from cortex_backend.execution.scratch_compute import SCRATCH_PAYLOAD_SCHEMA, ScratchComputeRequest
+from cortex_backend.execution.scratch_compute import (
+    SCRATCH_COMPUTE_PROFILE,
+    SCRATCH_PAYLOAD_SCHEMA,
+    ScratchComputeRequest,
+)
 from test_recipe_coordinator import OWNER, _FakeAttempt, _output, _repository, _request
 
 
@@ -25,7 +29,7 @@ def test_a_scratch_attempt_that_loses_the_lease_writes_nothing(
         job_id="scratch-owned-elsewhere",
         owner=owner,
         request_id="scratch-owned-elsewhere",
-        profile="scratch.compute.v1",
+        profile=SCRATCH_COMPUTE_PROFILE,
         payload={"schema_version": SCRATCH_PAYLOAD_SCHEMA, "expression": "1 + 1"},
     )
     assert created
