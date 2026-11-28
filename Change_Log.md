@@ -44,6 +44,54 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   run. It refuses a release that is not a draft before downloading anything,
   and checks again right before upload that the tag still names the same draft
   (#704, #705; #724).
+- Stop always wins over a code job's approval. Pressing Stop while another
+  window approves the job cancels it instead of reporting success and leaving
+  the approval live, and Stop pressed before the approval prompt exists ends
+  the job at once instead of showing a prompt for work already cancelled.
+  A code, scratch or image worker that finishes starting up after Stop is
+  never told to run (#579, #622, #593; #725).
+- The README tour recorder no longer deletes an existing `csv-importer`
+  folder under `-ProjectParent`: it refuses to start instead, and on exit it
+  removes only the sample project it created (#706; #726).
+- A pull request that moves code into `docs/` no longer skips the Quality
+  checks: the document-only classifier now sees both sides of a rename (#714;
+  #727).
+- The release workflow builds only an existing tag that points at the
+  verified commit: a dispatched name is resolved as a tag, never a branch of
+  the same name, and the draft is created with `--verify-tag` only after
+  checking the tag still names that commit (#715; #728).
+- A re-run of a failed Quality shard can replace its own artifacts, so a
+  retried shard whose tests pass no longer fails on its upload (#721; #729).
+- Dependency refresh always starts from main, so a run dispatched from
+  another branch cannot carry that branch into the lock-only pull request,
+  and it updates its existing pull request instead of failing on a stale
+  lease every month after the first (#703, #720; #730).
+- Every job the previous process left unfinished is recovered at startup: a
+  scratch or image job whose worker died within its 60-second lease is
+  relaunched (or finished as cancelled) instead of staying stuck until a later
+  restart, and the recovery scan is no longer capped at 200 jobs (#577, #623;
+  #737).
+- A zero-byte database file is no longer taken for a healthy SQLite database,
+  so it cannot be kept as the chat or settings store and rotate the real
+  backups out (#636; #738).
+- A permanent-memory save that fails leaves the saved memories as they were
+  instead of keeping the rejected change in memory (#637; #738).
+- Rotating the chat backup no longer loses the older generation when the file
+  system cannot make hard links and the new snapshot is refused (#647; #738).
+- A conversation keeps the order its turns were written in when the system
+  clock steps back; a regenerated reply keeps its place (#648; #738).
+- Quarantining or archiving a legacy chat file never overwrites one preserved
+  earlier (#649; #738).
+- A deeply nested, corrupt memory or legacy chat file is treated as unreadable:
+  the memory backup is used, and the legacy file is quarantined while the rest
+  migrate, instead of startup failing (#650, #651; #738).
+- A Windows registry error partway through reading the legacy settings fails
+  the one-time migration so it is retried, instead of committing a partial
+  import (#652; #738).
+- A rejected stale settings save no longer rotates away the recovery backups
+  (#653; #738).
+- An extended-length local data folder (`\\?\C:\...`) is accepted instead of
+  being refused as a network path (#654; #738).
 
 ### Security
 
