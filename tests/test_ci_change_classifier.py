@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -18,9 +19,32 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "quality.yml"
 
+def _bash() -> str | None:
+    """Git's own bash on Windows; plain bash elsewhere.
+
+    On a Windows runner ``bash`` on PATH can be WSL's launcher, which cannot
+    run this script against Windows paths. Git for Windows ships the shell
+    GitHub Actions uses for ``shell: bash``, beside ``git.exe``.
+    """
+
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    git = shutil.which("git")
+    if git is None:
+        return None
+    # git.exe sits in <Git>/cmd or <Git>/mingw64/bin, and bash.exe in <Git>/bin.
+    for root in list(Path(git).resolve().parents)[:3]:
+        for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+BASH = _bash()
+
 pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None or shutil.which("git") is None,
-    reason="requires bash and git",
+    BASH is None or shutil.which("git") is None,
+    reason="requires Git's bash and git",
 )
 
 
@@ -87,7 +111,8 @@ def _classify(tmp_path: Path, change: dict[str, str | None], moves: dict[str, st
         "BROWSER_IF": browser_if,
         "GITHUB_OUTPUT": str(output),
     }
-    subprocess.run(["bash", "-c", script], cwd=repo, env=env, check=True, capture_output=True, text=True)
+    assert BASH is not None
+    subprocess.run([BASH, "-c", script], cwd=repo, env=env, check=True, capture_output=True, text=True)
     pairs = (line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line)
     return dict(pairs)
 
