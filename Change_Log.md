@@ -42,8 +42,9 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
 - Stop always wins over a code job's approval. Pressing Stop while another
   window approves the job cancels it instead of reporting success and leaving
   the approval live, and Stop pressed before the approval prompt exists ends
-  the job at once instead of showing a prompt for work already cancelled
-  (#579, #622; #725).
+  the job at once instead of showing a prompt for work already cancelled.
+  A code, scratch or image worker that finishes starting up after Stop is
+  never told to run (#579, #622, #593; #725).
 
 ### Security
 
