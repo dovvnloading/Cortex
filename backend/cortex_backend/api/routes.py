@@ -1956,7 +1956,7 @@ def _raise_attachment_staging_error(exc: AttachmentStagingError) -> NoReturn:
             status_code=status.HTTP_409_CONFLICT,
             detail="Attachment request is already in progress.",
         ) from exc
-    if exc.code in {"attachment_artifact_unavailable", "attachment_failed"}:
+    if exc.code in {"attachment_artifact_unavailable", "attachment_failed", "attachment_cancelled"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Attachment request is no longer available.",

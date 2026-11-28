@@ -482,6 +482,19 @@ class RecipeExecutionCoordinator:
             wording=_RECIPE_WORDING,
         )
 
+    def _completed(self, job_id: str) -> bool:
+        """Whether the job is recorded as succeeded; True when that cannot be read.
+
+        Used before rolling back a published output: when the store cannot say,
+        keeping an artifact retention will reclaim is safer than deleting one a
+        committed result may refer to.
+        """
+        try:
+            job = self.repository.get_job(job_id)
+        except Exception:
+            return True
+        return job is not None and job.status == "succeeded"
+
     def _delete_published(self, published: tuple[PublishedArtifact, ...]) -> None:
         for item in published:
             try:
@@ -586,7 +599,17 @@ class RecipeExecutionCoordinator:
             # as cancelled is all that is required.
             self._finish_failure(job_id, cancel_event, "cancelled")
         except Exception:
-            self._finish_failure(job_id, cancel_event, "coordinator_failed")
+            failure_code = "coordinator_failed"
+            # An unexpected failure after publishing (the completion write
+            # failing, say) must not leave an output no result refers to.
+            # Unless the completion is known to have committed: then the
+            # artifact is the job's result and stays.
+            if published and not self._completed(job_id):
+                try:
+                    self._delete_published(published)
+                except RecipeExecutionError:
+                    failure_code = "artifact_cleanup_pending"
+            self._finish_failure(job_id, cancel_event, failure_code)
         finally:
             if attempt is not None:
                 try:

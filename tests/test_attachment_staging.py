@@ -428,3 +428,28 @@ def test_startup_recovery_retires_a_lease_less_staging_job_only_once_it_has_gone
     assert repository.get_job(quiet.job_id).status == "failed"
     assert repository.get_job(quiet.job_id).error == ATTACHMENT_INTERRUPTED
     assert repository.get_job(fresh.job_id).status == "queued"
+
+
+def test_a_stop_while_staging_ends_cancelled_not_failed_and_drops_the_artifact(
+    execution_repository, monkeypatch
+):
+    """Stop landing while the bytes were staged was recorded as a persistence failure (#596)."""
+
+    repository, boundary, service = _service_over(execution_repository)
+    real_stage = boundary.stage_bytes
+
+    def stage_then_stop(job_id, *args, **kwargs):
+        artifact = real_stage(job_id, *args, **kwargs)
+        repository.request_cancel(job_id)  # Stop from another request
+        return artifact
+
+    monkeypatch.setattr(boundary, "stage_bytes", stage_then_stop)
+    with pytest.raises(AttachmentStagingError) as error:
+        service.stage(owner=OWNER, request_id="attach-stopped", content=_image_bytes())
+
+    assert error.value.code == "attachment_cancelled"
+    jobs = repository.list_jobs(owner=OWNER, include_terminal=True)
+    assert [job.status for job in jobs] == ["cancelled"]
+    assert jobs[0].error == "cancelled"
+    with repository.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0] == 0
