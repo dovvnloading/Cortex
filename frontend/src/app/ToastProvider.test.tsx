@@ -84,6 +84,28 @@ describe("ToastProvider", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("keeps waiting while focus stays on Undo after the pointer leaves, and the other way round (#710)", () => {
+    render(<ToastProvider><button type="button">elsewhere</button></ToastProvider>);
+    notify("Chat deleted.", "success", { action: { label: "Undo", onAction: vi.fn() }, durationMs: 6000 });
+    const toast = screen.getByRole("status");
+
+    fireEvent.mouseEnter(toast);
+    act(() => { screen.getByRole("button", { name: "Undo" }).focus(); });
+    fireEvent.mouseLeave(toast);
+    advance(60_000);
+    expect(screen.getByRole("status")).toBeVisible();
+
+    fireEvent.mouseEnter(toast);
+    act(() => { screen.getByRole("button", { name: "elsewhere" }).focus(); });
+    advance(60_000);
+    expect(screen.getByRole("status")).toBeVisible();
+
+    // Neither hovered nor focused: the countdown finishes.
+    fireEvent.mouseLeave(toast);
+    advance(6000);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
   it("runs a toast's action from its button", () => {
     const onAction = vi.fn();
     render(<ToastProvider><p>app</p></ToastProvider>);

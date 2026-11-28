@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { AlertTriangle, Check, Info, X } from "lucide-react";
-import type { FocusEvent, ReactNode } from "react";
+import { useRef, type FocusEvent, type ReactNode } from "react";
 import { useUiStore, type Toast } from "../stores/useUiStore";
 
 export { useToast } from "../stores/useUiStore";
@@ -32,18 +32,27 @@ function ToastItem({ toast }: { toast: Toast }) {
   const isError = toast.kind === "error";
 
   // A toast that is being hovered or has keyboard focus inside it is being
-  // read or used, so its countdown waits.
+  // read or used, so its countdown waits -- until neither is true. Resuming
+  // when the first of the two ended let an Undo toast with focus still on its
+  // button expire and commit the deletion (#710).
+  const hovered = useRef(false);
+  const focused = useRef(false);
+  const resumeWhenIdle = () => {
+    if (!hovered.current && !focused.current) resumeToast(id);
+  };
   const resumeUnlessFocusStaysInside = (event: FocusEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget)) resumeToast(id);
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    focused.current = false;
+    resumeWhenIdle();
   };
 
   return (
     <div
       className={`toast toast-${toast.kind}`}
       role={isError ? "alert" : "status"}
-      onMouseEnter={() => pauseToast(id)}
-      onMouseLeave={() => resumeToast(id)}
-      onFocus={() => pauseToast(id)}
+      onMouseEnter={() => { hovered.current = true; pauseToast(id); }}
+      onMouseLeave={() => { hovered.current = false; resumeWhenIdle(); }}
+      onFocus={() => { focused.current = true; pauseToast(id); }}
       onBlur={resumeUnlessFocusStaysInside}
     >
       {toast.kind === "success" && <Check aria-hidden="true" size={16} />}
