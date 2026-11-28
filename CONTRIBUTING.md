@@ -286,7 +286,9 @@ The version is written once, in `backend/cortex_backend/__init__.py`;
    in a pull request. Azure CLI must be signed in as that dedicated signer; the
    script refuses any other identity, checks the downloaded build against CI's
    checksum, verifies the signature, its publisher and its timestamp, and
-   replaces the archive and checksum on the draft.
+   replaces the archive and checksum on the draft. It refuses a release that
+   is not a draft, and it never deletes files: `-WorkDirectory` must be new or
+   empty, and by default each run gets a fresh one under the temp folder.
 4. Write the release notes from the changelog, review the draft, and publish.
 
 ## Code style

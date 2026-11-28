@@ -221,6 +221,10 @@ class LocalRecipeWorkerAttempt:
                         and message.get("event") == "ready"
                     ):
                         if not released:
+                            if cancel_event.is_set() or self._cancel_event.is_set():
+                                # Stop came before the worker was released, so nothing has
+                                # run yet: it must never be told to go.
+                                raise RecipeExecutionError("cancelled")
                             released = True
                             try:
                                 worker_job = _contain_worker(process, RECIPE_WORKER_JOB_LIMITS)

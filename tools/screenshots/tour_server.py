@@ -233,10 +233,15 @@ class ScriptedAgentModel:
 
 
 def write_sample_project(parent: Path) -> Path:
+    """Create the sample project in a new ``csv-importer`` folder under ``parent``.
+
+    ``parent`` is the caller's choice and may already hold a real project of
+    that name, so an existing folder is refused (``FileExistsError``), never
+    overwritten or removed.
+    """
     root = parent / "csv-importer"
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    parent.mkdir(parents=True, exist_ok=True)
+    root.mkdir()
     for name, text in PROJECT_FILES.items():
         (root / name).write_text(text, encoding="utf-8", newline="\n")
     return root
@@ -321,8 +326,15 @@ def main() -> None:
     work_dir = Path(tempfile.mkdtemp(prefix="cortex-tour-"))
     project_parent = args.project_parent or work_dir
     created_parent = not project_parent.exists()
-    project = write_sample_project(project_parent)
+    project: Path | None = None
     try:
+        try:
+            project = write_sample_project(project_parent)
+        except FileExistsError:
+            raise SystemExit(
+                f"{project_parent / 'csv-importer'} already exists. Remove it or pass "
+                "another --project-parent; the tour never overwrites an existing folder."
+            ) from None
         app = build_tour_app(frontend_dist=args.frontend_dist, work_dir=work_dir)
         server = uvicorn.Server(
             uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="warning")
@@ -339,7 +351,10 @@ def main() -> None:
         print(project, flush=True)
         server.run()
     finally:
-        shutil.rmtree(project, ignore_errors=True)
+        # Only what this run created: the sample folder, and the parent if it
+        # did not exist before.
+        if project is not None:
+            shutil.rmtree(project, ignore_errors=True)
         if created_parent:
             shutil.rmtree(project_parent, ignore_errors=True)
         shutil.rmtree(work_dir, ignore_errors=True)

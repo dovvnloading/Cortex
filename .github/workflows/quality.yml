@@ -84,7 +84,9 @@ jobs:
           code=true
           browser=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            changed=$(git diff --name-only HEAD^1 HEAD)
+            # --no-renames lists both sides of a rename, so moving code into
+            # docs/ still counts as a code change (the deleted source path).
+            changed=$(git diff --no-renames --name-only HEAD^1 HEAD)
             echo "Changed files:"
             echo "$changed"
             if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(README\.md|SECURITY\.md|LICENSE|docs/.*)$'; then
