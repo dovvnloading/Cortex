@@ -37,15 +37,6 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   journals, authenticated recovery/workspace APIs and the read-only CLI
   remain available without data migration or automatic source writes.
 
-### Fixed
-
-- Stop always wins over a code job's approval. Pressing Stop while another
-  window approves the job cancels it instead of reporting success and leaving
-  the approval live, and Stop pressed before the approval prompt exists ends
-  the job at once instead of showing a prompt for work already cancelled.
-  A code, scratch or image worker that finishes starting up after Stop is
-  never told to run (#579, #622, #593; #725).
-
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
