@@ -14,6 +14,39 @@ function safeHref(value: string | undefined): string | null {
   }
 }
 
+/** The target of a same-document link ("#notes", a footnote reference), or null. */
+function fragmentOf(value: string | undefined): string | null {
+  if (!value || !value.startsWith("#") || value.length < 2) return null;
+  try {
+    return decodeURIComponent(value.slice(1));
+  } catch {
+    return null;
+  }
+}
+
+// rehype-sanitize prefixes every id it keeps with this, while the footnote
+// links remark-gfm writes already carry it once: "#user-content-fn-a" points
+// at id "user-content-user-content-fn-a".
+const SANITIZE_ID_PREFIX = "user-content-";
+
+/**
+ * Bring a same-document link's target into view: the nearest one to the
+ * link, so the answer it belongs to wins over another message that repeats
+ * the same footnote label. Nothing happens when no element has that id.
+ */
+function revealFragment(link: HTMLElement, fragment: string): void {
+  const ids = new Set([fragment, SANITIZE_ID_PREFIX + fragment]);
+  for (let scope = link.parentElement; scope; scope = scope.parentElement) {
+    const target = Array.from(scope.querySelectorAll<HTMLElement>("[id]")).find((element) => ids.has(element.id));
+    if (target) {
+      target.scrollIntoView({ block: "nearest" });
+      if (target.tabIndex < 0 && !target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+      target.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
+
 // react-markdown calls every custom renderer with an extra `node` prop (the
 // hast AST node) alongside the normal DOM props, described by `ExtraProps`.
 // It must be destructured out here -- left inside `...props`, it would be
@@ -21,6 +54,22 @@ function safeHref(value: string | undefined): string | null {
 // node="[object Object]" DOM attribute on every rendered link.
 function Link({ href, children, node: _node, ...props }: ComponentProps<"a"> & ExtraProps) {
   void _node;
+  // A fragment is navigation inside the answer (a footnote, a section). It
+  // was resolved against the app's root and opened in a new window, which
+  // showed the app's start page instead (#700).
+  const fragment = fragmentOf(href);
+  if (fragment !== null) {
+    return (
+      <a
+        {...props}
+        href={href}
+        onClick={(event) => {
+          event.preventDefault();
+          revealFragment(event.currentTarget, fragment);
+        }}
+      >{children}</a>
+    );
+  }
   const safe = safeHref(href);
   if (!safe) return <span>{children}</span>;
   return <a {...props} href={safe} target="_blank" rel="noopener noreferrer">{children}</a>;

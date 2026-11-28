@@ -13,6 +13,32 @@ describe("SafeMarkdown", () => {
     expect(screen.queryByRole("link", { name: "bad" })).not.toBeInTheDocument();
   });
 
+  it("keeps footnote and fragment links inside the answer (#700)", () => {
+    window.history.pushState({}, "", "/chat/thread-a");
+    const open = vi.spyOn(window, "open");
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    try {
+      render(<>
+        <div data-testid="first"><SafeMarkdown content={"Claim[^a].\n\n[^a]: The first source."} /></div>
+        <div data-testid="second"><SafeMarkdown content={"Other[^a].\n\n[^a]: The second source."} /></div>
+      </>);
+      const references = screen.getAllByRole("link", { name: "1" });
+      expect(references[0]).toHaveAttribute("href", "#user-content-fn-a");
+      expect(references[0]).not.toHaveAttribute("target");
+
+      fireEvent.click(references[1]);
+
+      // The second answer's own footnote, not the first one's.
+      const target = scroll.mock.contexts.at(-1) as HTMLElement;
+      expect(target.textContent).toContain("The second source.");
+      expect(screen.getByTestId("second")).toContainElement(target);
+      expect(window.location.pathname).toBe("/chat/thread-a");
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
   it("gives fenced code a language label and a valid copy control", () => {
     render(<SafeMarkdown content={"```ts\nconst answer = 42;\n```"} />);
 
