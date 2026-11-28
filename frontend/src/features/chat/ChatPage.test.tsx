@@ -1189,6 +1189,42 @@ describe("ChatPage composer integration", () => {
     expect(window.localStorage.getItem("cortex.composer.draft.thread-a")).toBe("Draft B");
   });
 
+  it("a remounted page sees the admission settled by the page it replaced (#686)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { accept = resolve; }))
+      .mockResolvedValue({ job_id: "job-b", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-b" });
+    const streamGeneration = vi.fn(async (jobId: string, onEvent: (event: unknown) => void) => {
+      if (jobId !== "job-a") return new Promise<void>(() => undefined);
+      onEvent({ event_id: 1, event: "generation.completed", job_id: jobId, thread_id: "thread-a", data: {} });
+    });
+    const api = chatApi({
+      chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 1 })), generate, streamGeneration,
+    } as Partial<CortexApi>);
+    const first = renderChat(api);
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "First message{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    renderChat(api);
+    // The remount restored the unresolved admission.
+    expect(await screen.findByText(/A previous message may have started before its response was lost/)).toBeInTheDocument();
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-a" });
+    });
+    await waitFor(() => expect(readPendingGenerationAdmission()).toBeNull());
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    // And the next message goes out as a new request.
+    const input = screen.getByLabelText("Message Cortex");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Second message{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1][0]).toMatchObject({ user_input: "Second message" });
+    expect(generate.mock.calls[1][0].request_id).not.toBe(generate.mock.calls[0][0].request_id);
+  });
+
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()

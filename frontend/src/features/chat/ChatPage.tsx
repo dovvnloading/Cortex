@@ -1,10 +1,17 @@
 import { Paperclip } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
 import { createRequestId } from "../../lib/requestId";
 import { displayChatTitle } from "../../lib/chatTitle";
-import { clearPendingGenerationAdmission, readPendingGenerationAdmission, storePendingGenerationAdmission, type PendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
+import {
+  clearPendingGenerationAdmission,
+  pendingGenerationAdmissionSnapshot,
+  readPendingGenerationAdmission,
+  storePendingGenerationAdmission,
+  subscribePendingGenerationAdmission,
+  type PendingGenerationAdmission,
+} from "../../lib/pendingGenerationAdmission";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
 import { composerAttachmentKey, composerDraftKey, readComposerAttachments, readComposerDraft, writeComposerAttachments, writeComposerDraft } from "../../lib/composerDraft";
 import { useShallow } from "zustand/react/shallow";
@@ -119,8 +126,11 @@ export function ChatPage({
   const drafts = useComposerStore((state) => state.drafts);
   const attachmentDrafts = useComposerStore((state) => state.attachments);
   const [restoredPending] = useState(readPendingGenerationAdmission);
-  // Render-visible mirror; refs are reserved for asynchronous event handlers.
-  const [pendingRecovery, setPendingRecovery] = useState<PendingGenerationAdmission | null>(restoredPending);
+  // Shared with every other mount of this page and with storage, so an
+  // admission another mount settled is gone here too (#686).
+  const pendingRecovery = useSyncExternalStore(
+    subscribePendingGenerationAdmission, pendingGenerationAdmissionSnapshot,
+  );
   const [lastPrompt, setLastPrompt] = useState(restoredPending?.prompt ?? "");
   const [lastAttachments, setLastAttachments] = useState<ChatAttachment[]>(restoredPending?.attachments ?? []);
   const [chatLoad, setChatLoad] = useState<ChatLoadState>({
@@ -165,12 +175,11 @@ export function ChatPage({
   const attachmentQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingAttachmentBatchesRef = useRef(0);
   const attachmentPreviewsRef = useRef(attachmentPreviews);
-  // A POST can be admitted before its response reaches the browser. Keep its
-  // idempotency key across that ambiguous failure so Retry can replay the
-  // admission instead of creating a second job (or a second new-chat thread).
-  // A deliberate submit does not pass this key and therefore starts a new
-  // user turn with a fresh request id.
-  const pendingAdmissionRef = useRef<PendingGenerationAdmission | null>(restoredPending);
+  // A POST can be admitted before its response reaches the browser. Its
+  // idempotency key is kept (lib/pendingGenerationAdmission) across that
+  // ambiguous failure so Retry can replay the admission instead of creating a
+  // second job (or a second new-chat thread). A deliberate submit does not
+  // pass this key and therefore starts a new user turn with a fresh request id.
   // The answer the last accepted regeneration was replacing. A failed or
   // stopped regeneration keeps that answer, so Retry must regenerate it again,
   // not send the question as a new turn (#671).
@@ -423,13 +432,14 @@ export function ChatPage({
   ): Promise<StartedGeneration | null> => {
     const input = prompt.trim() || (suppliedAttachments.length ? "Please review the attached file(s)." : "");
     if (!input || modelBusy || generation.jobId || startingRef.current) return null;
-    if (!requestIdOverride && pendingAdmissionRef.current) {
+    const unresolved = requestIdOverride ? null : readPendingGenerationAdmission();
+    if (unresolved) {
       // Never overwrite an unresolved acceptance with a new request ID.
       // A lost 202 may represent a live generation still running on the backend.
       setGenerationError({
         threadId,
         message: "An earlier message may already be running. Return to that chat and Retry to recover it, or Dismiss its warning to abandon recovery.",
-        retryable: pendingAdmissionRef.current.threadId === threadId,
+        retryable: unresolved.threadId === threadId,
       });
       return null;
     }
@@ -474,8 +484,6 @@ export function ChatPage({
     };
     try {
       if (!requestIdOverride) {
-        pendingAdmissionRef.current = pendingAdmission;
-        setPendingRecovery(pendingAdmission);
         storePendingGenerationAdmission(pendingAdmission);
       }
       const accepted = regenerateMessageId
@@ -502,9 +510,7 @@ export function ChatPage({
 
       setResolvedThreadId(jobThreadId);
       trackGeneration(accepted.job_id, jobThreadId, accepted.user_message_id);
-      if (pendingAdmissionRef.current?.requestId === requestId) {
-        pendingAdmissionRef.current = null;
-        setPendingRecovery(null);
+      if (readPendingGenerationAdmission()?.requestId === requestId) {
         clearPendingGenerationAdmission();
       }
       if (!regenerateMessageId) {
@@ -551,10 +557,8 @@ export function ChatPage({
       const authRefusal = requestError instanceof ApiError && requestError.kind === "auth";
       if (
         isDefinitiveRejection(requestError) && !replaying && !authRefusal
-        && pendingAdmissionRef.current?.requestId === requestId
+        && readPendingGenerationAdmission()?.requestId === requestId
       ) {
-        pendingAdmissionRef.current = null;
-        setPendingRecovery(null);
         clearPendingGenerationAdmission();
       }
       const modelChanged = requestError instanceof ApiError && requestError.code === "chat_model_changed";
@@ -772,7 +776,7 @@ export function ChatPage({
     // as a brand new message -- which used to duplicate the user's turn.
     // The backend's dangling-user-turn regenerate support exists exactly
     // for this case.
-    const pendingAdmission = pendingAdmissionRef.current;
+    const pendingAdmission = readPendingGenerationAdmission();
     if (pendingAdmission) {
       // Prefer exact idempotent admission replay even if the transcript now
       // contains the user's saved turn. Regenerating instead could race the
@@ -1034,8 +1038,6 @@ export function ChatPage({
   // can no longer load. Abandoning here drops only the local replay key: it
   // does not imply the backend worker has been cancelled.
   const abandonPendingRecovery = () => {
-    pendingAdmissionRef.current = null;
-    setPendingRecovery(null);
     clearPendingGenerationAdmission();
     setGenerationError(null);
     setAbandonPendingOpen(false);
@@ -1137,9 +1139,7 @@ export function ChatPage({
               setAbandonPendingOpen(true);
               return;
             }
-            if (pendingAdmissionRef.current?.threadId === threadId) {
-              pendingAdmissionRef.current = null;
-              setPendingRecovery(null);
+            if (readPendingGenerationAdmission()?.threadId === threadId) {
               clearPendingGenerationAdmission();
             }
             setGenerationError(null);

@@ -132,6 +132,22 @@ describe("GenerationStreamHost", () => {
     expect(attachments).toHaveLength(1);
   });
 
+  it("attaches again when a job it already finished is tracked once more (#686)", async () => {
+    const { api, attachments } = fakeStreamApi();
+    render(<GenerationStreamHost api={api} onSessionExpired={expireSession} />);
+    act(() => { trackGeneration("job-again", "thread-a"); });
+    await waitFor(() => expect(attachments).toHaveLength(1));
+    await act(async () => { attachments[0].emit({ event_id: 1, event: "generation.completed" }); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+
+    // A replayed admission returns the same, already finished job.
+    act(() => { trackGeneration("job-again", "thread-a"); });
+
+    await waitFor(() => expect(attachments).toHaveLength(2));
+    await act(async () => { attachments[1].emit({ event_id: 1, event: "generation.completed" }); });
+    await waitFor(() => expect(useChatStore.getState().generation.jobId).toBeNull());
+  });
+
   it("reattaches after a 401 when another request already renewed the session", async () => {
     // The app ignores a stale 401 when its API has a working newer session.
     // Recover without remounting and without concurrent consumers.

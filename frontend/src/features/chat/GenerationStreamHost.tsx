@@ -131,7 +131,14 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
       }
       attachedJobIdRef.current = job.jobId;
       void consume(job, onCompleted, onFailed, onMissingJob).then((outcome) => {
-        if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
+        if (disposed || attachedJobIdRef.current !== job.jobId) return;
+        if (outcome !== "auth") {
+          // Settled. A later tracking of the same id (a replayed admission
+          // that returns this job) must attach again and end it, not be
+          // skipped and leave the composer busy for good (#686).
+          attachedJobIdRef.current = null;
+          return;
+        }
         // The consumer is now *fully* stopped, including its status fallback,
         // so dropping this guard cannot create concurrent SSE readers.
         attachedJobIdRef.current = null;
@@ -180,8 +187,9 @@ export function GenerationStreamHost({ api, onSessionExpired }: Props): null {
           attachedJobIdRef.current = job.jobId;
           beginGeneration(job.jobId, job.threadId);
           void consume(job, onCompleted, onFailed, onMissingJob).then((outcome) => {
-            if (disposed || outcome !== "auth" || attachedJobIdRef.current !== job.jobId) return;
+            if (disposed || attachedJobIdRef.current !== job.jobId) return;
             attachedJobIdRef.current = null;
+            if (outcome !== "auth") return;
             const delayMs = reconnectDelay(authAttempt);
             authAttempt = Math.min(authAttempt + 1, 20);
             reconnectTimer = window.setTimeout(() => {
