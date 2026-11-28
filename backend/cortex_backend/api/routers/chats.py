@@ -402,10 +402,33 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                     # message, then failed before any reply was persisted) is
                     # itself the current turn to answer, so its own content
                     # -- not the message before it -- is the model's input.
-                    user_input = (
-                        payload.user_input
-                        or messages[position - (1 if target_role == "assistant" else 0)].get("content", "")
-                    ).strip()
+                    source_turn = messages[position - (1 if target_role == "assistant" else 0)]
+                    user_input = str(source_turn.get("content", "")).strip()
+                    # A regeneration answers the saved turn. A different
+                    # question or other attachments were sent to the model
+                    # while only the reply was saved, so the transcript paired
+                    # the new answer with the old question and its documents,
+                    # and later history and forks carried the mismatch on.
+                    # The client sends the saved turn back, which still works.
+                    if payload.user_input and payload.user_input.strip() != user_input:
+                        raise ChatDomainError(
+                            "A regeneration answers the saved message. Send a new message "
+                            "to ask something different.",
+                            code="invalid_input",
+                        )
+                    saved_attachment_ids = [
+                        str(item.get("attachment_id"))
+                        for item in (source_turn.get("attachments") or [])
+                        if isinstance(item, dict)
+                    ]
+                    if payload.attachments and [
+                        item.attachment_id for item in payload.attachments
+                    ] != saved_attachment_ids:
+                        raise ChatDomainError(
+                            "A regeneration resends the saved message's own attachments. "
+                            "Send a new message to attach something else.",
+                            code="invalid_input",
+                        )
                     if not user_input:
                         raise ChatDomainError(
                             "A regeneration request needs user input.",
@@ -426,7 +449,9 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                         thread_id=thread_id,
                         user_input=user_input,
                         base_revision=current_revision,
-                        attachments=payload.attachments,
+                        # Empty: admission then resends the saved turn's own
+                        # descriptors, checked above to be the ones sent.
+                        attachments=[],
                         options=payload.options,
                     )
                     snapshot, _ = await _start_generation_job(

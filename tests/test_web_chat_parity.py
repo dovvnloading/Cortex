@@ -571,6 +571,61 @@ def test_regeneration_fills_in_a_reply_for_a_dangling_user_turn_without_duplicat
         assert after["messages"][1]["content"] == "Echo: hello"
 
 
+def _finished_turn(client: TestClient, headers: dict[str, str], text: str) -> tuple[str, dict]:
+    accepted = client.post(
+        "/api/v1/generations", json={"request_id": f"turn-{text}", "user_input": text}, headers=headers
+    ).json()
+    with client.stream(
+        "GET", f"/api/v1/generations/{accepted['job_id']}/events", headers=headers
+    ) as response:
+        assert _events("".join(response.iter_text()))[-1]["event"] == "generation.completed"
+    thread_id = accepted["thread_id"]
+    return thread_id, client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+
+
+def test_a_regeneration_with_a_different_question_is_refused_and_changes_nothing():
+    """#587: the model answered the new question but only the reply was saved,
+    so the transcript paired an answer to 3 + 3 with the question 2 + 2."""
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        thread_id, chat = _finished_turn(client, headers, "What is 2 + 2?")
+        reply_id = chat["messages"][-1]["id"]
+
+        refused = client.post(
+            f"/api/v1/chats/{thread_id}/regenerations",
+            json={"request_id": "regen-other", "message_id": reply_id, "user_input": "What is 3 + 3?"},
+            headers=headers,
+        )
+
+        assert refused.status_code == 422
+        after = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+        assert after["messages"] == chat["messages"]
+        assert after["revision"] == chat["revision"]
+
+
+@pytest.mark.parametrize("sent", [None, "What is 2 + 2?", "  What is 2 + 2?  "])
+def test_a_regeneration_answers_the_saved_question(sent: str | None):
+    """The client sends the saved turn back (or nothing); that still regenerates."""
+    app = create_app(build_demo_dependencies(), allowed_hosts=("testserver",))
+    with TestClient(app) as client:
+        headers = _session(client, app)
+        thread_id, chat = _finished_turn(client, headers, "What is 2 + 2?")
+        body: dict[str, object] = {"request_id": "regen-same", "message_id": chat["messages"][-1]["id"]}
+        if sent is not None:
+            body["user_input"] = sent
+
+        accepted = client.post(f"/api/v1/chats/{thread_id}/regenerations", json=body, headers=headers)
+
+        assert accepted.status_code == 202
+        with client.stream(
+            "GET", f"/api/v1/generations/{accepted.json()['job_id']}/events", headers=headers
+        ) as response:
+            assert _events("".join(response.iter_text()))[-1]["event"] == "generation.completed"
+        after = client.get(f"/api/v1/chats/{thread_id}", headers=headers).json()
+        assert [m["content"] for m in after["messages"]] == ["What is 2 + 2?", "Echo: What is 2 + 2?"]
+
+
 def test_regeneration_rejects_a_dangling_turn_that_is_not_the_last_message():
     """Only the thread's current, unanswered turn may be filled in this way
     -- an older user message earlier in the thread must not be retried."""
