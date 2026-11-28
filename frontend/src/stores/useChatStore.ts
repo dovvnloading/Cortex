@@ -196,14 +196,16 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   upsertChatSummary: (chat, sinceChange) =>
     set((state) => (sinceChange !== undefined && (state.chatChangeCounts[chat.id] ?? 0) !== sinceChange ? state : {
       chats: [
-        // Preserve the filing: a chat that gains a message must not jump out
-        // of its group just because the summary was rebuilt from the
-        // response, which carries group_id only once the server has it.
+        // Preserve the filing only when the response says nothing about it:
+        // an older server omits group_id. An explicit null is the server
+        // saying the chat is ungrouped, and must move it out (#690).
         {
           id: chat.id,
           title: chat.title,
           timestamp: chat.timestamp,
-          group_id: chat.group_id ?? state.chats.find((item) => item.id === chat.id)?.group_id ?? null,
+          group_id: chat.group_id !== undefined
+            ? chat.group_id
+            : state.chats.find((item) => item.id === chat.id)?.group_id ?? null,
         },
         ...state.chats.filter((item) => item.id !== chat.id),
       ],

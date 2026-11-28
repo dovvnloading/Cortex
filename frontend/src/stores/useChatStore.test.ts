@@ -29,6 +29,12 @@ describe("useChatStore", () => {
     expect(useChatStore.getState().chats).toEqual([]);
   });
 
+  it("upsertChatSummary takes an explicit null group as ungrouped (#690)", () => {
+    useChatStore.getState().setChats([{ id: "a", title: "Alpha", timestamp: "t1", group_id: "g1" }]);
+    useChatStore.getState().upsertChatSummary({ id: "a", title: "Alpha", timestamp: "t2", group_id: null, messages: [] });
+    expect(useChatStore.getState().chats).toEqual([{ id: "a", title: "Alpha", timestamp: "t2", group_id: null }]);
+  });
+
   it("upsertChatSummary prepends a new chat and dedupes an existing id", () => {
     useChatStore.getState().setChats([{ id: "a", title: "Alpha", timestamp: "t1", group_id: "g1" }]);
     useChatStore.getState().upsertChatSummary({ id: "b", title: "Beta", timestamp: "t2", messages: [] });
