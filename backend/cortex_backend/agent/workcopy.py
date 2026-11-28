@@ -956,6 +956,65 @@ class WorkCopy:
             self._discarded = True
 
 
+def sweep_abandoned_copies(
+    data_dir: str | os.PathLike[str] | None,
+    project_roots: Mapping[str, str],
+    *,
+    keep: Iterable[str] = (),
+) -> int:
+    """Remove the work copies an earlier process left behind; return how many.
+
+    Copies live only while their run object does. Shutdown closed their
+    shells but kept the copies, and a new process starts with no run objects,
+    so nothing could discard them: the private copies and their linked Git
+    worktrees stayed on disk for good (#607). A copy found here belongs to no
+    live run (those named in ``keep`` excepted) and is removed the way an
+    explicit discard removes it: no link is followed, and a linked worktree
+    is removed from the project it was made from, or pruned there if the
+    removal fails.
+    """
+    try:
+        paths = AppPaths.from_data_dir(data_dir) if data_dir is not None else AppPaths.for_current_user()
+    except (AppPathError, OSError, ValueError) as exc:
+        raise WorkCopyError("invalid_data_dir") from exc
+    container = paths.data_dir / "agent_workcopies"
+    try:
+        info = container.lstat()
+    except FileNotFoundError:
+        return 0
+    if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise WorkCopyError("unsafe_path")
+    kept = set(keep)
+    removed = 0
+    for entry in sorted(container.iterdir()):
+        if _RUN_ID.fullmatch(entry.name) is None or entry.name in kept:
+            continue
+        info = entry.lstat()
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            continue
+        gitfile = entry / ".git"
+        linked = os.path.lexists(gitfile) and stat.S_ISREG(gitfile.lstat().st_mode)
+        _purge(entry, keep_gitfile=linked)
+        if linked:
+            root = project_roots.get(entry.name)
+            try:
+                if root is None or not Path(root).is_dir():
+                    raise WorkCopyError("git_unavailable")
+                _git(Path(root), "worktree", "remove", "--force", str(entry))
+            except WorkCopyError:
+                gitfile.unlink()
+                entry.rmdir()
+                if root is not None and Path(root).is_dir():
+                    try:
+                        _git(Path(root), "worktree", "prune")
+                    except WorkCopyError:
+                        pass  # the next Git maintenance in that project prunes it
+        else:
+            entry.rmdir()
+        removed += 1
+    return removed
+
+
 def create(
     project_root: str | os.PathLike[str], run_id: str, confirmed: bool = True,
     *, data_dir: str | os.PathLike[str] | None = None,

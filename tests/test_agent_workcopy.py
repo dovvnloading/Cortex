@@ -514,3 +514,39 @@ def test_durable_restore_after_copy_discard_and_simulated_restart(tmp_path: Path
     assert recovered == ("delete.py", "new.py")
     assert not (root / "new.py").exists()
     assert (root / "delete.py").read_bytes() == _DELETED_FILE_BYTES
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
+def test_a_restart_removes_work_copies_the_earlier_process_left(tmp_path: Path) -> None:
+    """#607: shutdown kept the copies and a new process had no run objects to
+    discard them with, so copies and linked worktrees stayed for good."""
+    from cortex_backend.agent.run_store import AgentRunStore
+    from cortex_backend.services.agent_runs import AgentRuns
+
+    data = tmp_path / "cortex-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "app.py").write_bytes(b"print('tracked')\n")
+    _git(repo, "add", "app.py")
+    _git(repo, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "init")
+    plain = _project(tmp_path)
+
+    store = AgentRunStore(data / "agent" / "runs.sqlite")
+    linked = create(repo, "left-linked", data_dir=data, confirmed=True)
+    loose = create(plain, "left-plain", data_dir=data, confirmed=True)
+    for copy, root in ((linked, repo), (loose, plain)):
+        (copy.path / "unaccepted.py").write_bytes(b"never accepted = 1\n")
+        store.create_run(owner="earlier-session", project_root=root, workcopy=copy.path,
+                         mode="ask", model="m", run_id=copy.run_id)
+    assert linked.path.name in _git(repo, "worktree", "list", "--porcelain")
+
+    # A new process: no run objects, the same data directory.
+    AgentRuns(data_dir=data).list_runs(owner="new-session")
+
+    assert not linked.path.exists()
+    assert not loose.path.exists()
+    listed = _git(repo, "worktree", "list", "--porcelain")
+    assert linked.path.name not in listed, "the linked worktree's metadata was left in the project"
+    assert (repo / "app.py").read_bytes() == b"print('tracked')\n"
+    assert (plain / "src" / "app.py").is_file()

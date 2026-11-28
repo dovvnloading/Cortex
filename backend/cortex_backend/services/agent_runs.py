@@ -41,7 +41,9 @@ from cortex_backend.agent.tools.git import register_git_tools
 from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
 from cortex_backend.agent.tools.web import WebFetchError, fetch_url
-from cortex_backend.agent.workcopy import WorkCopy, WorkCopyChange, WorkCopyError, restore
+from cortex_backend.agent.workcopy import (
+    WorkCopy, WorkCopyChange, WorkCopyError, restore, sweep_abandoned_copies,
+)
 from cortex_backend.core.paths import AppPathError, AppPaths
 from cortex_backend.services.workspace_checkpoint import (
     WorkspaceCheckpointError, WorkspaceCheckpointStore,
@@ -226,7 +228,25 @@ class AgentRuns:
                 except Exception as exc:
                     raise AgentWorkflowError("agent_unavailable") from exc
                 self._store = store
+                self._sweep_abandoned_copies(store)
             return store
+
+    def _sweep_abandoned_copies(self, store: AgentRunStore) -> None:
+        """Remove work copies no run object of this process can reach (#607).
+
+        Runs once, when the ledger opens: before that no run of this process
+        exists, so every copy on disk was left by an earlier one. Best effort:
+        a copy that cannot be removed now is tried again next start.
+        """
+        try:
+            removed = sweep_abandoned_copies(
+                self._data_dir, store.project_roots(), keep=tuple(self._live),
+            )
+        except Exception as exc:
+            logger.warning("Agent work-copy cleanup failed (%s).", type(exc).__name__)
+            return
+        if removed:
+            logger.info("Removed %d Agent work copies left by an earlier run of Cortex.", removed)
 
     def _owned(self, run_id: str, owner: str) -> AgentRun:
         try:
