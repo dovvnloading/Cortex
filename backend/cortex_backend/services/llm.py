@@ -2042,7 +2042,11 @@ class SynthesisAgent:
             return MemoryCommand()
         try:
             payload = json.loads(raw_command)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
+            # A few thousand nested brackets fit under the size gate and
+            # overflow the decoder on some Pythons (3.11 at about 1,000 levels).
+            # The RecursionError escaped and turned a finished answer into a
+            # failed generation over an optional proposal.
             logging.warning("Ignoring malformed memory command (invalid JSON).")
             return MemoryCommand()
 
