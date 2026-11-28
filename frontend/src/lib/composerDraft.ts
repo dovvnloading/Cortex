@@ -35,11 +35,14 @@ export function writeComposerDraft(threadId: string | null, value: string): void
     removeItem("local", key);
     return;
   }
-  writeItem("session", key, value);
+  // A tier that cannot take the new text must not keep an older copy to be
+  // restored in its place: reading prefers the session copy, so a stale one
+  // there hid newer text saved locally, and the other way round after a
+  // restart (#688).
+  if (!writeItem("session", key, value)) removeItem("session", key);
   // A draft that no longer fits must not leave an older, shorter copy behind to
   // be restored in its place.
-  if (value.length <= MAX_PERSISTED_DRAFT_CHARS) writeItem("local", key, value);
-  else removeItem("local", key);
+  if (value.length > MAX_PERSISTED_DRAFT_CHARS || !writeItem("local", key, value)) removeItem("local", key);
 }
 
 export function composerDraftKey(threadId: string | null): string {
@@ -118,11 +121,14 @@ function readItem(kind: StorageKind, key: string): string | null {
   }
 }
 
-function writeItem(kind: StorageKind, key: string, value: string): void {
+/** False when the write was refused (denied, or over quota). */
+function writeItem(kind: StorageKind, key: string, value: string): boolean {
   try {
     storageFor(kind).setItem(key, value);
+    return true;
   } catch {
     // Denied or over quota: keep going without persistence.
+    return false;
   }
 }
 

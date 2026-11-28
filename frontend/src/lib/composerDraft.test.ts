@@ -121,6 +121,21 @@ describe("composer drafts", () => {
       expect(readComposerDraft("thread-a")).toBe("typed anyway");
     });
 
+    it("never restores an older copy from a tier that refused the newer text (#688)", () => {
+      writeComposerDraft("thread-a", "old");
+      const refuseSession = breakStorage("session", "setItem");
+      writeComposerDraft("thread-a", "newer");
+      refuseSession.mockRestore();
+      expect(readComposerDraft("thread-a")).toBe("newer");
+
+      const refuseLocal = breakStorage("local", "setItem");
+      writeComposerDraft("thread-a", "newest");
+      refuseLocal.mockRestore();
+      restart();
+      // After a restart only the local copy is left; it must not be the older text.
+      expect(readComposerDraft("thread-a")).toBe("");
+    });
+
     it("falls back to the local copy when session storage cannot be read", () => {
       writeComposerDraft("thread-a", "kept locally");
       breakStorage("session", "getItem");
