@@ -519,3 +519,33 @@ def test_a_failed_gguf_scan_is_logged_and_ollama_still_lists(caplog) -> None:
     assert "GGUF model scan failed (ValueError)" in caplog.text
     # The exception message can carry private paths; it stays out of the log.
     assert "someone" not in caplog.text
+
+
+# --- a split set is complete only with real GGUF parts (#644) ----------------
+
+
+@pytest.mark.parametrize("bad_part", ["empty", "html", "folder"])
+def test_a_split_set_with_an_unusable_later_part_is_not_listed_or_loaded(tmp_path: Path, bad_part: str) -> None:
+    _write_gguf(tmp_path / "model-00001-of-00002.gguf")
+    second = tmp_path / "model-00002-of-00002.gguf"
+    if bad_part == "empty":
+        second.write_bytes(b"")
+    elif bad_part == "html":
+        second.write_bytes(b"<html>download error</html>")
+    else:
+        second.mkdir()
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()]
+
+    assert listed == []
+    with pytest.raises(InvalidGGUFModelId):
+        resolve_gguf_path(tmp_path, "gguf:model-00001-of-00002.gguf")
+
+
+def test_a_split_set_with_every_part_valid_is_still_listed(tmp_path: Path) -> None:
+    _write_gguf(tmp_path / "model-00001-of-00002.gguf")
+    _write_gguf(tmp_path / "model-00002-of-00002.gguf")
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()]
+
+    assert listed == ["gguf:model-00001-of-00002.gguf"]
