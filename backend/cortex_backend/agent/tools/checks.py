@@ -409,6 +409,11 @@ class CheckTools:
             raise ValueError("checks and shell must use the same work copy")
         self.root = root
         self.shell = shell
+        # The check each pending approval was asked for, by tool-call ID. The
+        # approved call names only an index, and the checks are detected again
+        # when it runs: a changed manifest could put a different command at
+        # that index, which then ran without anyone reviewing it (#589).
+        self._reviewed: dict[str, tuple[str, str]] = {}
 
     def handle(self, call: ToolCall, context: ToolContext) -> ToolResult | NeedsApproval:
         index = call.arguments.get("index", 0)
@@ -423,6 +428,12 @@ class CheckTools:
         if index >= len(checks):
             return ToolResult('{"status":"not_run","reason":"invalid_index"}', success=False)
         check = checks[index]
+        if context.approved:
+            reviewed = self._reviewed.pop(call.id, None)
+            if reviewed is not None and reviewed != (check.key, check.command):
+                # Not the command that was approved: run nothing, and let a
+                # new request put the current one up for review.
+                return ToolResult('{"status":"not_run","reason":"checks_changed"}', success=False)
         # Crucially, call the *same* ShellTools path as run_command. Its
         # classify/decide, one-shot approval and AppContainer launcher govern
         # every attempt; never start a process here or enable network.
@@ -431,6 +442,7 @@ class CheckTools:
             "network": False, "shell": "powershell",
         }), context, check_risk=check.risk)
         if isinstance(outcome, NeedsApproval):
+            self._reviewed[call.id] = (check.key, check.command)
             return NeedsApproval({**outcome.request, "tool": "run_checks"})
         try:
             detail = json.loads(outcome.content)

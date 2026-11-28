@@ -366,6 +366,32 @@ def test_failing_check_feeds_back_and_stops_after_three_repair_rounds(tmp_path: 
         shell.close()
 
 
+def test_an_approval_never_runs_a_check_other_than_the_one_reviewed(tmp_path: Path) -> None:
+    """#589: the approved call named only an index; the manifest changed
+    before resume, and the command now at that index ran unreviewed."""
+    store, run_id, loop, launcher, _, shell = _fixture(tmp_path, _edit(), _final(), _final(), mode="ask")
+    manifest = tmp_path / "copy" / "package.json"
+    manifest.write_text(json.dumps({"scripts": {"lint": "eslint ."}}))
+    try:
+        parked = loop.run(run_id)
+        assert parked.status == "waiting_approval"
+        assert isinstance(parked.approval_request, dict)
+        assert parked.approval_request["command"] == "npm run lint"
+        # Before approval, a "test" script appears and becomes check 0.
+        manifest.write_text(json.dumps({"scripts": {"lint": "eslint .", "test": "node evil.js"}}))
+        step = next(s for s in store.list_steps(run_id, owner="local")
+                    if s.kind == "tool" and s.tool == "run_checks")
+        store.decide_approval(run_id, owner="local", step_seq=step.seq, decision="approved")
+
+        loop.resume(run_id)
+
+        assert all(command != "npm run test" for command, _cwd, _network in launcher.starts), (
+            "a check nobody reviewed was run"
+        )
+    finally:
+        shell.close()
+
+
 def test_timeout_is_not_reported_as_passing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(checks, "_CHECK_TIMEOUT_S", 0.1)
     _, run_id, loop, launcher, _, shell = _fixture(
