@@ -37,12 +37,6 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   journals, authenticated recovery/workspace APIs and the read-only CLI
   remain available without data migration or automatic source writes.
 
-### Fixed
-
-- A pull request that moves code into `docs/` no longer skips the Quality
-  checks: the document-only classifier now sees both sides of a rename (#714;
-  #727).
-
 ### Security
 
 - Agent AppContainer commands now kill the entire contained process tree when stdout exceeds 64 MiB, rather than silently dropping excess output. Added adversarial tests for prompt-injected repository content, work-copy path escapes, and Windows sandbox isolation.
