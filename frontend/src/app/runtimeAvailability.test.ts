@@ -38,15 +38,17 @@ describe("resolveRuntimeAvailability for a GGUF model", () => {
     }
   });
 
-  it("still reports a failed runtime with its own error, or a default one", () => {
+  it("reports a failed runtime with its own error, or a default one, and still lets a send retry it (#716)", () => {
     expect(availabilityFor("gguf:demo.gguf", { state: "failed", last_error: "Vulkan device lost." })).toEqual({
-      ready: false,
+      ready: true,
       reason: "gguf-runtime-failed",
       message: "Vulkan device lost.",
     });
     expect(availabilityFor("gguf:demo.gguf", { state: "failed" }).message).toBe(
       "The local GGUF runtime failed to start. Check System settings and try again.",
     );
+    // Another, working model can be tried after the first one failed.
+    expect(availabilityFor("gguf:smaller.gguf", { state: "failed", last_error: "Out of memory." }).ready).toBe(true);
   });
 
   it("leaves the other states sendable", () => {

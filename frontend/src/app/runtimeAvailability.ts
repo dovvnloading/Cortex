@@ -56,8 +56,12 @@ export function resolveRuntimeAvailability({
   }
   if (isGGUFModel(selectedModel)) {
     if (llamacppStatus.state === "failed") {
+      // A failed start is not the end: the backend starts the runtime again
+      // on the next request (and keeps its own crash-loop limits), for this
+      // model with corrected settings or for another model. Blocking every
+      // GGUF send here prevented exactly that request, until a restart (#716).
       return {
-        ready: false,
+        ready: true,
         reason: "gguf-runtime-failed",
         message: llamacppStatus.last_error ?? "The local GGUF runtime failed to start. Check System settings and try again.",
       };
