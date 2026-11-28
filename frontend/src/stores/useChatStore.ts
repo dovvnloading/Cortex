@@ -8,6 +8,11 @@ export const NEW_THREAD_OPTIONS_KEY = "new";
 
 export type GenerationPhase = "idle" | "starting" | "streaming" | "stopping";
 
+/** The phase once output arrives: streaming, unless Stop is already in force. */
+function streamingPhase(phase: GenerationPhase): GenerationPhase {
+  return phase === "stopping" ? "stopping" : "streaming";
+}
+
 export interface GenerationState {
   jobId: string | null;
   threadId: string | null;
@@ -200,24 +205,27 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       chats: state.chats.map((chat) => (chat.id === threadId ? { ...chat, group_id: groupId } : chat)),
     })),
 
+  // Output that arrives after Stop is kept, but it never moves the phase back
+  // from stopping: only revertStopping (the server refused the cancel) or the
+  // job's end does (#673).
   beginGeneration: (jobId, threadId) =>
     set({ generation: { ...idleGeneration, jobId, threadId, phase: "starting" }, generationCursor: 0 }),
   appendContentToken: (jobId, delta) =>
     set((state) =>
       state.generation.jobId === jobId
-        ? { generation: { ...state.generation, phase: "streaming", partialContent: state.generation.partialContent + delta } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialContent: state.generation.partialContent + delta } }
         : state,
     ),
   appendThinkingToken: (jobId, delta) =>
     set((state) =>
       state.generation.jobId === jobId
-        ? { generation: { ...state.generation, phase: "streaming", partialThoughts: state.generation.partialThoughts + delta } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialThoughts: state.generation.partialThoughts + delta } }
         : state,
     ),
   replaceContent: (jobId, content) =>
     set((state) =>
       state.generation.jobId === jobId && content !== state.generation.partialContent
-        ? { generation: { ...state.generation, phase: "streaming", partialContent: content } }
+        ? { generation: { ...state.generation, phase: streamingPhase(state.generation.phase), partialContent: content } }
         : state,
     ),
   // The two reducers below run on *every* SSE frame, and both used to build a
