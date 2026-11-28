@@ -81,11 +81,11 @@ def _digest_files(frontend_root: Path, paths: list[Path]) -> str:
 
 def _tracked_files(frontend_root: Path) -> list[Path]:
     files = [frontend_root / name for name in TRACKED_CONFIG]
-    files.extend(
-        path
-        for extension in ("*.ts", "*.tsx", "*.css")
-        for path in (frontend_root / "src").rglob(extension)
-    )
+    # Every file under src, not a list of extensions: a stylesheet or module
+    # can import an image, a font or JSON, and Vite bundles it. Hashing only
+    # .ts, .tsx and .css let a changed imported image keep the old bundle.
+    # A test file here costs at most an unneeded rebuild.
+    files.extend(path for path in (frontend_root / "src").rglob("*") if path.is_file())
     public_dir = frontend_root / "public"
     if public_dir.is_dir():
         files.extend(path for path in public_dir.rglob("*") if path.is_file())
