@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from threading import Event
 import time
 from typing import Any, Literal, cast
 
@@ -82,6 +83,39 @@ class ModelProfile:
     measured_at: str
     context_size: int
     elapsed_ms: int
+
+
+class _StoppableClient:
+    """The probe's view of the client: every request can be stopped.
+
+    The probe's requests went out with no cancellation event, so the client
+    took its blocking path, and Stop was looked at only between whole checks:
+    a probe request stalled on the model held the run (and the one Agent
+    slot) until the transport's long read timeout (#606). Each request now
+    carries the event, and none starts once Stop was asked for.
+    """
+
+    def __init__(
+        self, client: Any, cancellation_event: Event | None, should_stop: Callable[[], bool] | None,
+    ) -> None:
+        self._client = client
+        self._cancellation = cancellation_event
+        self._should_stop = should_stop
+
+    def stopped(self) -> bool:
+        return (self._cancellation is not None and self._cancellation.is_set()) or (
+            self._should_stop is not None and self._should_stop()
+        )
+
+    def chat(self, **kwargs: Any) -> Any:
+        if self.stopped():
+            raise ProbeStopped
+        if self._cancellation is not None:
+            kwargs["cancellation_event"] = self._cancellation
+        return self._client.chat(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
 
 
 def _messages(task: str) -> list[dict[str, Any]]:
@@ -174,6 +208,7 @@ def _injection_resistance(client: Any, model: str, options: dict[str, Any]) -> N
 def probe_model(
     client: Any, model: str, options: dict[str, Any],
     *, should_stop: Callable[[], bool] | None = None,
+    cancellation_event: Event | None = None,
 ) -> ModelProfile:
     """Probe an existing model on the provided client; never pull or execute.
 
@@ -181,8 +216,10 @@ def probe_model(
     A failed or malformed reply fails that check; exception contents and model
     output are deliberately never logged or saved. No retries or fallbacks
     contact other clients or mutate an adapter's advertised capabilities.
-    ``should_stop`` is consulted before each check; when it returns true the
-    probe raises ProbeStopped instead of returning a partial profile.
+    ``should_stop`` and ``cancellation_event`` are consulted before every
+    request, and the event also interrupts a request in flight; once either
+    says stop, the probe raises ProbeStopped instead of returning a partial
+    profile.
     """
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model must be a nonempty identifier")
@@ -201,6 +238,7 @@ def probe_model(
     else:
         path = "plain_json"
 
+    stoppable = _StoppableClient(client, cancellation_event, should_stop)
     started = time.monotonic()
     passed: dict[str, bool] = {}
     for name, check in (
@@ -208,16 +246,21 @@ def probe_model(
         ("ordered_calls", _ordered_calls),
         ("injection_resistance", _injection_resistance),
     ):
-        if should_stop is not None and should_stop():
+        if stoppable.stopped():
             raise ProbeStopped
         try:
-            check(client, model, probe_options)
+            check(stoppable, model, probe_options)
+        except ProbeStopped:
+            raise
         except Exception:
             # Transport errors, bad JSON and wrong tool sequences are failures.
             # Error text may contain raw model output and must not be recorded.
             passed[name] = False
         else:
             passed[name] = True
+        if stoppable.stopped():
+            # A request cut short by Stop fails its check; that is no result.
+            raise ProbeStopped
 
     failed = tuple(name for name in _CHECKS if not passed[name])
     return ModelProfile(

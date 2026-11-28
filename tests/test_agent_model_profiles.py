@@ -365,3 +365,37 @@ def test_best_installed_ignores_uninstalled_failed_and_unrecommended_models() ->
     assert best_installed([], {"small"}) is None
     tie = replace(fast, model="aa-fast")
     assert best_installed([fast, tie], {"fast", "aa-fast"}) == tie
+
+
+def test_stop_interrupts_a_probe_request_blocked_on_the_model() -> None:
+    """#606: probe requests had no cancellation event and Stop was read only
+    between checks, so a stalled request held the Agent slot."""
+    import threading
+    import time
+
+    from cortex_backend.agent.model_profiles import ProbeStopped, probe_model
+    from cortex_backend.agent.protocol import RuntimeCapabilities
+
+    class _StalledClient:
+        tool_protocol_capabilities = RuntimeCapabilities(native_tools=True, json_schema=True)
+
+        def __init__(self) -> None:
+            self.requests: list[dict] = []
+            self.entered = threading.Event()
+
+        def chat(self, **kwargs):
+            self.requests.append(kwargs)
+            self.entered.set()
+            kwargs["cancellation_event"].wait(10)
+            return {"message": {"content": "", "tool_calls": []}, "done_reason": "cancelled"}
+
+    client = _StalledClient()
+    stop = threading.Event()
+    threading.Thread(target=lambda: (client.entered.wait(5), stop.set()), daemon=True).start()
+
+    started = time.monotonic()
+    with pytest.raises(ProbeStopped):
+        probe_model(client, "local-model", {}, cancellation_event=stop)
+
+    assert time.monotonic() - started < 3
+    assert len(client.requests) == 1, "the probe kept asking the model after Stop"

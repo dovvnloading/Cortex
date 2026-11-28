@@ -510,8 +510,10 @@ def test_stop_during_the_probe_ends_it_without_saving_a_profile(tmp_path: Path) 
         run = _start(manager, _project(tmp_path), model="local-model")
         run_ids.append(run.id)
         wait_until(lambda: not manager._live[run.id].driving, describe="worker finished")
-        # The first check finishes its two exchanges; nothing after the stop.
-        assert len(client.requests) == 2
+        # Nothing after the stop: the first check's second exchange is never
+        # sent, and the request in flight carried the run's Stop event (#606).
+        assert len(client.requests) == 1
+        assert client.requests[0]["cancellation_event"] is manager._live[run.id].probe_cancel
         assert ProfileStore(tmp_path / "data").load() == []
         assert _CaptureLoop.created[-1].protocol_path == "plain_json"
     finally:

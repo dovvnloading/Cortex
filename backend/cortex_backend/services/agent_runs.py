@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
@@ -99,6 +99,8 @@ class _LiveRun:
     needs_probe: bool = False
     model_check: dict[str, object] | None = None
     cancel_requested: bool = False
+    # Set by Stop; interrupts a model-check request in flight (#606).
+    probe_cancel: Event = field(default_factory=Event)
 
 
 _WEB_FETCH = ToolSpec(
@@ -489,6 +491,7 @@ class AgentRuns:
             profile = probe_model(
                 self._client, managed.model, {"num_ctx": DEFAULT_PROBE_CONTEXT_SIZE},
                 should_stop=lambda: managed.cancel_requested,
+                cancellation_event=managed.probe_cancel,
             )
         except ProbeStopped:
             return
@@ -683,6 +686,7 @@ class AgentRuns:
                         managed.shell.close()
                 return current
             managed.cancel_requested = True
+            managed.probe_cancel.set()
             managed.loop.cancel(run_id)
             current = self._owned(run_id, owner)
             if current.status in _TERMINAL and not managed.driving:
