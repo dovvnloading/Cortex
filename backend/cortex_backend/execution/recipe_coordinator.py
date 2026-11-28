@@ -195,8 +195,18 @@ class RecipeExecutionCoordinator:
     def start_image_transform(self, request: RecipeImageRequest) -> ExecutionJob:
         if not isinstance(request, RecipeImageRequest):
             raise TypeError("request must be a RecipeImageRequest")
-        self._load_input(request.owner, request.source_artifact_id)
         payload = self._payload_for_request(request)
+        # A retry of a request that was already admitted answers with that job
+        # (or a conflict) before its input is looked at: the input may have
+        # expired since, while the job and its result are still retained.
+        existing = self.repository.find_job_for_request(
+            owner=request.owner, request_id=request.request_id
+        )
+        if existing is not None:
+            if existing.profile != RECIPE_IMAGE_PROFILE or self._canonical_payload(existing.payload) != self._canonical_payload(payload):
+                raise RecipeExecutionError("request_conflict")
+            return existing
+        self._load_input(request.owner, request.source_artifact_id)
         job, created = self.repository.create_job(
             job_id=uuid4().hex,
             owner=request.owner,

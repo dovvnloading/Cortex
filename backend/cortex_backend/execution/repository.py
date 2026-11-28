@@ -766,6 +766,18 @@ class ExecutionRepository:
                 raise exc
             return job, False
 
+    def find_job_for_request(self, *, owner: str, request_id: str) -> ExecutionJob | None:
+        """The job already admitted for this owner's request id, if any."""
+
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT job_id FROM execution_jobs WHERE owner = ? AND request_id = ?",
+                (owner, request_id),
+            ).fetchone()
+        if existing is None:
+            return None
+        return self.get_job(str(existing["job_id"]), owner=owner)
+
     def get_job(self, job_id: str, *, owner: str | None = None) -> ExecutionJob | None:
         with self.connect() as connection:
             row = self._read_job(connection, job_id, self._now())

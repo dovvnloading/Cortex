@@ -205,8 +205,10 @@ def test_coordinator_rejects_request_conflict_and_wrong_owner_artifact(tmp_path:
     assert accepted.job_id
     assert conflict.value.code == "request_conflict"
 
+    # A new request (its own id) for an input that does not exist. The same
+    # id as the accepted job would be a conflict, checked first (#578).
     with pytest.raises(RecipeExecutionError) as missing:
-        coordinator.start_image_transform(_request("not-an-artifact"))
+        coordinator.start_image_transform(_request("not-an-artifact", request_id="recipe-request-missing"))
     assert missing.value.code == "input_artifact_unavailable"
 
 
@@ -358,3 +360,40 @@ def test_the_worker_output_dimension_limit_is_the_providers_not_a_copy(monkeypat
     with pytest.raises(RecipeExecutionError) as error:
         RecipeWorkerOutput(**kwargs)
     assert error.value.code == "worker_output_invalid"
+
+
+def test_a_retry_after_the_input_expired_answers_with_the_original_job(tmp_path: Path):
+    """A retry looked the input up before the request id, so an expired input gave 404 (#578)."""
+
+    repository, _source_job_id, source_artifact_id = _repository(tmp_path)
+    coordinator = RecipeExecutionCoordinator(repository, lambda _job: _FakeAttempt(_output()))
+    try:
+        accepted = coordinator.start_image_transform(_request(source_artifact_id))
+        finished = coordinator.wait(accepted.job_id, timeout=15)
+        assert finished.status == "succeeded"
+        # The input expires; the job and its result are still retained.
+        repository.delete_artifact(source_artifact_id)
+
+        retried = coordinator.start_image_transform(_request(source_artifact_id))
+
+        assert retried.job_id == accepted.job_id
+        assert retried.status == "succeeded"
+
+        changed = RecipeImageRequest(
+            owner=OWNER,
+            request_id="recipe-request",
+            source_artifact_id=source_artifact_id,
+            plan=parse_image_transform(
+                {
+                    "schema_version": "artifact.transform.v1",
+                    "input_artifact_id": source_artifact_id,
+                    "steps": [{"op": "brightness", "factor": "1.1"}],
+                    "output_format": "png",
+                }
+            ),
+        )
+        with pytest.raises(RecipeExecutionError) as conflict:
+            coordinator.start_image_transform(changed)
+        assert conflict.value.code == "request_conflict"
+    finally:
+        coordinator.shutdown()
