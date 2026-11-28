@@ -619,3 +619,27 @@ def test_routes_and_sse_are_in_authenticated_openapi_contract(tmp_path: Path) ->
         "text/event-stream": {"schema": {"$ref": "#/components/schemas/AgentSSEEvent"}}
     }
     assert spec["components"]["schemas"]["AgentSettings"]["properties"]["enabled"]["default"] is False
+
+
+def test_a_stream_resumed_after_discard_still_ends_with_the_final_status(tmp_path: Path) -> None:
+    """#592: after discard the history is numbered afresh, and a cursor from the
+    live stream could be past all of it, so the final status was never sent."""
+    project = _project(tmp_path)
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        headers = session_headers(client, app)
+        run_id = client.post(ROOT, headers=headers, json=_start(project)).json()["id"]
+        _run_done(client, headers, run_id)
+        live = parse_sse_events(client.get(f"{ROOT}/{run_id}/events", headers=headers).text)
+        # The client saw everything up to the final status, then dropped.
+        cursor = live[-2]["event_id"]
+        assert live[-1]["event"] == "status"
+        assert client.post(f"{ROOT}/{run_id}/discard", headers=headers).status_code == 200
+
+        resumed = parse_sse_events(client.get(
+            f"{ROOT}/{run_id}/events", headers={**headers, "Last-Event-ID": str(cursor)},
+        ).text)
+
+        statuses = [event for event in resumed if event["event"] == "status"]
+        assert statuses and statuses[-1]["data"]["status"] == "completed"
+        assert all(event["event_id"] > cursor for event in resumed)

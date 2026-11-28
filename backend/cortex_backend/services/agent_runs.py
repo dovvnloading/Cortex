@@ -625,8 +625,12 @@ class AgentRuns:
                     AgentEvent(i, "step", run_id, _step_data(step))
                     for i, step in enumerate(steps, start=1)
                 ]
+                # History is numbered afresh, so a client resuming a live
+                # stream can hold a cursor past all of it, and lost the final
+                # status that way (#592). The status is always sent past the
+                # cursor: it is idempotent, and it is what ends the stream.
                 historical.append(AgentEvent(
-                    len(historical) + 1, "status", run_id,
+                    max(len(historical) + 1, after_id + 1), "status", run_id,
                     {"status": run.status, "stop_reason": run.stop_reason},
                 ))
                 return [event for event in historical if event.id > after_id], True
