@@ -181,6 +181,52 @@ def test_a_check_ends_even_when_its_runner_left_a_child_holding_the_output(
     assert outcome["result"]["status"] == ("cancelled" if ending == "cancel" else "timed_out")
 
 
+def test_a_check_that_looked_up_its_session_before_a_revoke_never_launches(tmp_path, monkeypatch):
+    """#591: the check took the detached session's lock after revoke had
+    returned and launched a process for a workspace that was closed."""
+    import threading
+
+    from cortex_backend.services import workspace_workflow as module
+
+    workflow, session, _path = _session(tmp_path)
+    looked_up = threading.Event()
+    revoked = threading.Event()
+    real_get = workflow._get
+
+    def get_then_pause(**kwargs):
+        found = real_get(**kwargs)
+        if threading.current_thread().name == "checker":
+            looked_up.set()
+            assert revoked.wait(10)
+        return found
+
+    launched: list[object] = []
+
+    def no_launch(*args, **kwargs):
+        launched.append(args)
+        raise AssertionError("a process was launched after revoke")
+
+    monkeypatch.setattr(workflow, "_get", get_then_pause)
+    monkeypatch.setattr(module.subprocess, "Popen", no_launch)
+    outcome: dict = {}
+
+    def run() -> None:
+        try:
+            workflow.check(owner="owner", session_id=session, command="pytest", confirmed=True)
+        except WorkspaceWorkflowError as exc:
+            outcome["error"] = exc.code
+
+    checker = threading.Thread(target=run, name="checker", daemon=True)
+    checker.start()
+    assert looked_up.wait(10)
+    workflow.revoke(owner="owner", session_id=session)
+    revoked.set()
+    checker.join(10)
+
+    assert outcome.get("error") == "unavailable"
+    assert launched == []
+
+
 def test_only_fixed_explicit_commands_are_accepted(tmp_path):
     workflow, session, path = _session(tmp_path)
     for command in ("cmd /c del *", "pytest; rm -rf", "shell"):

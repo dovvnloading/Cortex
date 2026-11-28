@@ -665,6 +665,13 @@ class WorkspaceCodingSessions:
         timed_out = Event()
         started = time.monotonic()
         try:
+            # Still open? Revoke removes the session under its lock, which is
+            # held from here on. A check that looked the session up just
+            # before a revoke used to take the detached session's lock after
+            # the revoke had returned, and launched anyway (#591).
+            with self._lock:
+                if self._sessions.get(session_id) is not session:
+                    raise WorkspaceWorkflowError("unavailable")
             # A test or build can execute arbitrary checked-out project code
             # with the user's account: the choice is fixed but not sandboxed.
             self._verified_root(session)
@@ -699,6 +706,9 @@ class WorkspaceCodingSessions:
                 except (JobObjectError, OSError) as exc:
                     self._stop_check(session)
                     raise WorkspaceWorkflowError("containment_unavailable") from exc
+            if session.cancel_check.is_set():
+                # Stop or a revoke arrived while the check was starting.
+                self._stop_check(session)
 
             def expire() -> None:
                 timed_out.set()
