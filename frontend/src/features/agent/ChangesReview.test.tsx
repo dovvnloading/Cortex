@@ -121,12 +121,7 @@ describe("ChangesReview", () => {
     const user = userEvent.setup();
     const many: FileChange[] = Array.from({ length: 33 }, (_, index) => ({
       path: `src/file${index}.ts`, kind: "modify",
-      diff: `--- a/src/file${index}.ts
-+++ b/src/file${index}.ts
-@@ -1 +1 @@
--a
-+b
-`,
+      diff: `--- a/src/file${index}.ts\n+++ b/src/file${index}.ts\n@@ -1 +1 @@\n-a\n+b\n`,
     }));
     const { onAccept } = renderReview({ changes: many });
     const accept = screen.getByRole("button", { name: "Accept selected to project" });
