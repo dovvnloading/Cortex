@@ -375,6 +375,32 @@ describe("useGenerationStream", () => {
     expect(useUiStore.getState().toasts.map((toast) => toast.message)).toEqual([refusal.message]);
   });
 
+  it("keeps a dismissed memory suggestion gone when the same job repeats it (#694)", async () => {
+    useChatStore.setState({ proposedMemoriesByMessage: {}, proposalJobsByMessage: {} });
+    const { streamGeneration, emitEvent } = terminalAwareStream();
+    const api = fakeApi({ streamGeneration });
+    const { result } = renderHook(() => useGenerationStream(api, ignoreSessionExpiry));
+    const onCompleted = vi.fn().mockResolvedValue(undefined);
+    act(() => { result.current.start("job-memo", "thread-memo", onCompleted, vi.fn()); });
+    await waitFor(() => expect(streamGeneration).toHaveBeenCalled());
+    const proposal = { assistant_message_id: "assistant-13", proposed_memories: ["Lives in Oslo.", "Prefers tea."] };
+    act(() => {
+      emitEvent({ event_id: 1, event: "generation.memory_proposed", job_id: "job-memo", thread_id: "thread-memo", data: proposal });
+    });
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Lives in Oslo.", "Prefers tea."]);
+    act(() => { useChatStore.getState().dismissProposedMemory("assistant-13", "Lives in Oslo."); });
+
+    act(() => {
+      emitEvent({ event_id: 2, event: "generation.completed", job_id: "job-memo", thread_id: "thread-memo", data: proposal });
+    });
+    await waitFor(() => expect(onCompleted).toHaveBeenCalled());
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Prefers tea."]);
+
+    // A later, distinct regeneration of the same message may suggest it again.
+    act(() => { useChatStore.getState().setProposedMemories("assistant-13", ["Lives in Oslo."], "job-memo-2"); });
+    expect(useChatStore.getState().proposedMemoriesByMessage["assistant-13"]).toEqual(["Lives in Oslo."]);
+  });
+
   it("surfaces a refused code proposal, which is otherwise invisible", async () => {
     // The rejected block is stripped from the answer so it cannot teach the
     // model its own malformed format on the next turn. That leaves the toast

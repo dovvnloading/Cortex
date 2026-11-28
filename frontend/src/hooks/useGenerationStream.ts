@@ -184,7 +184,7 @@ const MAX_PROPOSED_MEMORY_LENGTH = 500;
  * answer in the same slot had suggested, which is what a regenerated answer
  * with no suggestions needs.
  */
-function noteProposedMemories(value: unknown): void {
+function noteProposedMemories(value: unknown, jobId: string): void {
   if (!value || typeof value !== "object") return;
   const result = value as { assistant_message_id?: unknown; proposed_memories?: unknown };
   if (typeof result.assistant_message_id !== "string" || !result.assistant_message_id) return;
@@ -195,7 +195,9 @@ function noteProposedMemories(value: unknown): void {
     const memo = candidate.trim();
     if (memo && memo.length <= MAX_PROPOSED_MEMORY_LENGTH) memos.add(memo);
   }
-  useChatStore.getState().setProposedMemories(result.assistant_message_id, [...memos].slice(0, MAX_PROPOSED_MEMORIES));
+  useChatStore.getState().setProposedMemories(
+    result.assistant_message_id, [...memos].slice(0, MAX_PROPOSED_MEMORIES), jobId,
+  );
 }
 
 /**
@@ -392,7 +394,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                 // status event and the job result, so it is announced once.
                 noteRejection(data);
                 if (event.event === "generation.memory_proposed" || event.event === "generation.completed") {
-                  noteProposedMemories(data);
+                  noteProposedMemories(data, job.jobId);
                 }
                 if (event.event === "generation.completed") {
                   terminal = true;
@@ -446,7 +448,7 @@ export function useGenerationStream(api: CortexApi, onSessionExpired: OnSessionE
                   onFailed(job.threadId, snapshot.error ?? "Generation did not complete.");
                 } else {
                   noteTranslationResult(snapshot.result);
-                  noteProposedMemories(snapshot.result);
+                  noteProposedMemories(snapshot.result, job.jobId);
                   // A refusal the lost stream never delivered (#699).
                   noteRejection(snapshot.result);
                 }

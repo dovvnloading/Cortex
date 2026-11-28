@@ -98,6 +98,10 @@ interface ChatStoreState {
    * stored message, so like the note above it lasts for this session.
    */
   proposedMemoriesByMessage: Record<string, readonly string[]>;
+  // Which generation a message's suggestions came from, and the ones the user
+  // already saved or dismissed from it: the same job repeats its list in its
+  // final result, which must not bring them back (#694).
+  proposalJobsByMessage: Record<string, { jobId: string; handled: readonly string[] }>;
 
   setChats: (next: ChatSummary[] | ((current: ChatSummary[]) => ChatSummary[])) => void;
   upsertChatSummary: (chat: ChatResponse) => void;
@@ -131,7 +135,8 @@ interface ChatStoreState {
   markUntranslated: (messageId: string) => void;
   clearUntranslated: (messageId: string) => void;
   /** Replace a message's pending suggestions; an empty list forgets them (a regenerated answer has new ones). */
-  setProposedMemories: (messageId: string, memos: readonly string[]) => void;
+  /** ``jobId`` names the generation the list came from (#694). */
+  setProposedMemories: (messageId: string, memos: readonly string[], jobId?: string) => void;
   /** Drop one suggestion, whether it was saved or declined. */
   dismissProposedMemory: (messageId: string, memo: string) => void;
 }
@@ -168,6 +173,7 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   generationOptionsByThread: readPersistedGenerationOptions(),
   untranslatedMessageIds: {},
   proposedMemoriesByMessage: {},
+  proposalJobsByMessage: {},
 
   setChats: (next) =>
     set((state) => ({ chats: typeof next === "function" ? (next as (current: ChatSummary[]) => ChatSummary[])(state.chats) : next })),
@@ -305,17 +311,31 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       delete next[messageId];
       return { untranslatedMessageIds: next };
     }),
-  setProposedMemories: (messageId, memos) =>
+  setProposedMemories: (messageId, memos, jobId) =>
     set((state) => {
+      const source = state.proposalJobsByMessage[messageId];
+      const sameJob = jobId !== undefined && source?.jobId === jobId;
+      const handled = sameJob ? source.handled : [];
+      const visible = memos.filter((memo) => !handled.includes(memo));
+      // A new generation for this message starts with nothing handled.
+      const jobs = jobId === undefined || sameJob
+        ? null
+        : { ...state.proposalJobsByMessage, [messageId]: { jobId, handled: [] } };
       const current = state.proposedMemoriesByMessage[messageId];
-      if (memos.length === 0) {
-        if (!current) return state;
-        const next = { ...state.proposedMemoriesByMessage };
-        delete next[messageId];
-        return { proposedMemoriesByMessage: next };
+      let proposals: Record<string, readonly string[]> | null = null;
+      if (visible.length === 0) {
+        if (current) {
+          proposals = { ...state.proposedMemoriesByMessage };
+          delete proposals[messageId];
+        }
+      } else if (!current || current.length !== visible.length || current.some((memo, index) => memo !== visible[index])) {
+        proposals = { ...state.proposedMemoriesByMessage, [messageId]: visible };
       }
-      if (current && current.length === memos.length && current.every((memo, index) => memo === memos[index])) return state;
-      return { proposedMemoriesByMessage: { ...state.proposedMemoriesByMessage, [messageId]: [...memos] } };
+      if (!jobs && !proposals) return state;
+      return {
+        ...(proposals ? { proposedMemoriesByMessage: proposals } : {}),
+        ...(jobs ? { proposalJobsByMessage: jobs } : {}),
+      };
     }),
   dismissProposedMemory: (messageId, memo) =>
     set((state) => {
@@ -325,6 +345,15 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       const next = { ...state.proposedMemoriesByMessage };
       if (remaining.length > 0) next[messageId] = remaining;
       else delete next[messageId];
-      return { proposedMemoriesByMessage: next };
+      const source = state.proposalJobsByMessage[messageId];
+      return {
+        proposedMemoriesByMessage: next,
+        ...(source ? {
+          proposalJobsByMessage: {
+            ...state.proposalJobsByMessage,
+            [messageId]: { jobId: source.jobId, handled: [...source.handled, memo] },
+          },
+        } : {}),
+      };
     }),
 }));
