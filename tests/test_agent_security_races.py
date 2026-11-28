@@ -273,7 +273,9 @@ def test_new_service_instance_interrupts_pending_approval(tmp_path: Path) -> Non
             manager.approval(run.id, owner=_OWNER, seq=seq, decision="allow_once")
         assert stale.value.code == "approval_unavailable"
         _assert_project(project, _OLD)
-        _assert_project(Path(run.workcopy), _OLD)
+        # The new instance removed the copy no run of it can reach (#607),
+        # so the stale approval has nothing left to write to.
+        assert not Path(run.workcopy).exists()
     finally:
         if replacement is not None:
             replacement.close()
