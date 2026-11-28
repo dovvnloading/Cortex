@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .cloud_transport import cloud_stream
+from .cloud_transport import StoppedBeforeRequest, cloud_stream, run_unless_stopped
 from .cloud_catalog import (
     PROVIDERS as PROVIDERS,
     connection,
@@ -157,6 +157,16 @@ def _gemini_event(reply: _Reply, event: dict) -> None:
             reply.reason = "length" if finish == "MAX_TOKENS" else "stop"
 
 
+def _gemini_finished(event: dict) -> bool:
+    """Whether this event ends the answer: a finished candidate with its usage.
+
+    A finish reason without usage can still be followed by a usage-only frame,
+    so that case keeps reading.
+    """
+    candidates = event.get("candidates") or []
+    return bool(candidates and candidates[0].get("finishReason") and event.get("usageMetadata"))
+
+
 def _responses_event(reply: _Reply, event: dict) -> None:
     kind = event.get("type")
     if kind in ("response.output_text.delta", "response.refusal.delta"):
@@ -217,6 +227,11 @@ def _consume(response: httpx.Response, spec: ProviderSpec, protocol: str, reply:
             return
         if protocol == "anthropic" and event.get("type") == "message_stop":
             return
+        if protocol == "gemini" and _gemini_finished(event):
+            # The selected candidate has finished and the final counts came
+            # with it: waiting for HTTP EOF only let a stall or a dropped
+            # connection turn a complete answer into an error.
+            return
     if protocol == "anthropic":
         # stop_reason can arrive before the final message_stop frame.
         raise CloudProviderError(f"{spec.label} ended the stream before completing its response.")
@@ -250,13 +265,21 @@ class CloudChatClient:
                 if spec.protocol == "bedrock":
                     return bedrock_chat(spec, model=model_id, messages=messages, options=options,
                                         cancellation_event=cancellation_event, on_delta=on_delta, client=client)
-                base, headers = connection(spec)
+                # Credentials can block on the network (ADC, a token refresh)
+                # before the request's own Stop watcher exists.
+                base, headers = run_unless_stopped(
+                    lambda: connection(spec), cancellation_event, name="cloud-credentials"
+                )
                 base = platform_chat_base(spec, model_id, base)
                 protocol = spec.protocol
                 # Older Chat Completions models predate Responses.
                 if spec.id == "openai" and (model_id == "gpt-4" or model_id.startswith(("gpt-3.5-", "chatgpt-4o-", "gpt-4-"))):
                     protocol = "openai"
-                native_messages = platform_messages(spec, model_id, base, headers)
+                native_messages = run_unless_stopped(
+                    lambda: platform_messages(spec, model_id, base, headers),
+                    cancellation_event,
+                    name="cloud-platform-preflight",
+                )
                 if native_messages is not None:
                     messages_url, model_id, headers = native_messages
                     protocol = "anthropic"
@@ -272,6 +295,8 @@ class CloudChatClient:
                 if cancellation_event is None or not cancellation_event.is_set():
                     with cloud_stream(client, url, cancellation_event, headers=headers, json=body) as response:
                         _consume(response, spec, protocol, reply, cancellation_event)
+        except StoppedBeforeRequest:
+            pass  # nothing was sent; the reply below is the stopped one
         except (httpx.HTTPError, ValueError, TypeError, IndexError, KeyError, AttributeError, RuntimeError) as exc:
             if cancellation_event is None or not cancellation_event.is_set():
                 if isinstance(exc, CloudProviderError):

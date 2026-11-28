@@ -2,15 +2,58 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import socket
-from threading import Event
-from typing import Any
+from threading import Event, Thread
+from typing import Any, TypeVar
 
 import httpx
 
 from .chat_client import close_when_cancelled
+
+
+_Result = TypeVar("_Result")
+
+
+class StoppedBeforeRequest(Exception):
+    """Stop came while credentials were still being obtained; nothing was sent."""
+
+
+def run_unless_stopped(call: Callable[[], _Result], cancellation: Event | None, *, name: str) -> _Result:
+    """Run a blocking step before the request -- credentials, a token refresh.
+
+    Resolving Application Default Credentials or AWS credentials can wait on
+    the network, or on another thread's refresh, and the request's own Stop
+    watcher is not armed yet, so a stopped generation used to sit there and
+    keep its slot. The step runs on a helper thread instead; Stop raises
+    ``StoppedBeforeRequest`` at once, and the abandoned step finishes (or
+    times out) on its own with its result discarded.
+    """
+
+    if cancellation is None:
+        return call()
+    if cancellation.is_set():
+        raise StoppedBeforeRequest()
+    outcome: dict[str, Any] = {}
+    done = Event()
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # handed to the caller below
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    Thread(target=run, name=name, daemon=True).start()
+    while not done.wait(0.05):
+        if cancellation.is_set():
+            raise StoppedBeforeRequest()
+    if "error" in outcome:
+        raise outcome["error"]
+    value: _Result = outcome["value"]
+    return value
 
 
 @contextmanager
