@@ -1600,7 +1600,7 @@ class LlamaServerManager:
             "Check System settings and try again."
         )
         try:
-            for backend in self._backend_order(requested_backend, model_path, num_ctx):
+            for backend in self._backend_order(requested_backend, model_path, num_ctx, extra_args):
                 try:
                     handle = self._start_with_backend(
                         model_path, num_ctx, backend, extra_args, on_status, cancellation_event
@@ -1631,7 +1631,7 @@ class LlamaServerManager:
                     # argument) would wrongly blame vulkan and strand the user
                     # on cpu for 24h for a problem that has nothing to do with
                     # the GPU backend.
-                    self._mark_backend_bad("vulkan", model_path, num_ctx)
+                    self._mark_backend_bad("vulkan", model_path, num_ctx, extra_args)
                 return handle
         except BaseException as exc:
             # Only the exceptions handled above are retried on another
@@ -1677,7 +1677,11 @@ class LlamaServerManager:
                 self._last_failure_code = failure_code
 
     def _backend_order(
-        self, requested: GpuBackendSetting, model_path: Path, num_ctx: int
+        self,
+        requested: GpuBackendSetting,
+        model_path: Path,
+        num_ctx: int,
+        extra_args: tuple[str, ...] = (),
     ) -> list[GpuBackend]:
         if requested == "cpu":
             return ["cpu"]
@@ -1693,16 +1697,21 @@ class LlamaServerManager:
             with self._state_lock:
                 self._backend_note = _NO_VULKAN_LOADER_NOTE
             return ["cpu"]
-        if self._known_bad_backend(model_path, num_ctx) == "vulkan":
+        if self._known_bad_backend(model_path, num_ctx, extra_args) == "vulkan":
             return ["cpu"]
         return ["vulkan", "cpu"]
 
-    def _known_bad_backend(self, model_path: Path, num_ctx: int) -> str | None:
-        """Only skip vulkan when THIS (model, context size, runtime build)
-        is the one that failed, and only for a bounded window -- a launch
-        failure for one oversized model must not permanently disable GPU
-        inference for every other model, and a driver update or freed VRAM
-        deserves a retry rather than an indefinite ban."""
+    def _known_bad_backend(
+        self, model_path: Path, num_ctx: int, extra_args: tuple[str, ...] = ()
+    ) -> str | None:
+        """Only skip vulkan when THIS (model, context size, launch options,
+        runtime build) is the one that failed, and only for a bounded window
+        -- a launch failure for one oversized model must not permanently
+        disable GPU inference for every other model, and a driver update or
+        freed VRAM deserves a retry rather than an indefinite ban. The launch
+        options count because they can be the whole problem (a KV-cache type
+        the GPU cannot use); changing them must let the GPU build try again.
+        A marker written before options were recorded matches nothing."""
         try:
             data = json.loads(self._preferred_backend_file.read_text("utf-8"))
         except (OSError, ValueError):
@@ -1710,6 +1719,8 @@ class LlamaServerManager:
         if not isinstance(data, dict):
             return None
         if data.get("model") != str(model_path) or data.get("num_ctx") != num_ctx:
+            return None
+        if data.get("extra_args") != list(extra_args):
             return None
         if self._release is not None and data.get("release") != getattr(self._release, "tag", None):
             return None
@@ -1722,7 +1733,13 @@ class LlamaServerManager:
             return None
         return data.get("known_bad")
 
-    def _mark_backend_bad(self, backend: GpuBackend, model_path: Path, num_ctx: int) -> None:
+    def _mark_backend_bad(
+        self,
+        backend: GpuBackend,
+        model_path: Path,
+        num_ctx: int,
+        extra_args: tuple[str, ...] = (),
+    ) -> None:
         try:
             self._runtime_dir.mkdir(parents=True, exist_ok=True)
             self._preferred_backend_file.write_text(
@@ -1730,6 +1747,7 @@ class LlamaServerManager:
                     "known_bad": backend,
                     "model": str(model_path),
                     "num_ctx": num_ctx,
+                    "extra_args": list(extra_args),
                     "release": getattr(self._release, "tag", None) if self._release is not None else None,
                     "at": time.time(),
                 }),
