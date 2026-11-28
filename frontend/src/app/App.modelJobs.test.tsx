@@ -73,6 +73,8 @@ function backend(options: {
   ggufDirectory?: string | null;
   listing?: () => Response;
   lostAcceptanceResponses?: number;
+  /** Replays, after the lost ones, that are refused with 401 before reaching the handler. */
+  unauthorizedReplays?: number;
 } = {}) {
   const installed = options.installed ?? [];
   const streams: ReturnType<typeof handFedStream>[] = [];
@@ -94,6 +96,9 @@ function backend(options: {
       // bytes, but the client loses its HTTP response before seeing the job ID.
       if (downloads.length <= (options.lostAcceptanceResponses ?? 0)) {
         throw new TypeError("Synthetic network reset after backend admission");
+      }
+      if (downloads.length <= (options.lostAcceptanceResponses ?? 0) + (options.unauthorizedReplays ?? 0)) {
+        return respond({ detail: "The session expired." }, 401);
       }
       return respond({ job_id: "gguf-job", kind: "gguf_download", status: "queued" }, 202);
     }
@@ -254,6 +259,31 @@ describe("a model download", () => {
 
     await user.click(await screen.findByRole("button", { name: "System" }, WAIT));
     expect(screen.getByRole("button", { name: `Cancel ${FILE}` })).toBeEnabled();
+    await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
+    await server.streams[0].close();
+    await waitFor(() => expect(remembered()).toBeNull(), WAIT);
+  });
+
+  it("keeps the request id when its replay is refused with 401, and recovers the job later (#713)", async () => {
+    const server = backend({ lostAcceptanceResponses: 1, unauthorizedReplays: 1 });
+    const first = await openApp(server);
+    await openSystem(first.user);
+    await startDownload(first.user);
+    await waitFor(() => expect(server.downloads).toHaveLength(2), WAIT);
+    // Let the refused replay be handled.
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 200)); });
+
+    // The 401 proves nothing about the first, lost request.
+    expect(window.sessionStorage.getItem("cortex.pending.gguf-admission")).not.toBeNull();
+    first.unmount();
+
+    // Signed in again, the same request recovers the running job.
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    await reopenSettings(server);
+    await waitFor(() => expect(server.downloads).toHaveLength(3), WAIT);
+    expect(server.downloads[2]).toEqual(server.downloads[0]);
+    await waitFor(() => expect(server.streams).toHaveLength(1), WAIT);
+    expect(remembered()).toMatchObject({ jobId: "gguf-job" });
     await server.streams[0].push({ id: 3, kind: "completed", status: "succeeded", data: { filename: FILE } });
     await server.streams[0].close();
     await waitFor(() => expect(remembered()).toBeNull(), WAIT);

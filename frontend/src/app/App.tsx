@@ -158,6 +158,16 @@ function scrubLauncherCredentials(): void {
   window.history.replaceState(window.history.state ?? {}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
+/**
+ * Whether a refused model-admission POST proves the job was not admitted.
+ * A 401 does not: it is answered before the handler runs, so it says nothing
+ * about an earlier attempt with the same request id, and clearing that id
+ * orphaned a download the backend had already started (#713).
+ */
+function provesNotAdmitted(error: unknown): boolean {
+  return isDefinitiveRejection(error) && !(error instanceof ApiError && error.kind === "auth");
+}
+
 export function App({ api: providedApi }: Props) {
   // Until settings load (and on the onboarding screen, which never loads them)
   // the theme is whatever was cached on the last launch. index.html already
@@ -970,14 +980,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       try {
         accepted = await api.pullModel(pending.model, pending.requestId);
       } catch (error) {
-        if (isDefinitiveRejection(error)) {
+        if (provesNotAdmitted(error)) {
           clearOllamaPullAdmission(pending.requestId);
           throw error;
         }
         try {
           accepted = await api.pullModel(pending.model, pending.requestId);
         } catch (retryError) {
-          if (isDefinitiveRejection(retryError)) clearOllamaPullAdmission(pending.requestId);
+          if (provesNotAdmitted(retryError)) clearOllamaPullAdmission(pending.requestId);
           throw retryError;
         }
       }
@@ -1071,14 +1081,14 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
     try {
       accepted = await api.downloadGGUFModel(pending.payload);
     } catch (error) {
-      if (isDefinitiveRejection(error)) {
+      if (provesNotAdmitted(error)) {
         clearGGUFAdmission(pending.payload.request_id);
         throw error;
       }
       try {
         accepted = await api.downloadGGUFModel(pending.payload);
       } catch (retryError) {
-        if (isDefinitiveRejection(retryError)) clearGGUFAdmission(pending.payload.request_id);
+        if (provesNotAdmitted(retryError)) clearGGUFAdmission(pending.payload.request_id);
         throw retryError;
       }
     }
