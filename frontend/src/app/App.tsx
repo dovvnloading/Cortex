@@ -917,7 +917,16 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       applyMemories(response.memos);
       notify("Memory changes saved.", "success");
     } catch (error) {
-      notify(apiMessage(error, "Could not save memory changes."), "error");
+      if (error instanceof ApiError && error.status === 409) {
+        // Another view changed the list, so the precondition is stale and
+        // every retry would fail the same way (#702). Reload the saved list:
+        // the editor keeps the unsaved edits and merges them onto it, and the
+        // next save is checked against what the server now holds.
+        await loadMemories();
+        notify(`${apiMessage(error, "The saved memories changed.")} The saved list was reloaded; your edits are kept. Review them and save again.`, "error");
+      } else {
+        notify(apiMessage(error, "Could not save memory changes."), "error");
+      }
       throw error;
     }
     finally { setMemoryBusy(false); }

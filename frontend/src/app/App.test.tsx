@@ -572,6 +572,44 @@ describe("App", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("reloads the saved memories after a conflict, so the next save can succeed (#702)", async () => {
+    window.sessionStorage.setItem("cortex.session.token", "local-session");
+    let server = ["A"];
+    const puts: unknown[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/memories") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { memos: string[]; expected_memos: string[] };
+        puts.push(body);
+        if (JSON.stringify(body.expected_memos) !== JSON.stringify(server)) {
+          return respond({ detail: "The memories changed since they were loaded." }, 409);
+        }
+        server = body.memos;
+        return respond({ memos: server });
+      }
+      if (url.endsWith("/memories")) return respond({ memos: server });
+      return workspaceRoute(url) ?? respond({ detail: "Unexpected test route." }, 404);
+    });
+    render(<ToastProvider><App api={new CortexApi("/api/v1", fetcher)} /></ToastProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("link", { name: "Settings" }, { timeout: 10_000 }));
+    await user.click(await screen.findByRole("button", { name: "Memory" }, { timeout: 10_000 }));
+    const first = await screen.findByRole("textbox", { name: "Memory 1" });
+    // Another view adds B meanwhile.
+    server = ["A", "B"];
+    await user.clear(first);
+    await user.type(first, "A revised");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/The saved list was reloaded; your edits are kept/)).toBeVisible();
+    expect(await screen.findByRole("textbox", { name: "Memory 2" })).toHaveValue("B");
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveValue("A revised");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(server).toEqual(["A revised", "B"]));
+    expect(puts.at(-1)).toMatchObject({ expected_memos: ["A", "B"] });
+  });
+
   it("does not let a slow memory refresh overwrite a memory saved meanwhile", async () => {
     window.sessionStorage.setItem("cortex.session.token", "local-session");
     let releaseRefresh!: (response: Response) => void;
