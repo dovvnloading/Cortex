@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from threading import Event
+from threading import Event, Thread
 
 import httpx
 import pytest
@@ -195,6 +195,9 @@ def test_cancelling_stream_stops_consumption(monkeypatch):
     ("anthropic", [{"type": "content_block_delta", "delta": {"text": "answer"}},
                    {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
                    {"type": "message_stop"}], "length"),
+    # A finished candidate with its usage ends a Gemini answer (#656).
+    ("gemini", [{"candidates": [{"content": {"parts": [{"text": "answer"}]}, "finishReason": "STOP"}],
+                 "usageMetadata": {"promptTokenCount": 6, "candidatesTokenCount": 2}}], "stop"),
 ])
 def test_terminal_events_finish_without_waiting_for_http_eof(monkeypatch, provider, events, reason):
     monkeypatch.setenv(PROVIDERS[provider].key_env, "fixture")
@@ -356,3 +359,51 @@ def test_stop_disconnects_real_cloud_request_before_headers_or_between_deltas(mo
             event.set()
             server.shutdown()
             thread.join(2)
+
+
+def test_a_gemini_usage_frame_after_the_finish_reason_is_still_read(monkeypatch):
+    """A finish reason without usage is not the end: the usage can follow in its own frame."""
+    monkeypatch.setenv(PROVIDERS["gemini"].key_env, "fixture")
+    events = [
+        {"candidates": [{"content": {"parts": [{"text": "answer"}]}, "finishReason": "STOP"}]},
+        {"usageMetadata": {"promptTokenCount": 6, "candidatesTokenCount": 2}},
+    ]
+    client = CloudChatClient(transport=httpx.MockTransport(lambda _: sse(*events)))
+
+    result = client.chat(model="cloud:gemini:test-model", messages=[], options={})
+
+    assert result["message"]["content"] == "answer"
+    assert (result["prompt_eval_count"], result["eval_count"]) == (6, 2)
+
+
+def test_stop_ends_a_generation_still_waiting_for_credentials(monkeypatch):
+    """Credentials (ADC, a token refresh) were resolved before any Stop watcher existed (#655)."""
+    import cortex_backend.services.cloud_providers as providers
+
+    entered, release = Event(), Event()
+
+    def stalled_connection(spec):
+        entered.set()
+        release.wait(timeout=10)
+        return "https://example.invalid/v1", {}
+
+    monkeypatch.setenv("GROQ_API_KEY", "fixture")
+    monkeypatch.setattr(providers, "connection", stalled_connection)
+    stop = Event()
+    client = CloudChatClient(transport=httpx.MockTransport(lambda _: pytest.fail("nothing may be sent")))
+    outcome: list[dict] = []
+    worker = Thread(
+        target=lambda: outcome.append(
+            client.chat(model="cloud:groq:model", messages=[], options={}, cancellation_event=stop)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        stop.set()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), "Stop waited for the credential step"
+        assert outcome[0]["done_reason"] == "cancelled"
+    finally:
+        release.set()

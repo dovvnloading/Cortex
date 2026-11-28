@@ -196,6 +196,15 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   applied, so other chats' newer jobs no longer push them out (#666; #744).
 - A turn that asks for an explanation first is admitted for code execution
   only for the action it separately asks for (#626; #744).
+- Attachments keep dotfile names such as `.gitignore` and `.env`, a text
+  file starting with "BM" is no longer refused as a broken bitmap, and a
+  truncated image is refused at upload instead of failing the generation
+  (#633, #634, #635; #745).
+- A chat attachment whose success could not be recorded no longer stays
+  published and holding storage (#646; #745).
+- Gemini and Bedrock streams end at their final event instead of waiting for
+  the connection to close, and Stop ends a cloud generation while Vertex or
+  Bedrock credentials are still loading (#655, #656, #657; #745).
 
 ### Security
 

@@ -632,6 +632,95 @@ def test_a_failed_removal_of_the_orphaned_artifact_never_replaces_the_staging_er
     assert _artifact_rows_and_files(repository)[0] == 1
 
 
+def _fail_the_success_write(
+    repository: ExecutionRepository, monkeypatch, *, commit_first: bool, then_unreadable: bool = False
+) -> None:
+    """Make the one completion write raise, after (or instead of) committing.
+
+    ``then_unreadable`` also makes every later read of a job fail, as a store
+    that has just gone away would.
+    """
+
+    real_transition = repository.transition
+
+    def unreadable(*_args, **_kwargs):
+        raise ExecutionRepositoryError("The execution store is unavailable.")
+
+    def faulty(job_id, **kwargs):
+        if kwargs.get("status") != "succeeded":
+            return real_transition(job_id, **kwargs)
+        if commit_first:
+            real_transition(job_id, **kwargs)
+        if then_unreadable:
+            monkeypatch.setattr(repository, "get_job", unreadable)
+        raise ExecutionRepositoryError("The execution store is unavailable.")
+
+    monkeypatch.setattr(repository, "transition", faulty)
+
+
+def test_a_failed_success_write_after_publish_leaves_no_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#646: the bytes were published, the completion write raised, the job failed.
+
+    The artifact stayed published with no result naming it, holding its bytes
+    for the 30-day retention; every failed retry added another.
+    """
+
+    repository, service = _durable(tmp_path)
+    _fail_the_success_write(repository, monkeypatch, commit_first=False)
+
+    with pytest.raises(ChatAttachmentError) as failure:
+        _stage(service, "success-write-failed")
+
+    assert failure.value.code == "attachment_persist_failed"
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert (job.status, job.error, job.result) == ("failed", "attachment_persist_failed", None)
+    rows, files = _artifact_rows_and_files(repository)
+    assert rows == 0, "the published artifact row was left behind"
+    assert files == [], "the published artifact file was left behind"
+
+
+def test_a_success_write_that_committed_before_raising_keeps_its_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The write landed and only its reply was lost: the attachment is real.
+
+    Deleting it would hand a retry of this request a descriptor whose bytes
+    are gone.
+    """
+
+    repository, service = _durable(tmp_path)
+    _fail_the_success_write(repository, monkeypatch, commit_first=True)
+
+    staged = _stage(service, "success-write-committed")
+
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert job.status == "succeeded"
+    assert job.result == staged.as_dict()
+    resolved = service.resolve(owner=_OWNER, descriptor=staged)
+    assert resolved.descriptor == staged
+    assert _artifact_rows_and_files(repository)[0] == 1
+
+
+def test_an_unreadable_store_after_a_failed_success_write_leaves_the_artifact_to_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When the store cannot say whether the write landed, nothing is deleted."""
+
+    repository, service = _durable(tmp_path)
+    _fail_the_success_write(repository, monkeypatch, commit_first=True, then_unreadable=True)
+
+    with pytest.raises(ChatAttachmentError) as failure:
+        _stage(service, "success-write-unknown")
+
+    assert failure.value.code == "attachment_persist_failed"
+    monkeypatch.undo()
+    (job,) = repository.list_jobs(owner=_OWNER, include_terminal=True)
+    assert job.status == "succeeded", "a finished job is immutable; the late failure changed nothing"
+    assert _artifact_rows_and_files(repository)[0] == 1
+
+
 def test_api_reports_non_vision_models_and_returns_only_attachment_metadata():
     state = FakeOllamaState(
         installed_models={"local-chat:7b"},
@@ -1142,3 +1231,65 @@ def test_expired_previous_document_refuses_uninformed_followup(
             },
         )
         assert recovered.status_code == 202, recovered.text
+
+
+# --- names and signatures classify documents and images correctly (#633-#635) --
+
+
+@pytest.mark.parametrize("name", [".gitignore", ".env", ".editorconfig", ".dockerignore", ".gitattributes"])
+def test_allowlisted_dotfiles_are_staged_under_their_own_name(name: str) -> None:
+    """The leading dot was stripped, so these names never reached their allowlist (#633)."""
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id=f"dot-{name.strip('.')}", filename=name, content=b"build/\n",
+    )
+
+    assert descriptor.filename == name
+    assert descriptor.kind == "document"
+
+
+def test_trailing_dots_and_spaces_are_still_trimmed() -> None:
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="trailing", filename="notes.txt. ", content=b"text\n",
+    )
+
+    assert descriptor.filename == "notes.txt"
+
+
+def test_a_text_file_that_starts_with_bm_is_a_document() -> None:
+    """Two letters were read as a BMP signature and the document rejected (#634)."""
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="bm-text", filename="notes.txt",
+        content=b"BMP image conversion notes\n",
+    )
+
+    assert descriptor.kind == "document"
+
+
+def test_a_real_bitmap_is_still_an_image() -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buffer, "BMP")
+
+    descriptor = ChatAttachmentService().stage(
+        owner="installation-a", request_id="real-bmp", filename="picture.bmp", content=buffer.getvalue(),
+    )
+
+    assert descriptor.kind == "image"
+    assert descriptor.mime_type == "image/bmp"
+
+
+def test_a_truncated_jpeg_is_refused_at_upload() -> None:
+    """verify() passed a JPEG cut short; it failed later, at generation (#635)."""
+    buffer = BytesIO()
+    Image.new("RGB", (128, 128), "red").save(buffer, "JPEG")
+    # Without its last bytes (the end-of-image marker) verify() still passes;
+    # decoding the pixels does not.
+    truncated = buffer.getvalue()[:-2]
+    with Image.open(BytesIO(truncated)) as probe:
+        probe.verify()
+
+    with pytest.raises(ChatAttachmentError) as error:
+        ChatAttachmentService().stage(
+            owner="installation-a", request_id="truncated-jpeg", filename="image.jpg", content=truncated,
+        )
+
+    assert error.value.code == "attachment_image_invalid"

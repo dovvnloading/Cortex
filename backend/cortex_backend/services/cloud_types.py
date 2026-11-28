@@ -45,7 +45,9 @@ class ProviderSpec:
 def image_mime_type(encoded: str) -> str:
     """Identify an already validated Cortex image from its base64 prefix."""
     try:
-        detected = image_type(base64.b64decode(encoded[:16], validate=True))
+        # 24 base64 characters are 18 bytes: enough for every signature,
+        # including a BMP's DIB header size at offset 14.
+        detected = image_type(base64.b64decode(encoded[:24], validate=True))
     except (ValueError, TypeError):
         detected = None
     if not detected:
