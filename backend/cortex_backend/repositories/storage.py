@@ -549,8 +549,9 @@ class DatabaseManager:
         swap has succeeded and used to put the older file back if it has not, so
         both generations end up where they were. A crash in between leaves the
         second name beside the others rather than losing the file. Where the
-        file system cannot make a hard link the swap goes ahead without that
-        protection.
+        file system cannot make a hard link the older file is moved to that
+        name instead (and moved back if the swap fails); if it cannot even be
+        moved, the swap is abandoned rather than overwrite it unprotected.
         """
         temporary_path: str | None = None
         try:
@@ -568,11 +569,14 @@ class DatabaseManager:
             displaced_to: str | None = None
             older_file_kept_as: str | None = None
             if displace_existing_to is not None and os.path.exists(destination):
-                older_file_kept_as = cls._link_to_spare_name(displace_existing_to)
+                older_file_kept_as, older_file_moved = cls._keep_under_spare_name(displace_existing_to)
                 try:
                     replace_with_retry(destination, displace_existing_to)
                 except OSError:
-                    cls._drop_spare_name(older_file_kept_as)
+                    if older_file_moved:
+                        cls._restore_from_spare_name(older_file_kept_as, displace_existing_to)
+                    else:
+                        cls._drop_spare_name(older_file_kept_as)
                     raise
                 displaced_to = displace_existing_to
             try:
@@ -612,30 +616,35 @@ class DatabaseManager:
                     ) from exc
 
     @staticmethod
-    def _link_to_spare_name(path: str) -> str | None:
-        """Give an existing file a second name beside it and return that name.
+    def _keep_under_spare_name(path: str) -> tuple[str | None, bool]:
+        """Keep an existing file under a spare name beside it; return the name and whether it moved.
 
-        ``os.replace`` onto ``path`` would otherwise destroy the file. Nothing
-        is moved, so ``path`` is where it always was; returns None when there is
-        no file, or when the file system cannot make a hard link.
+        ``os.replace`` onto ``path`` would otherwise destroy the file. A hard
+        link gives it a second name and leaves ``path`` where it was. Where the
+        file system cannot make one, the file is renamed to the spare name
+        instead, which frees ``path`` without destroying anything: carrying on
+        with neither used to let a failed rotation lose the older backup for
+        good. A file that can be neither linked nor moved raises ``OSError``,
+        so the rotation stops before touching it. Returns ``(None, False)``
+        when there is no file.
         """
         if not os.path.exists(path):
-            return None
+            return None, False
         spare = os.path.join(
             os.path.dirname(path) or ".", f".{os.path.basename(path)}.{uuid4().hex}.old"
         )
         try:
             os.link(path, spare)
         except (OSError, NotImplementedError):
-            logging.warning(
-                "Could not protect the older database backup while rotating; carrying on without."
-            )
-            return None
-        return spare
+            pass
+        else:
+            return spare, False
+        replace_with_retry(path, spare)
+        return spare, True
 
     @staticmethod
     def _drop_spare_name(spare: str | None) -> None:
-        """Remove a name made by ``_link_to_spare_name``; the file keeps its other one."""
+        """Remove a spare name; for a hard link the file keeps its other one."""
         if spare is None:
             return
         try:
