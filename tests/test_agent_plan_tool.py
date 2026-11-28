@@ -116,6 +116,27 @@ def test_latest_plan_is_a_visible_step_with_all_items_and_statuses(tmp_path: Pat
     assert len(client.requests) == 3
 
 
+def test_the_plan_reaches_the_client_in_its_step_events(tmp_path: Path) -> None:
+    """#584: step events carried only "Plan updated (3 items)", so the items
+    and their statuses could not be shown, live or on replay."""
+    from cortex_backend.services.agent_runs import AgentRuns
+
+    first = [_item("Research", "done"), _item("Implement", "in_progress"), _item("Test", "pending")]
+    updated = [_item("Research", "done"), _item("Implement", "done"), _item("Test", "done")]
+    store, run_id, _, _client, loop = _setup(tmp_path, _tool(first), _tool(updated), _final("Done"))
+    loop.run(run_id)
+
+    # Replay, as after a restart: no live run object.
+    events, _complete = AgentRuns(data_dir=tmp_path / "data", run_store=store).events(
+        run_id, owner=OWNER, after_id=0,
+    )
+
+    plans = [event.data for event in events if event.kind == "step" and event.data["kind"] == "plan"]
+    assert [plan["plan"] for plan in plans] == [first, updated]
+    others = [event.data for event in events if event.kind == "step" and event.data["kind"] != "plan"]
+    assert all("plan" not in data for data in others)
+
+
 def test_maximum_plan_and_text_length_are_accepted(tmp_path: Path) -> None:
     items = [_item(f"Item {index}: " + "x" * (200 - len(f"Item {index}: ")), "done") for index in range(20)]
     assert all(len(item["text"]) == 200 for item in items)

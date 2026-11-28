@@ -38,7 +38,7 @@ from cortex_backend.agent.tool_registry import (
 from cortex_backend.agent.tools.checks import register_check_tools
 from cortex_backend.agent.tools.files import register_file_tools
 from cortex_backend.agent.tools.git import register_git_tools
-from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool
+from cortex_backend.agent.tools.plan import plan_guard, register_plan_tool, stored_plan_items
 from cortex_backend.agent.tools.shell import ShellTools, register_shell_tools
 from cortex_backend.agent.tools.web import WebFetchError, fetch_url
 from cortex_backend.agent.workcopy import (
@@ -175,6 +175,24 @@ def _profile_settings(
     # Also bound the actual model request to the run's narrower context budget.
     model_ctx = min(context_size, max(1, int(narrowed["max_context_chars"]) // 4))
     return protocol_path, narrowed, {"num_ctx": model_ctx}
+
+
+def _step_data(step: AgentStep) -> dict[str, object]:
+    """What a step event carries, live and on replay alike.
+
+    A plan step also carries the plan itself: its items and their statuses.
+    Only "Plan updated (2 items)" reached the client before, so the plan the
+    model kept for the user could not be shown (#584).
+    """
+    data: dict[str, object] = {
+        "seq": step.seq, "kind": step.kind,
+        "summary": step.summary, "tool": step.tool,
+    }
+    if step.kind == "plan":
+        items = stored_plan_items(step.result)
+        if items is not None:
+            data["plan"] = items
+    return data
 
 
 class AgentRuns:
@@ -320,10 +338,7 @@ class AgentRuns:
         for step in steps:
             if step.seq <= managed.last_step_seq:
                 continue
-            self._emit(managed, "step", {
-                "seq": step.seq, "kind": step.kind,
-                "summary": step.summary, "tool": step.tool,
-            })
+            self._emit(managed, "step", _step_data(step))
             managed.last_step_seq = step.seq
 
     def _shell_output(self, run_id: str, text: str, tool_call_id: str) -> None:
@@ -604,10 +619,8 @@ class AgentRuns:
                 # approvals. The durable step metadata is still replayable.
                 steps = self._ledger().list_steps(run_id, owner=owner)
                 historical = [
-                    AgentEvent(i, "step", run_id, {
-                        "seq": step.seq, "kind": step.kind,
-                        "summary": step.summary, "tool": step.tool,
-                    }) for i, step in enumerate(steps, start=1)
+                    AgentEvent(i, "step", run_id, _step_data(step))
+                    for i, step in enumerate(steps, start=1)
                 ]
                 historical.append(AgentEvent(
                     len(historical) + 1, "status", run_id,

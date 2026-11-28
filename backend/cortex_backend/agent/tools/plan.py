@@ -49,6 +49,19 @@ def _valid_items(raw: object) -> list[_PlanItem] | None:
     return items
 
 
+def stored_plan_items(result: object) -> list[_PlanItem] | None:
+    """The plan a plan step recorded, re-validated; None when there is none to show."""
+    if not isinstance(result, dict) or not isinstance(result.get("summary"), str):
+        return None
+    try:
+        payload = json.loads(result["summary"])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _valid_items(payload.get("items"))
+
+
 def register_plan_tool(
     registry: ToolRegistry, run_store: AgentRunStore, run_id: str, *, owner: str = "local",
 ) -> None:
