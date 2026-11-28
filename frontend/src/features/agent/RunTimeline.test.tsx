@@ -26,6 +26,31 @@ describe("RunTimeline", () => {
     expect(within(list).getByText("Details: Read 3 files")).toBeVisible();
   });
 
+  it("shows the plan a plan step carries, with each item's status (#584)", async () => {
+    const user = userEvent.setup();
+    render(<RunTimeline events={[
+      event(1, "step", {
+        seq: 1, kind: "plan", tool: "update_plan", summary: "Plan updated (3 items)",
+        plan: [
+          { text: "Read the failing test", status: "done" },
+          { text: "Fix the parser", status: "in_progress" },
+          { text: "Run the tests", status: "pending" },
+        ],
+      }),
+      event(2, "step", { seq: 2, kind: "plan", summary: "Plan updated (1 item)", plan: [{ text: "<b>x</b>", status: "constructor" }] }),
+    ]} />);
+
+    await user.click(screen.getByText("Plan updated (3 items)"));
+    const plan = screen.getByRole("list", { name: "Agent plan" });
+    expect(within(plan).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "Done: Read the failing test", "In progress: Fix the parser", "To do: Run the tests",
+    ]);
+    // A malformed plan shows no plan rather than a guess.
+    await user.click(screen.getByText("Plan updated (1 item)"));
+    expect(screen.queryByText(/<b>x<\/b>/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("list", { name: "Agent plan" })).toHaveLength(1);
+  });
+
   it("keeps each command chunk separate, literal and distinct from the agent answer", async () => {
     const user = userEvent.setup();
     const malicious = '<a href="javascript:alert(1)">click</a> [link](https://example.test)\n'

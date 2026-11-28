@@ -6,6 +6,26 @@ function textField(data: Record<string, unknown>, field: string): string | null 
   return typeof data[field] === "string" ? data[field] as string : null;
 }
 
+type PlanItem = { text: string; status: "pending" | "in_progress" | "done" };
+const PLAN_STATUS: Record<PlanItem["status"], string> = {
+  pending: "To do", in_progress: "In progress", done: "Done",
+};
+
+/** The plan a plan step carries; anything malformed shows no plan at all. */
+function planItems(data: Record<string, unknown>): PlanItem[] | null {
+  const plan = data.plan;
+  if (!Array.isArray(plan) || plan.length === 0) return null;
+  const items: PlanItem[] = [];
+  for (const item of plan as unknown[]) {
+    if (item === null || typeof item !== "object") return null;
+    const { text, status } = item as Record<string, unknown>;
+    if (typeof text !== "string" || typeof status !== "string"
+      || !Object.prototype.hasOwnProperty.call(PLAN_STATUS, status)) return null;
+    items.push({ text, status: status as PlanItem["status"] });
+  }
+  return items;
+}
+
 function isAgentResponse(event: AgentSSEEvent): boolean {
   // Missing or unknown provenance is untrusted output, never an agent answer.
   return event.event === "output" && event.data.source === "agent";
@@ -66,6 +86,16 @@ export function RunTimeline({ events }: RunTimelineProps) {
                     </p>
                     {typeof event.data.tool === "string" && <p>Tool: {event.data.tool}</p>}
                     {typeof event.data.summary === "string" && <p>Details: {event.data.summary}</p>}
+                    {(() => {
+                      const plan = planItems(event.data);
+                      return plan && (
+                        <ol aria-label="Agent plan">
+                          {plan.map((item, index) => (
+                            <li key={index}>{PLAN_STATUS[item.status]}: {item.text}</li>
+                          ))}
+                        </ol>
+                      );
+                    })()}
                   </div>
                 )}
               </details>
