@@ -77,6 +77,22 @@ from .launch_failure import (
 
 logger = logging.getLogger(__name__)
 
+_MODEL_FILE_CHANGED = "the model file changed on disk"
+
+
+def _file_version(path: Path) -> tuple[int, int, int, int] | None:
+    """Which file is at ``path``: its identity, size and modification time.
+
+    Size and mtime alone can match after an atomic replacement, so the device
+    and inode are part of it, as in the trained-context cache.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 ServerState = Literal["idle", "downloading_binary", "starting", "ready", "stopping", "failed"]
 GpuBackendSetting = Literal["auto", "vulkan", "cpu"]
 
@@ -185,7 +201,7 @@ def _safe_restart_reason(reason: str) -> str:
     """Classify a restart without retaining model filenames or child text."""
     if reason.startswith("the selected model changed"):
         return "the selected model changed"
-    if reason == _ADVANCED_OPTIONS_CHANGED:
+    if reason in (_ADVANCED_OPTIONS_CHANGED, _MODEL_FILE_CHANGED):
         return reason
     if reason == _UNLOADED_AT_REQUEST or reason.startswith("the model was unloaded after "):
         return reason
@@ -677,6 +693,9 @@ class LlamaServerManager:
         self._process: subprocess.Popen | None = None
         self._starting_process: subprocess.Popen | None = None
         self._loaded_model_path: Path | None = None
+        # Which version of that file the server loaded: the same path can be
+        # replaced on disk with different weights.
+        self._loaded_model_version: tuple[int, int, int, int] | None = None
         # What was requested with ``-c`` for the running server. Reuse
         # decisions key off this, not the read-back value below: relaunching
         # with the same arguments cannot yield a larger window, so treating a
@@ -907,6 +926,7 @@ class LlamaServerManager:
         # The same limit ensure_ready applies, or a window that will be lowered
         # anyway would look too big for the server that is already running.
         num_ctx, _ = self._limit_to_trained_context(num_ctx, self._trained_context(model_path))
+        current_version = _file_version(model_path)
         with self._state_lock:
             if (
                 self._closed
@@ -914,6 +934,10 @@ class LlamaServerManager:
                 or self._process is None
                 or self._base_url is None
                 or self._loaded_model_path != model_path
+                or (
+                    self._loaded_model_version is not None
+                    and current_version != self._loaded_model_version
+                )
             ):
                 return None
             if num_ctx is not None and self._loaded_num_ctx is not None and num_ctx > self._loaded_num_ctx:
@@ -1248,6 +1272,7 @@ class LlamaServerManager:
         extra_args: tuple[str, ...] | None = None,
         requested_backend: GpuBackendSetting | None = None,
     ) -> _ReuseVerdict:
+        current_version = _file_version(model_path)
         with self._state_lock:
             if self._state != "ready" or self._process is None:
                 return _ReuseVerdict(reusable=False)
@@ -1256,6 +1281,10 @@ class LlamaServerManager:
                     reusable=False,
                     reason="the selected model changed",
                 )
+            if self._loaded_model_version is not None and current_version != self._loaded_model_version:
+                # Same path, different file: a model replaced on disk must be
+                # loaded again, not served from the old weights.
+                return _ReuseVerdict(reusable=False, reason=_MODEL_FILE_CHANGED)
             if (
                 num_ctx is not None
                 and self._loaded_num_ctx is not None
@@ -1532,6 +1561,7 @@ class LlamaServerManager:
         self._process = None
         self._starting_process = None
         self._loaded_model_path = None
+        self._loaded_model_version = None
         self._loaded_num_ctx = None
         self._loaded_context = None
         self._base_url = None
@@ -1920,12 +1950,14 @@ class LlamaServerManager:
                 props = self._probe_props(base_url, api_key=api_key, model_path=model_path)
                 if props is not None:
                     loaded_context = _context_from_props(props)
+                    loaded_version = _file_version(model_path)
                     with self._state_lock:
                         if cancellation_event.is_set():
                             raise LlamaCppError("The local model runtime startup was cancelled.")
                         self._process = process
                         self._starting_process = None
                         self._loaded_model_path = model_path
+                        self._loaded_model_version = loaded_version
                         self._loaded_num_ctx = num_ctx
                         self._loaded_context = loaded_context
                         self._base_url = base_url

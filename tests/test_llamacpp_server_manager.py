@@ -289,6 +289,35 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.active_backend == "cpu"
 
 
+def test_a_model_file_replaced_on_disk_is_loaded_again(tmp_path: Path) -> None:
+    """Same path, new weights: the warm server kept serving the old file (#639)."""
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF old weights")
+    first, second = _FakePopen(), _FakePopen()
+    launcher = _QueueLauncher([first, second])
+
+    class _ServesThisModel:
+        # A real file is attested: the server must report its exact path.
+        def get(self, url: str, timeout=None, headers=None):
+            del url, timeout, headers
+            return _FakeResponse(200, {"status": "ok", "model_path": str(model_path), "build_info": "fake"})
+
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_ServesThisModel())
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 1  # an unchanged file reuses the server
+
+    replacement = tmp_path / "model.gguf.new"
+    replacement.write_bytes(b"GGUF new weights")
+    os.replace(replacement, model_path)  # an atomic replacement, as a download does
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert first.terminated
+    assert manager.status.last_restart_reason == "the model file changed on disk"
+
+
 def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
     """An explicit CPU/Vulkan preference change must not reuse the old process."""
     first, second, third = _FakePopen(), _FakePopen(), _FakePopen()
