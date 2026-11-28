@@ -433,6 +433,11 @@ class OllamaChatClient:
                         tool_calls.extend(chunk_calls)
                     if _field(chunk, "done"):
                         final = dict(chunk) if isinstance(chunk, Mapping) else chunk.model_dump()
+                        # The terminal frame completes the answer. Reading on
+                        # waited for the connection to close: one left open
+                        # held a finished answer until the read timed out,
+                        # and that timeout was then raised as a failure.
+                        break
             except Exception:
                 # Closing the client under a blocked read is how Stop reaches
                 # it, and the transport reports that however it chooses (a read

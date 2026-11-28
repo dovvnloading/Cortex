@@ -406,6 +406,53 @@ def test_a_stalled_residency_probe_delays_a_turn_only_briefly(monkeypatch: pytes
     assert stub.events == ["ps", "chat"]
 
 
+class _OpenAfterDone:
+    """A stream that stays open after its terminal frame: advancing again fails."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.advanced_after_done = False
+        self._frames = iter(
+            [
+                {"message": {"content": "Hello"}, "done": False},
+                {"message": {"content": " world"}, "done": True, "done_reason": "stop", "eval_count": 2},
+            ]
+        )
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._frames)
+        except StopIteration:
+            self.advanced_after_done = True
+            raise httpx.ReadTimeout("the connection stayed open") from None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_terminal_frame_finishes_the_answer_without_another_read() -> None:
+    """#613: the loop read on after done:true, so a connection left open held a
+    finished answer until the read timed out, and the timeout failed the turn."""
+    stream = _OpenAfterDone()
+
+    class _Shared:
+        def chat(self, **kwargs):
+            del kwargs
+            return stream
+
+    reply = OllamaChatClient(_Shared()).chat(
+        model="qwen3:8b", messages=[], options={}, on_delta=lambda _kind, _text: None
+    )
+
+    assert reply["message"]["content"] == "Hello world"
+    assert reply["done_reason"] == "stop" and reply["eval_count"] == 2
+    assert not stream.advanced_after_done
+    assert stream.closed
+
+
 def test_ollama_reports_a_loading_phase_when_the_model_is_not_resident() -> None:
     stub = _ResidencyOllama(resident=["something-else:1b"])
 
