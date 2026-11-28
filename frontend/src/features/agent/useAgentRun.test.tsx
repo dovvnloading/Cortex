@@ -135,6 +135,36 @@ describe("useAgentRun", () => {
     expect(result.current.pendingApproval?.request.command).toBe(details);
   });
 
+  it("shows a web fetch's exact URL and that it uses the internet before consent (#675)", async () => {
+    const api = fakeApi();
+    const url = "https://example.com/reference?topic=test";
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "approval", {
+        seq: 2, request: { tool: "web_fetch", url, summary: "Fetch this exact public URL once." },
+      }));
+      onEvent(sse(2, "status", { status: "waiting_approval" }));
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.pendingApproval).not.toBeNull());
+    const request = result.current.pendingApproval!.request;
+    expect(request.network).toBe(true);
+    expect(request.plain_text).toContain(url);
+    expect(request.command).toContain("Destination URL: " + url);
+  });
+
+  it("does not offer a web fetch for approval without its URL (#675)", async () => {
+    const api = fakeApi();
+    vi.mocked(api.events).mockImplementation(async (_id, onEvent) => {
+      onEvent(sse(1, "approval", { seq: 2, request: { tool: "web_fetch", summary: "Fetch this exact public URL once." } }));
+      onEvent(sse(2, "status", { status: "waiting_approval" }));
+    });
+    const { result } = renderHook(() => useAgentRun(api, true));
+    await act(async () => { await result.current.start(started); });
+    await waitFor(() => expect(result.current.run?.status).toBe("waiting_approval"));
+    expect(result.current.pendingApproval).toBeNull();
+  });
+
   it("reports the one-time model check while it runs and the result it ends with", async () => {
     const api = fakeApi();
     let emit: ((event: AgentSSEEvent) => void) | null = null;

@@ -25,9 +25,11 @@ function stringField(data: Record<string, unknown>, key: string): string | null 
   return typeof data[key] === "string" ? data[key] as string : null;
 }
 
-/** What a file-tool approval will change, as plain text for the details view. */
+/** What a tool approval will do, as plain text for the details view. */
 function fileChangeDetails(request: Record<string, unknown>, tool: string, path: string | null): string {
   const lines = ["Requested tool: " + tool];
+  const url = stringField(request, "url");
+  if (url) lines.push("Destination URL: " + url, "This request uses the internet.");
   if (path) lines.push("Project file: " + path);
   const source = stringField(request, "source");
   const destination = stringField(request, "destination");
@@ -57,19 +59,24 @@ function parseApproval(value: unknown): ApprovalRequest | null {
   const tool = stringField(request, "tool") ?? "a project action";
   const path = stringField(request, "path");
   const command = stringField(request, "command");
+  const url = stringField(request, "url");
+  // A web fetch is approved for one exact URL; without it there is nothing
+  // the user could review, so the request is not offered for approval.
+  if (tool === "web_fetch" && !url?.trim()) return null;
+  const summary = stringField(request, "plain_text")
+    ?? stringField(request, "summary")
+    ?? "The agent requests permission for " + tool + ".";
   return {
     command: command ?? fileChangeDetails(request, tool, path),
     cls: cls && APPROVAL_CLASSES.has(cls as ApprovalRequest["cls"])
       ? cls as ApprovalRequest["cls"] : "ask",
-    plain_text: stringField(request, "plain_text")
-      ?? stringField(request, "summary")
-      ?? "The agent requests permission for " + tool + ".",
+    plain_text: url ? summary + " URL: " + url : summary,
     // The shell tool reports its launcher as "level". Never assert that a
     // command is sandboxed, or that no process runs, unless that was supplied.
     sandbox_level: command !== null
       ? (request.level === "appcontainer" ? "appcontainer" : "unsandboxed")
       : (request.scope === "workcopy" ? "workcopy" : "unsandboxed"),
-    network: request.network === true,
+    network: request.network === true || url !== null,
   };
 }
 
