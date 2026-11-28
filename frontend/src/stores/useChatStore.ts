@@ -143,6 +143,11 @@ interface ChatStoreState {
   acknowledgeFailure: (id: number) => void;
 
   setThreadOptions: (threadKey: string, options: GenerationOptionsOverride | null) => void;
+  /**
+   * Forget the overrides of chats that no longer exist, in memory and in
+   * storage alike, given the complete list the backend just returned.
+   */
+  pruneThreadOptions: (existingThreadIds: Iterable<string>) => void;
   markUntranslated: (messageId: string) => void;
   clearUntranslated: (messageId: string) => void;
   /** Replace a message's pending suggestions; an empty list forgets them (a regenerated answer has new ones). */
@@ -314,6 +319,18 @@ export const useChatStore = create<ChatStoreState>((set) => ({
       const next = { ...state.generationOptionsByThread };
       if (options === null) delete next[threadKey];
       else { delete next[threadKey]; next[threadKey] = options; }
+      writePersistedGenerationOptions(next);
+      return { generationOptionsByThread: next };
+    }),
+  // Pruning only storage left the deleted chats in the live map, and the
+  // next change wrote them all back, where the 100-entry cap could push out
+  // a chat that still exists (#689).
+  pruneThreadOptions: (existingThreadIds) =>
+    set((state) => {
+      const existing = new Set(existingThreadIds);
+      const next = Object.fromEntries(Object.entries(state.generationOptionsByThread).filter(
+        ([thread]) => thread === NEW_THREAD_OPTIONS_KEY || existing.has(thread),
+      ));
       writePersistedGenerationOptions(next);
       return { generationOptionsByThread: next };
     }),

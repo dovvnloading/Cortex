@@ -22,7 +22,6 @@ const AgentPage = lazyRoute<AgentPageProps>(() => import("../features/agent/Agen
 import type { MemoryLoadState } from "../features/settings/MemoryPanel";
 import { blockStrayFileDrops } from "../lib/attachments";
 import { discardComposerDraft, pruneComposerDrafts } from "../lib/composerDraft";
-import { prunePersistedGenerationOptions } from "../lib/persistedGenerationOptions";
 import { beginGroupCreate, clearGroupCreate } from "../lib/pendingGroupCreate";
 import { agentModelNames, cloudModelProvider, displayModelName, isGGUFModel, localModelNames } from "../lib/localModels";
 import { ModelJobCancelledError } from "../lib/modelJobs";
@@ -405,7 +404,7 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       setChats(chatResponse);
       // `chatResponse` is the whole list, so any other saved draft belongs to a chat that is gone.
       pruneComposerDrafts(chatResponse.map((chat) => chat.id));
-      prunePersistedGenerationOptions(chatResponse.map((chat) => chat.id));
+      useChatStore.getState().pruneThreadOptions(chatResponse.map((chat) => chat.id));
       // Groups are organisation on top of the chats, so they load out of band
       // like the model inventory does: if the endpoint is unavailable the
       // library still opens with every chat present, just ungrouped. Blocking
