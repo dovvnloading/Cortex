@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from cortex_backend.core.generation import (
+    AttachmentsDoNotFit,
     CodeExecutionProposal,
     CodeProposalRejection,
     FixedPromptPlan,
@@ -29,6 +30,7 @@ from cortex_backend.core.generation import (
     MemoryCommand,
     ModelOperationError,
     TranslationResult,
+    attachments_too_large_message,
     prompt_too_long_message,
 )
 from cortex_backend.core.settings import DEFAULT_NUM_CTX
@@ -293,11 +295,14 @@ _COMMAND_TAG_RE = re.compile(
 )
 
 
-# Reference text is never cut below this many characters (the truncation notice
-# included), so a document squeezed out by a small window still shows the model
-# how it begins.
+# While the window has room for it, reference text is not cut below about this
+# many characters (the truncation notice included), so a document squeezed by a
+# small window still shows the model how it begins.
 _MIN_ATTACHMENT_CHARS = 256
 _ATTACHMENT_TRUNCATION_MARKER = "\n\n[Attachment text truncated to fit the model context.]"
+# What a document's text becomes when not even that beginning fits: it is
+# still listed by name and type, so the model knows it was attached.
+_ATTACHMENT_OMITTED_MARKER = "[Attachment text left out: it did not fit the model context.]"
 # What one document costs beside its text: the filename and type lines and the
 # fence around it.
 _DOCUMENT_FRAME_TOKENS = 64
@@ -793,16 +798,49 @@ class SynthesisAgent:
         the large documents divide what the small ones leave. Nobody is offered
         less than its floor. Without a split the first document took the whole
         budget and every later one arrived as nothing but a truncation notice.
+
+        The floors must fit ``budget`` together (see ``_affordable_floors``),
+        and no share takes what a later document's floor still needs, so the
+        shares never add up to more than ``budget``. Granting every floor
+        unconditionally let several documents overrun a budget that had
+        already run out.
         """
         shares: dict[int, int] = {}
         remaining = budget
+        owed = sum(floors.values())
         ordered = sorted(needs, key=lambda index: needs[index])
         for position, index in enumerate(ordered):
+            owed -= floors[index]
             fair = remaining // (len(ordered) - position)
-            share = min(needs[index], max(floors[index], fair))
+            share = min(needs[index], max(floors[index], fair), remaining - owed)
             shares[index] = share
-            remaining = max(0, remaining - share)
+            remaining -= share
         return shares
+
+    @staticmethod
+    def _affordable_floors(
+        needs: Mapping[int, int],
+        floors: Mapping[int, int],
+        minimums: Mapping[int, int],
+        budget: int,
+    ) -> dict[int, int]:
+        """The floors ``budget`` can pay for, given every document its minimum first.
+
+        When there is room for every document's opening text, that is what each
+        is guaranteed. When there is not, the smallest documents keep theirs
+        and the rest are guaranteed only their minimum: listed by name with
+        their text left out.
+        """
+        if sum(floors.values()) <= budget:
+            return dict(floors)
+        granted = dict(minimums)
+        spare = budget - sum(minimums.values())
+        for index in sorted(needs, key=lambda index: needs[index]):
+            extra = floors[index] - minimums[index]
+            if extra <= spare:
+                granted[index] = floors[index]
+                spare -= extra
+        return granted
 
     @classmethod
     def fit_attachments_to_context(
@@ -831,7 +869,11 @@ class SynthesisAgent:
         of the prompt and the answer reservation, so it grows with the context
         size instead of stopping at a fixed number of characters; the one
         ceiling is ``MAX_DOCUMENT_TEXT_CHARS``, the most a single attachment can
-        resolve to. Several documents divide that room between them.
+        resolve to. Several documents divide that room between them, and
+        together they never take more than it: a document with no room for its
+        opening text is listed with its text left out, and when even the
+        documents' names and frames do not fit, ``AttachmentsDoNotFit`` is
+        raised instead of building a prompt known to overflow.
         """
         documents = [index for index, item in enumerate(attachments) if item.text_content is not None]
         if not documents:
@@ -879,19 +921,37 @@ class SynthesisAgent:
                 _DOCUMENT_FRAME_TOKENS
                 + token_budget.with_safety_margin(math.ceil(_MIN_ATTACHMENT_CHARS / ratio)),
             )
-        shares = cls._share_attachment_budget(needs, min(available_tokens, ceiling_tokens), floors)
+        budget = min(available_tokens, ceiling_tokens)
+        omitted_tokens = _DOCUMENT_FRAME_TOKENS + token_budget.with_safety_margin(
+            math.ceil(len(_ATTACHMENT_OMITTED_MARKER) / ratio)
+        )
+        minimums = {index: min(needs[index], omitted_tokens) for index in documents}
+        if sum(minimums.values()) > budget:
+            raise AttachmentsDoNotFit(
+                attachments_too_large_message(int(num_ctx)),
+                operation="generation",
+                error_details="attachments_too_large",
+            )
+        shares = cls._share_attachment_budget(
+            needs, budget, cls._affordable_floors(needs, floors, minimums, budget)
+        )
         fitted = list(attachments)
         for index, share in shares.items():
             if share >= needs[index]:
                 continue
             attachment = attachments[index]
+            if share < floors[index]:
+                # Not even the opening text fits: list the document, say why
+                # its text is missing.
+                fitted[index] = replace(attachment, text_content=_ATTACHMENT_OMITTED_MARKER)
+                continue
             # Text this method already cut (the service fits attachments once
             # to size history around them, and the engine fits what it was
             # given again) carries the notice; cutting it again must leave one
             # notice at the end, not the stump of the old one in the middle.
             text = (attachment.text_content or "").removesuffix(_ATTACHMENT_TRUNCATION_MARKER)
             room = cls._chars_within(text, share - _DOCUMENT_FRAME_TOKENS, ratio)
-            keep = max(0, max(room, _MIN_ATTACHMENT_CHARS) - len(_ATTACHMENT_TRUNCATION_MARKER))
+            keep = max(0, room - len(_ATTACHMENT_TRUNCATION_MARKER))
             fitted[index] = replace(attachment, text_content=text[:keep] + _ATTACHMENT_TRUNCATION_MARKER)
         return tuple(fitted)
 
