@@ -1164,6 +1164,31 @@ describe("ChatPage composer integration", () => {
     expect(generate.mock.calls[1][0]).toMatchObject({ request_id: "lost-acceptance" });
   });
 
+  it("a send accepted after a remount never erases the newer draft (#697)", async () => {
+    let accept!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { accept = resolve; }));
+    const api = chatApi({ chat: vi.fn(async () => ({ ...emptyChat("thread-a"), revision: 1 })), generate } as Partial<CortexApi>);
+    const first = renderChat(api);
+    await userEvent.type(await screen.findByLabelText("Message Cortex"), "Message A{Enter}");
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    // Settings and back while the send is still waiting for its answer.
+    first.unmount();
+    renderChat(api);
+    const remounted = await screen.findByLabelText("Message Cortex");
+    expect(remounted).toHaveValue("Message A");
+    await userEvent.clear(remounted);
+    await userEvent.type(remounted, "Draft B");
+
+    await act(async () => {
+      accept({ job_id: "job-a", kind: "generation", status: "queued", thread_id: "thread-a", user_message_id: "user-a" });
+    });
+
+    await waitFor(() => expect(readPendingGenerationAdmission()).toBeNull());
+    expect(screen.getByLabelText("Message Cortex")).toHaveValue("Draft B");
+    expect(window.localStorage.getItem("cortex.composer.draft.thread-a")).toBe("Draft B");
+  });
+
   it("reuses the admission key when retrying after an ambiguous generation failure", async () => {
     const user = userEvent.setup();
     const generate = vi.fn()
@@ -2148,6 +2173,35 @@ describe("ChatPage attachments from paste and drop", () => {
 
     expect(await screen.findByRole("button", { name: "Remove first.md" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Remove second.md" })).toBeInTheDocument();
+  });
+
+  it("an upload that finishes after a remount joins the current attachments (#687)", async () => {
+    let releaseSecond!: (attachment: ChatAttachment) => void;
+    const stageChatAttachment = vi.fn()
+      .mockResolvedValueOnce(stagedAs("x.md"))
+      .mockImplementationOnce(() => new Promise<ChatAttachment>((done) => { releaseSecond = done; }))
+      .mockResolvedValueOnce(stagedAs("z.md"));
+    const api = chatApi({ stageChatAttachment });
+    const first = renderChat(api);
+    await screen.findByLabelText("Message Cortex");
+    fireEvent.drop(composerSurface(first.container), { dataTransfer: fileDrag([new File(["x"], "x.md", { type: "text/markdown" })]) });
+    expect(await screen.findByRole("button", { name: "Remove x.md" })).toBeInTheDocument();
+    fireEvent.drop(composerSurface(first.container), { dataTransfer: fileDrag([new File(["y"], "y.md", { type: "text/markdown" })]) });
+    await waitFor(() => expect(stageChatAttachment).toHaveBeenCalledTimes(2));
+
+    // Settings and back, while y.md is still uploading.
+    first.unmount();
+    const second = renderChat(api);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove x.md" }));
+    fireEvent.drop(composerSurface(second.container), { dataTransfer: fileDrag([new File(["z"], "z.md", { type: "text/markdown" })]) });
+    expect(await screen.findByRole("button", { name: "Remove z.md" })).toBeInTheDocument();
+
+    await act(async () => { releaseSecond(stagedAs("y.md")); });
+
+    expect(await screen.findByRole("button", { name: "Remove y.md" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove x.md" })).not.toBeInTheDocument();
+    const persisted = JSON.parse(window.sessionStorage.getItem("cortex.composer.attachments.thread-a") ?? "[]") as ChatAttachment[];
+    expect(persisted.map((attachment) => attachment.filename).sort()).toEqual(["y.md", "z.md"]);
   });
 
   it("keeps working after a queued batch fails", async () => {

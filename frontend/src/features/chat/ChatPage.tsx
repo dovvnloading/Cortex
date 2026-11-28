@@ -20,6 +20,7 @@ import { MessageList, type MessageListHandle } from "./MessageList";
 import { NewChatGuide } from "./NewChatGuide";
 import { PendingAssistantMessage } from "./PendingAssistantMessage";
 import { ResponseAnnouncer } from "./ResponseAnnouncer";
+import { useComposerStore } from "../../stores/useComposerStore";
 
 type Props = {
   api: CortexApi;
@@ -112,12 +113,11 @@ export function ChatPage({
   const [mountCompletionId] = useState(() => useChatStore.getState().lastCompletion?.id ?? 0);
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [resolvedThreadId, setResolvedThreadId] = useState<string | null>(threadId);
-  const [drafts, setDrafts] = useState<Record<string, string>>(() => ({
-    [composerDraftKey(threadId)]: readComposerDraft(threadId),
-  }));
-  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, ChatAttachment[]>>(() => ({
-    [composerAttachmentKey(threadId)]: readComposerAttachments(threadId),
-  }));
+  // Shared by every mount of this page: a send or an upload that finishes
+  // after a Settings round trip lands in the drafts the remounted page shows,
+  // never in a stale copy of its own (#697, #687).
+  const drafts = useComposerStore((state) => state.drafts);
+  const attachmentDrafts = useComposerStore((state) => state.attachments);
   const [restoredPending] = useState(readPendingGenerationAdmission);
   // Render-visible mirror; refs are reserved for asynchronous event handlers.
   const [pendingRecovery, setPendingRecovery] = useState<PendingGenerationAdmission | null>(restoredPending);
@@ -159,8 +159,6 @@ export function ChatPage({
   // `chat` from the render that created them.
   const chatRef = useRef<ChatResponse | null>(null);
   const chatRequestVersionsRef = useRef(new Map<string | null, number>());
-  const draftsRef = useRef(drafts);
-  const attachmentDraftsRef = useRef(attachmentDrafts);
   const attachmentDraftTargetsRef = useRef(new Set<AttachmentDraftTarget>());
   // Batches are staged one after another, so a second drop or paste while the
   // first is still uploading is queued rather than lost.
@@ -623,40 +621,37 @@ export function ChatPage({
         }
       }
     }
-    const currentDraft = draftsRef.current[submittedScope] ?? readComposerDraft(submittedThreadId);
+    const currentDraft = useComposerStore.getState().drafts[submittedScope] ?? readComposerDraft(submittedThreadId);
     const retainedDraft = currentDraft === submittedDraft ? "" : currentDraft;
     if (submittedScope === destinationDraftScope) {
-      const nextDrafts = { ...draftsRef.current, [submittedScope]: retainedDraft };
-      draftsRef.current = nextDrafts;
-      setDrafts(nextDrafts);
+      const nextDrafts = { ...useComposerStore.getState().drafts, [submittedScope]: retainedDraft };
+      useComposerStore.setState({ drafts: nextDrafts });
       writeComposerDraft(submittedThreadId, retainedDraft);
     } else {
       const nextDrafts = {
-        ...draftsRef.current,
+        ...useComposerStore.getState().drafts,
         [submittedScope]: "",
         [destinationDraftScope]: retainedDraft,
       };
-      draftsRef.current = nextDrafts;
-      setDrafts(nextDrafts);
+      useComposerStore.setState({ drafts: nextDrafts });
       writeComposerDraft(submittedThreadId, "");
       writeComposerDraft(destinationThreadId, retainedDraft);
     }
     if (submittedAttachments.length || submittedAttachmentScope !== destinationAttachmentScope) {
       const submittedAttachmentIds = new Set(submittedAttachments.map((attachment) => attachment.attachment_id));
-      const currentAttachments = attachmentDraftsRef.current[submittedAttachmentScope]
+      const currentAttachments = useComposerStore.getState().attachments[submittedAttachmentScope]
         ?? readComposerAttachments(submittedThreadId);
       const retainedAttachments = currentAttachments.filter(
         (attachment) => !submittedAttachmentIds.has(attachment.attachment_id),
       );
       const nextAttachments = submittedAttachmentScope === destinationAttachmentScope
-        ? { ...attachmentDraftsRef.current, [submittedAttachmentScope]: retainedAttachments }
+        ? { ...useComposerStore.getState().attachments, [submittedAttachmentScope]: retainedAttachments }
         : {
-            ...attachmentDraftsRef.current,
+            ...useComposerStore.getState().attachments,
             [submittedAttachmentScope]: [],
             [destinationAttachmentScope]: retainedAttachments,
           };
-      attachmentDraftsRef.current = nextAttachments;
-      setAttachmentDrafts(nextAttachments);
+      useComposerStore.setState({ attachments: nextAttachments });
       if (submittedAttachmentScope !== destinationAttachmentScope) {
         writeComposerAttachments(submittedThreadId, []);
       }
@@ -844,9 +839,8 @@ export function ChatPage({
   };
 
   const updateDraft = (nextDraft: string) => {
-    const nextDrafts = { ...draftsRef.current, [draftScope]: nextDraft };
-    draftsRef.current = nextDrafts;
-    setDrafts(nextDrafts);
+    const nextDrafts = { ...useComposerStore.getState().drafts, [draftScope]: nextDraft };
+    useComposerStore.setState({ drafts: nextDrafts });
     writeComposerDraft(threadId, nextDraft);
   };
 
@@ -864,23 +858,22 @@ export function ChatPage({
       // order. Merge into the latest scoped draft instead of the render-time
       // `attachments` snapshot, which may contain files that were submitted
       // and cleared while these new files were still uploading.
-      const currentAttachments = attachmentDraftsRef.current[target.scope]
+      const currentAttachments = useComposerStore.getState().attachments[target.scope]
         ?? readComposerAttachments(target.threadId);
       const currentAttachmentIds = new Set(currentAttachments.map((attachment) => attachment.attachment_id));
       const next = [
         ...currentAttachments,
         ...staged.filter((attachment) => !currentAttachmentIds.has(attachment.attachment_id)),
       ];
-      const nextAttachments = { ...attachmentDraftsRef.current, [target.scope]: next };
-      attachmentDraftsRef.current = nextAttachments;
-      setAttachmentDrafts(nextAttachments);
+      const nextAttachments = { ...useComposerStore.getState().attachments, [target.scope]: next };
+      useComposerStore.setState({ attachments: nextAttachments });
       writeComposerAttachments(target.threadId, next);
       if (Object.keys(previews).length) setAttachmentPreviews((current) => ({ ...current, ...previews }));
     };
     try {
       // Measured when this batch starts, not when it was queued: an earlier
       // batch may have added files, and a message may have been sent since.
-      const current = attachmentDraftsRef.current[target.scope] ?? readComposerAttachments(target.threadId);
+      const current = useComposerStore.getState().attachments[target.scope] ?? readComposerAttachments(target.threadId);
       const remaining = Math.max(0, MAX_CHAT_ATTACHMENTS - current.length);
       if (!remaining) throw new Error(`A message can include at most ${MAX_CHAT_ATTACHMENTS} attachments.`);
       let totalBytes = current.reduce((total, attachment) => total + attachment.size, 0);
@@ -964,9 +957,8 @@ export function ChatPage({
 
   const removeAttachment = (attachmentId: string) => {
     const next = attachments.filter((attachment) => attachment.attachment_id !== attachmentId);
-    const nextAttachments = { ...attachmentDraftsRef.current, [attachmentScope]: next };
-    attachmentDraftsRef.current = nextAttachments;
-    setAttachmentDrafts(nextAttachments);
+    const nextAttachments = { ...useComposerStore.getState().attachments, [attachmentScope]: next };
+    useComposerStore.setState({ attachments: nextAttachments });
     writeComposerAttachments(threadId, next);
     setAttachmentError(null);
   };
