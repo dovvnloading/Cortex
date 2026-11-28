@@ -481,4 +481,19 @@ describe("MemoryPanel unsaved changes", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(onReplace).toHaveBeenCalledExactlyOnceWith(["Second", "Third"]);
   });
+
+  it("cannot be edited while a save is out, so no later edit is lost (#701)", () => {
+    const props = {
+      memos: ["A"],
+      onAdd: vi.fn<(memo: string) => Promise<void>>().mockResolvedValue(),
+      onReplace: vi.fn<(memos: string[]) => Promise<void>>().mockResolvedValue(),
+      onClear: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    };
+    const view = render(<MemoryPanel {...props} busy={false} />);
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).not.toHaveAttribute("readonly");
+
+    view.rerender(<MemoryPanel {...props} busy />);
+
+    expect(screen.getByRole("textbox", { name: "Memory 1" })).toHaveAttribute("readonly");
+  });
 });

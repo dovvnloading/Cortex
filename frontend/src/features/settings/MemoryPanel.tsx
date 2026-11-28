@@ -181,7 +181,9 @@ export function MemoryPanel({ memos, load = READY, onRetry, busy, onAdd, onRepla
                 aria-label={item.removed ? `Memory ${index + 1} (removed)` : `Memory ${index + 1}`}
                 value={item.value}
                 maxLength={500}
-                readOnly={item.removed}
+                // Read-only while a save is out: the server's answer replaces
+                // the draft, so text typed meanwhile was silently lost (#701).
+                readOnly={item.removed || busy}
                 onChange={(event) => setDraft((current) => current.map((row) => row.id === item.id ? { ...row, value: event.target.value } : row))}
               />
               {item.removed ? (
