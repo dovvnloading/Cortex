@@ -51,6 +51,7 @@ import { RouteBoundary } from "./ErrorBoundary";
 import { lazyRoute } from "./lazyRoute";
 import { useToast } from "./ToastProvider";
 import { llamacppPollInterval, resolveRuntimeAvailability } from "./runtimeAvailability";
+import { mergeExecutionTasks } from "../lib/executionTasks";
 
 type Props = { api?: CortexApi };
 
@@ -496,7 +497,9 @@ function AuthenticatedWorkspace({ api, onSessionExpired }: { api: CortexApi; onS
       const signature = JSON.stringify(response.tasks);
       if (signature === executionTasksSignatureRef.current) return;
       executionTasksSignatureRef.current = signature;
-      setExecutionTasks(response.tasks);
+      // A decision confirmed after this request went out is newer than its
+      // answer for that task (#722).
+      setExecutionTasks((current) => mergeExecutionTasks(response.tasks, current));
     });
     executionTaskRefreshRef.current = refresh;
     void refresh.then(
