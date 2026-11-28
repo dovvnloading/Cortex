@@ -550,3 +550,30 @@ def test_a_restart_removes_work_copies_the_earlier_process_left(tmp_path: Path) 
     assert linked.path.name not in listed, "the linked worktree's metadata was left in the project"
     assert (repo / "app.py").read_bytes() == b"print('tracked')\n"
     assert (plain / "src" / "app.py").is_file()
+
+
+def test_one_change_too_large_to_review_leaves_the_others_reviewable(tmp_path: Path) -> None:
+    """#583: a 61,000-character diff failed the whole changeset, so no change
+    in the run could be reviewed or accepted."""
+    root = _project(tmp_path)
+    work = _copy(tmp_path, root)
+    try:
+        lines = "".join(f"value_{index} = {index}\n" for index in range(4000))
+        (work.path / "generated.py").write_bytes(lines.encode("utf-8"))
+        (work.path / "src" / "app.py").write_bytes(b"print('small change')\r\n")
+
+        changes = work.changeset()
+
+        assert set(changes) == {"generated.py", "src/app.py"}
+        assert not changes["generated.py"].reviewable
+        assert "review limit" in changes["generated.py"].diff
+        assert len(changes["generated.py"].diff) < 1000
+        assert changes["src/app.py"].reviewable
+        with pytest.raises(WorkCopyError) as refused:
+            work.accept(["generated.py", "src/app.py"], confirmed=True)
+        assert refused.value.code == "diff_too_large"
+        assert not (root / "generated.py").exists(), "nothing of a refused batch is written"
+        assert work.accept(["src/app.py"], confirmed=True) == ("src/app.py",)
+        assert (root / "src" / "app.py").read_bytes() == b"print('small change')\r\n"
+    finally:
+        work.discard()

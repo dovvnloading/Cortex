@@ -63,6 +63,9 @@ class WorkCopyChange:
     baseline_sha256: str | None
     new_sha256: str | None
     diff: str
+    # False when the diff is over the review limit: it is shown as a notice
+    # and the change cannot be accepted, since nobody could see it.
+    reviewable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,13 +720,23 @@ class WorkCopy:
                 else line + "\n\\ No newline at end of file\n"
                 for line in diff
             )
-            if len(rendered) > MAX_DIFF_CHARS:
-                raise WorkCopyError("diff_too_large")
+            reviewable = len(rendered) <= MAX_DIFF_CHARS
+            if not reviewable:
+                # One oversized change used to fail the whole changeset, so
+                # none of the others could be reviewed or accepted either.
+                rendered = (
+                    f"--- {'a/' + relative if initial else '/dev/null'}\n"
+                    f"+++ {'b/' + relative if latest else '/dev/null'}\n"
+                    f"[Cortex: this diff is {len(rendered):,} characters, over the "
+                    f"{MAX_DIFF_CHARS:,}-character review limit, so it is not shown and "
+                    "cannot be accepted. Ask for it in smaller steps.]\n"
+                )
             changes[relative] = WorkCopyChange(
                 kind="add" if initial is None else "delete" if latest is None else "modify",
                 baseline_sha256=_digest(before) if initial else None,
                 new_sha256=_digest(after) if latest else None,
                 diff=rendered,
+                reviewable=reviewable,
             )
         return changes, current
 
@@ -798,6 +811,8 @@ class WorkCopy:
             selected = tuple(sorted({_valid_path(path) for path in paths}))
             if not selected or len(selected) > 32 or not all(p in changes for p in selected):
                 raise WorkCopyError("invalid_selection")
+            if not all(changes[p].reviewable for p in selected):
+                raise WorkCopyError("diff_too_large")
             baselines: dict[str, _File | None] = {}
             proposed: dict[str, tuple[bytes, bytes, int]] = {}
             # Preflight ALL selected paths before writing anything to the journal or project.
