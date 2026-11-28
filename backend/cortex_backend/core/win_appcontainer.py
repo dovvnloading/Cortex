@@ -253,13 +253,27 @@ class NativeProcess:
         self._kernel.CloseHandle(self._info.process)
 
 
+_REQUIRED_ENVIRONMENT = frozenset(
+    {"path", "pythonutf8", "systemroot", "systemdrive", "temp", "tmp", "localappdata"}
+)
+# The Agent sandbox gives Git an isolated home and no system or global
+# configuration (agent/sandbox/appcontainer.py, _git_environment). These
+# names, and no others, may be added to the required set.
+GIT_ISOLATION_ENVIRONMENT = frozenset({
+    "home", "xdg_config_home", "git_config_global", "git_config_system",
+    "git_config_nosystem", "git_attr_nosystem", "git_terminal_prompt",
+    "git_no_lazy_fetch", "git_no_replace_objects", "git_lfs_skip_smudge",
+})
+
+
 def _unicode_environment_block(environment: dict[str, str]) -> Any:
     """Create the validated, case-insensitively sorted Win32 Unicode environment.
 
-    Only the fixed launcher allowlist is accepted. Each entry is NAME=value
+    Only the fixed launcher allowlist is accepted: every required variable,
+    plus optionally the Git isolation variables. Each entry is NAME=value
     followed by NUL; the block ends in an additional NUL.
     """
-    allowed = {"path", "pythonutf8", "systemroot", "systemdrive", "temp", "tmp", "localappdata"}
+    allowed = _REQUIRED_ENVIRONMENT | GIT_ISOLATION_ENVIRONMENT
     seen: set[str] = set()
     for name, value in environment.items():
         if (not isinstance(name, str) or not name or "=" in name or "\0" in name
@@ -269,7 +283,7 @@ def _unicode_environment_block(environment: dict[str, str]) -> Any:
         if folded not in allowed or folded in seen:
             raise AppContainerError("unexpected or duplicated AppContainer environment variable")
         seen.add(folded)
-    if seen != allowed:
+    if not _REQUIRED_ENVIRONMENT <= seen:
         raise AppContainerError("AppContainer environment is missing required variables")
     entries = sorted(environment.items(), key=lambda item: item[0].casefold())
     block = "\0".join(f"{name}={value}" for name, value in entries) + "\0\0"
