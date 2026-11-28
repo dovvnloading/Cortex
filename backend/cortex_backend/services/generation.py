@@ -10,6 +10,7 @@ import time
 from typing import Any, Protocol
 
 from cortex_backend.core.generation import (
+    AttachmentsDoNotFit,
     CodeExecutionProposal,
     CodeProposalRejection,
     FixedPromptPlan,
@@ -349,9 +350,53 @@ class GenerationService:
         sent.
         """
         num_ctx = int(snapshot.model_options.get("num_ctx", DEFAULT_NUM_CTX))
-        plan = self._plan_fixed_prompt(self._engine_factory(snapshot), snapshot, num_ctx)
+        engine = self._engine_factory(snapshot)
+        plan = self._plan_fixed_prompt(engine, snapshot, num_ctx)
         if not plan.fits:
             raise ChatDomainError(prompt_too_long_message(num_ctx), code="invalid_input")
+        if not any(item.text_content is not None for item in snapshot.attachments):
+            return
+        # Documents shrink to fit, but each still costs its name and frame
+        # with no text at all. When the window cannot hold even that, the turn
+        # is refused here, sized exactly as generate() will size it.
+        settled = replace(
+            snapshot,
+            memories_enabled=plan.memories_enabled,
+            code_execution_eligible=plan.code_execution_eligible,
+        )
+        try:
+            engine.fit_attachments_to_context(
+                settled.attachments,
+                query=settled.user_input,
+                chat_history="No history available.",
+                permanent_memories=self._turn_memories(engine, settled, num_ctx),
+                memories_enabled=settled.memories_enabled,
+                user_system_instructions=settled.user_system_instructions,
+                num_ctx=num_ctx,
+                code_execution_eligible=settled.code_execution_eligible,
+                bypass_system_prompt=settled.bypass_system_prompt,
+                host_observations=settled.host_observations,
+                model=settled.model,
+            )
+        except AttachmentsDoNotFit as exc:
+            raise ChatDomainError(exc.user_message, code="invalid_input") from None
+
+    def _turn_memories(
+        self, engine: GenerationEngine, snapshot: GenerationSnapshot, num_ctx: int
+    ) -> list[str]:
+        """The stored memories this turn's prompt carries, fitted to the window."""
+        if not snapshot.memories_enabled:
+            return []
+        return engine.fit_memories_to_context(
+            list(self._memory_loader()),
+            query=snapshot.user_input,
+            user_system_instructions=snapshot.user_system_instructions,
+            num_ctx=num_ctx,
+            code_execution_eligible=snapshot.code_execution_eligible,
+            bypass_system_prompt=snapshot.bypass_system_prompt,
+            host_observations=snapshot.host_observations,
+            model=snapshot.model,
+        )
 
     def generate(
         self,
@@ -412,20 +457,7 @@ class GenerationService:
                     "dropped_code_contract": plan.dropped_code_contract,
                 },
             )
-        permanent_memories = (
-            list(self._memory_loader()) if snapshot.memories_enabled else []
-        )
-        if snapshot.memories_enabled:
-            permanent_memories = engine.fit_memories_to_context(
-                permanent_memories,
-                query=snapshot.user_input,
-                user_system_instructions=snapshot.user_system_instructions,
-                num_ctx=num_ctx,
-                code_execution_eligible=snapshot.code_execution_eligible,
-                bypass_system_prompt=snapshot.bypass_system_prompt,
-                host_observations=snapshot.host_observations,
-                model=snapshot.model,
-            )
+        permanent_memories = self._turn_memories(engine, snapshot, num_ctx)
 
         # Lets an engine backed by a locally-managed llama.cpp runtime report
         # its own startup progress -- binary download, model load -- while

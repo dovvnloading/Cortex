@@ -1212,11 +1212,17 @@ def _code_execution_observations(
         return None
     coordinator = getattr(request.app.state, "execution_coordinator", None)
     repository = getattr(coordinator, "repository", None)
-    if repository is None or not callable(getattr(repository, "list_jobs", None)):
+    if repository is None or not callable(getattr(repository, "finished_code_runs", None)):
         return None
     try:
-        jobs = repository.list_jobs(
-            owner=_durable_owner(principal), include_terminal=True, limit=25
+        # Eligible runs are chosen in the query, then limited: taking a page of
+        # every job first let unrelated chats' jobs and pending approvals push
+        # this chat's finished runs out of it.
+        jobs = repository.finished_code_runs(
+            owner=_durable_owner(principal),
+            thread_id=thread_id,
+            profile=CODE_EXECUTION_PROFILE,
+            limit=MAX_REPORTED_CODE_RUNS,
         )
     except Exception as exc:  # optional context must never fail a turn
         logging.getLogger("cortex.execution").warning(

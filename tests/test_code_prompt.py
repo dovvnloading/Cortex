@@ -327,6 +327,7 @@ def test_real_local_tasks_still_receive_the_contract(query: str) -> None:
         "Can you run the Python code and explain each step?",
         "Explain which tests failed, run the tests.",
         "Explain how to download the file; then download the CSV.",
+        "Explain how to run a Python script, then run the tests.",
     ),
 )
 def test_mixed_explanation_and_explicit_execution_is_admitted(query: str) -> None:
@@ -356,6 +357,11 @@ def test_mixed_explanation_and_explicit_execution_is_admitted(query: str) -> Non
         "How can I download the CSV and parse it?",
         "Explain how to download the CSV and parse the JSON.",
         "Describe how to run the tests and inspect the logs.",
+        # The next step is not a run: what the explanation mentions does not
+        # count as a request (#626).
+        "Explain how to run a Python script, then write a haiku.",
+        "Describe how to execute a script, then write a short summary of the risks.",
+        "Explain what the run command does; then create a checklist for my team.",
     ),
 )
 def test_explanations_and_explicit_prohibitions_do_not_admit_execution(query: str) -> None:
