@@ -1502,7 +1502,9 @@ class LlamaServerManager:
             )
             failure_code = self._failure_code
             message = crash_loop_message(len(self._failure_times), reason, failure_code)
-            process = self._process
+            # A startup child that would not exit is a process too; tearing
+            # down only the published one and then resetting both lost it.
+            process = self._process or self._starting_process
             self._state = "stopping"
         # Terminate outside the state lock, same as _terminate_and_reset: the
         # grace wait can take seconds, and status -- polled every couple of
@@ -1799,6 +1801,15 @@ class LlamaServerManager:
         # first made every launch with a cached runtime flash "Downloading
         # runtime..." in the UI for as long as verification took.
         with self._state_lock:
+            if self._starting_process is not None:
+                # An earlier start's child was never confirmed gone (it would
+                # not terminate). Launching another beside it -- Auto falling
+                # back from the GPU build to the CPU one, say -- would lose
+                # the only reference to the first and run two models at once.
+                # Keep it, keep "stopping", and refuse.
+                raise LlamaCppError(
+                    "The local model runtime did not exit cleanly; restart Cortex before trying again."
+                )
             self._state = "starting"
         if self._release is None:
             raise LlamaCppError("No pinned runtime release is selected.")

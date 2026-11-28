@@ -354,6 +354,36 @@ def test_a_model_file_replaced_on_disk_is_loaded_again(tmp_path: Path) -> None:
     assert manager.status.last_restart_reason == "the model file changed on disk"
 
 
+def test_auto_does_not_start_a_second_server_while_the_first_will_not_exit(tmp_path: Path) -> None:
+    """A failed GPU start whose child would not exit was abandoned for the CPU build (#638)."""
+
+    class _ProbeFailsOnce:
+        # The GPU attempt's readiness probe blows up; later probes are healthy.
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, url: str, timeout=None, headers=None):
+            del url, timeout, headers
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("probe callback failed")
+            return _FakeResponse(200, {"status": "ok", "model_path": "/fake/model.gguf", "build_info": "fake"})
+
+    stubborn = _UnstoppablePopen()
+    launcher = _QueueLauncher([stubborn, _FakePopen()])
+    fetcher = _FakeFetcher()
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=launcher, http_client=_ProbeFailsOnce(), gpu_backend="auto"
+    )
+
+    with pytest.raises(LlamaCppError, match="did not exit cleanly"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert len(launcher.launch_args) == 1, "a second server was started beside the first"
+    assert manager._starting_process is stubborn  # still owned, so it can still be stopped
+    assert manager.status.state == "stopping"
+
+
 def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
     """An explicit CPU/Vulkan preference change must not reuse the old process."""
     first, second, third = _FakePopen(), _FakePopen(), _FakePopen()
