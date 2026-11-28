@@ -113,10 +113,17 @@ def _message_select_list(fields: Sequence[str]) -> str:
 # Every possible projection is compiled from literal schema columns at import.
 # A request only selects an existing statement by its validated field set;
 # no caller-supplied text can become part of a SQL statement.
+#
+# A conversation is in the order its turns were written, which is the order of
+# their row ids: every path that writes messages (a new turn, a fork, a legacy
+# import) inserts them in transcript order, and a regenerated reply is updated
+# in place. The timestamp is only what the turn displays. Ordering by it put a
+# reply before its own question when the clock stepped back (an NTP
+# correction, a manual change), and moved a regenerated reply to the end.
 _MESSAGE_SELECT_QUERIES: dict[frozenset[str], str] = {
     frozenset(names): (
         "SELECT " + _message_select_list(names)
-        + " FROM messages WHERE thread_id = ? ORDER BY timestamp ASC, id ASC"
+        + " FROM messages WHERE thread_id = ? ORDER BY id ASC"
     )
     for count in range(1, len(_MESSAGE_FIELD_COLUMNS) + 1)
     for names in combinations(_MESSAGE_FIELD_COLUMNS, count)
@@ -1344,7 +1351,7 @@ class DatabaseManager:
             return False
         stored = conn.execute(
             "SELECT role, content, sources, thoughts, attachments "
-            "FROM messages WHERE thread_id = ? ORDER BY timestamp, id",
+            "FROM messages WHERE thread_id = ? ORDER BY id",
             (chat_data["id"],),
         )
         for message in chat_data["messages"]:
@@ -1828,7 +1835,7 @@ class DatabaseManager:
                     WHERE id = (
                         SELECT id FROM messages 
                         WHERE thread_id = ? AND role = 'assistant' 
-                        ORDER BY timestamp DESC, id DESC
+                        ORDER BY id DESC
                         LIMIT 1
                     )
                 """, (thread_id,))
