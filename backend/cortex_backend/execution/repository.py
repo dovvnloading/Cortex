@@ -905,6 +905,38 @@ class ExecutionRepository:
             ).fetchall()
         return [self._job_from_row(row) for row in rows]
 
+    def finished_code_runs(
+        self, *, owner: str, thread_id: str, profile: str, limit: int
+    ) -> list[ExecutionJob]:
+        """The newest approved, finished runs of one profile in one chat.
+
+        Selected in the query, then limited. The task-tray listing is
+        installation-wide and puts pending approvals first, so a chat's
+        finished runs fell outside its first page once enough unrelated jobs
+        existed.
+        """
+        if not owner or not thread_id:
+            raise ValueError("owner and thread_id must be non-empty")
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT j.*, a.state AS approval_state
+                FROM execution_jobs j
+                JOIN execution_approvals a ON a.job_id = j.job_id
+                WHERE j.owner = ?
+                  AND j.profile = ?
+                  AND j.status IN ('succeeded', 'failed', 'cancelled')
+                  AND a.state = 'approved'
+                  AND json_extract(j.payload_json, '$.thread_id') = ?
+                ORDER BY j.updated_at DESC, j.job_id DESC
+                LIMIT ?
+                """,
+                (owner, profile, thread_id, limit),
+            ).fetchall()
+        return [self._job_from_row(row) for row in rows]
+
     def list_job_listings(
         self,
         *,
