@@ -57,7 +57,9 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
   const [goal, setGoal] = useState("");
   const [root, setRoot] = useState("");
   const [folderConsent, setFolderConsent] = useState(false);
-  const [cloudConsent, setCloudConsent] = useState(false);
+  // The model the cloud warning was accepted for. Consent covers that one
+  // model only: a catalog refresh that changes the model asks again (#679).
+  const [cloudConsentFor, setCloudConsentFor] = useState<string | null>(null);
   const [modelChoice, setModelChoice] = useState("");
   const [mode, setMode] = useState<StartAgentRun["mode"]>("plan_only");
   const [pickerError, setPickerError] = useState<string | null>(null);
@@ -69,6 +71,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
   const model = availableModels.includes(modelChoice) ? modelChoice
     : (selectedModel && availableModels.includes(selectedModel) ? selectedModel : availableModels[0] ?? "");
   const provider = cloudModelProvider(model);
+  const cloudConsent = Boolean(provider) && cloudConsentFor === model;
   const active = Boolean(agent.run && !TERMINAL.has(agent.run.status));
   const stopReason = stopReasonText(agent.run?.stop_reason);
   const canStart = Boolean(enabled && goal.trim() && root.trim() && model && folderConsent
@@ -90,7 +93,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
       if (selected) {
         setRoot(selected);
         setFolderConsent(false);
-        setCloudConsent(false);
+        setCloudConsentFor(null);
       }
     } catch {
       setPickerError("The native folder picker is unavailable. Enter an absolute project path instead.");
@@ -113,7 +116,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
     });
     if (started) {
       setFolderConsent(false);
-      setCloudConsent(false);
+      setCloudConsentFor(null);
     }
   };
 
@@ -164,7 +167,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
         <div className="coding-row">
           <input id="agent-folder" type="text" placeholder="C:\src\my-project"
             autoComplete="off" maxLength={4096} value={root} disabled={active || Boolean(agent.busy)}
-            onChange={(event) => { setRoot(event.target.value); setFolderConsent(false); setCloudConsent(false); }} />
+            onChange={(event) => { setRoot(event.target.value); setFolderConsent(false); setCloudConsentFor(null); }} />
           <button type="button" className="coding-quiet" disabled={active || Boolean(agent.busy)}
             onClick={() => void chooseFolder()}><FolderOpen size={16} aria-hidden="true" /> Browse</button>
         </div>
@@ -177,7 +180,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
 
         <label htmlFor="agent-model">Model</label>
         <select id="agent-model" value={model} disabled={active || Boolean(agent.busy)}
-          onChange={(event) => { setModelChoice(event.target.value); setCloudConsent(false); }}>
+          onChange={(event) => { setModelChoice(event.target.value); setCloudConsentFor(null); }}>
           {availableModels.length === 0 && <option value="">No models available — configure a model in Settings</option>}
           {availableModels.map((name) => (
             <option key={name} value={name}>{displayModelName(name)}{cloudModelProvider(name) ? " (cloud)" : " (local)"}</option>
@@ -189,7 +192,7 @@ export function AgentPage({ api, enabled, localModels, cloudModels, selectedMode
             <p><strong>Cloud model warning:</strong> Your files will be sent to {provider}. The goal and eligible project context may leave your computer and be processed by this provider.</p>
             <label className="coding-consent">
               <input type="checkbox" checked={cloudConsent} disabled={active || Boolean(agent.busy)}
-                onChange={(event) => setCloudConsent(event.target.checked)} />
+                onChange={(event) => setCloudConsentFor(event.target.checked ? model : null)} />
               I understand and explicitly approve sending project context to {provider} for this run.
             </label>
           </div>

@@ -119,6 +119,27 @@ describe("AgentPage", () => {
     })));
   });
 
+  it("asks for cloud consent again when a catalog change picks another provider (#679)", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    const props = {
+      api: api as unknown as CortexApi, enabled: true, localModels: [] as string[],
+      selectedModel: "cloud:openai:gpt-4o",
+    };
+    const view = render(<AgentPage {...props} cloudModels={["cloud:openai:gpt-4o", "cloud:anthropic:claude-model"]} />);
+    await prepare(user);
+    await user.click(screen.getByRole("checkbox", { name: /explicitly approve sending project context to openai/i }));
+    expect(screen.getByRole("button", { name: "Start Agent" })).toBeEnabled();
+
+    view.rerender(<AgentPage {...props} cloudModels={["cloud:anthropic:claude-model"]} />);
+
+    expect(screen.getByRole("checkbox", { name: /explicitly approve sending project context to anthropic/i })).not.toBeChecked();
+    const start = screen.getByRole("button", { name: "Start Agent" });
+    expect(start).toBeDisabled();
+    await user.click(start);
+    expect(api.startAgentRun).not.toHaveBeenCalled();
+  });
+
   it("uses the existing ApprovalCard and posts only a one-time human decision before resuming", async () => {
     const user = userEvent.setup();
     const api = fakeClient();
