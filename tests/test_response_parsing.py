@@ -344,6 +344,48 @@ def test_backticks_on_an_earlier_line_do_not_hide_a_real_block() -> None:
     assert answer == "That was a stray ` character.\nNoted."
 
 
+def test_an_inline_example_wrapped_across_lines_is_prose_and_a_later_command_is_live() -> None:
+    """#603: a code span may continue over a line break, as the answer renders it.
+
+    The scanner paired backticks one line at a time, so this example became a
+    live proposal for "Example only" and vanished from the answer.
+    """
+    example = (
+        'Example: `<memory_command>' + chr(10) + '{"add":["Example only"],"clear":false}</memory_command>` '
+        "is literal code, not a request."
+    )
+
+    _agent, answer, _thoughts, command = _parse(example + chr(10) + chr(10) + "Noted. " + _TEA_COMMAND)
+
+    assert command == MemoryCommand(("User likes tea",), False)
+    assert answer == example + chr(10) + chr(10) + "Noted."
+
+
+def test_a_wrapped_inline_code_request_example_is_not_a_request() -> None:
+    example = "Like this: `<code_execution_request>" + chr(10) + '{"language":"python"}</code_execution_request>`.'
+
+    agent, answer, _thoughts, _command = _parse(example, code_eligible=True)
+
+    assert answer == example
+    assert agent.last_code_rejection is None and agent.last_code_proposal is None
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        chr(10) + chr(10),  # a blank line ends the paragraph
+        chr(10) + "- ",  # so does a new list item
+        chr(10) + "# ",  # and a heading
+    ],
+)
+def test_a_stray_backtick_never_reaches_past_its_paragraph(between: str) -> None:
+    reply = f"A stray ` here.{between}Noted. {_TEA_COMMAND} and `code` later."
+
+    _agent, _answer, _thoughts, command = _parse(reply)
+
+    assert command == MemoryCommand(("User likes tea",), False)
+
+
 def test_a_command_after_a_closed_code_fence_is_still_applied() -> None:
     reply = f"```python\nprint('hi')\n```\nSaved. {_TEA_COMMAND}"
 
@@ -439,6 +481,9 @@ _PATHOLOGICAL_REPLIES = {
     "one huge backtick run": lambda: "`" * 400_000 + "<memory_command>",
     "many tiny code spans": lambda: "` " * 200_000 + "<memory_command>{",
     "many opening tags": lambda: "<memory_command>" * 20_000,
+    # One paragraph of backtick runs that each have a different length: the
+    # old pairing searched ahead from every run.
+    "unmatched runs of every length": lambda: " ".join("`" * n for n in range(1, 900)) + " <memory_command>",
 }
 
 
