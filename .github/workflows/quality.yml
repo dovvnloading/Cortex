@@ -84,7 +84,9 @@ jobs:
           code=true
           browser=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            changed=$(git diff --name-only HEAD^1 HEAD)
+            # --no-renames lists both sides of a rename, so moving code into
+            # docs/ still counts as a code change (the deleted source path).
+            changed=$(git diff --no-renames --name-only HEAD^1 HEAD)
             echo "Changed files:"
             echo "$changed"
             if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '^(README\.md|SECURITY\.md|LICENSE|docs/.*)$'; then
@@ -213,11 +215,16 @@ jobs:
       - name: Run test shard with branch coverage
         run: python tools/ci_backend_shards.py run --shard-index ${{ matrix.shard }} --shard-count 4
 
+      # overwrite: a re-run of a failed shard uploads under the same name in
+      # the same workflow run, and the upload action refuses an existing name
+      # by default -- which would fail the retried shard after its tests pass.
+      # Each name has exactly one producer per attempt.
       - name: Upload shard coverage and test inventory
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: backend-shard-${{ matrix.shard }}
+          overwrite: true
           path: |
             .coverage.*
             backend-shard-${{ matrix.shard }}.txt
@@ -282,6 +289,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: backend-coverage
+          overwrite: true
           path: coverage.xml
           if-no-files-found: ignore
           retention-days: 14
@@ -338,6 +346,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: frontend-coverage
+          overwrite: true
           path: frontend/coverage/lcov.info
           if-no-files-found: ignore
           retention-days: 14
