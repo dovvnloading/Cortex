@@ -23,7 +23,7 @@ import ssl
 import struct
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
@@ -32,6 +32,8 @@ from uuid import uuid4
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+
+from .stoppable_http import StoppedBeforeResponse, open_unless_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -1196,8 +1198,11 @@ class _GGUFTransfer:
             delay = _RETRY_BASE_DELAY_SECONDS * 2 ** max(stalled - 1, 0)
             self._wait(min(_RETRY_MAX_DELAY_SECONDS, max(delay, retry_after)))
 
+    def _stop_requested(self) -> bool:
+        return self._cancellation_event is not None and self._cancellation_event.is_set()
+
     def _raise_if_cancelled(self) -> None:
-        if self._cancellation_event is not None and self._cancellation_event.is_set():
+        if self._stop_requested():
             raise GGUFDownloadError("Download cancelled.")
 
     def _wait(self, seconds: float) -> None:
@@ -1243,24 +1248,40 @@ class _GGUFTransfer:
         """Follow redirects by hand, validating every hop, and yield the final response."""
         current_url = _validate_download_url(self._url)
         for redirect_count in range(_MAX_DOWNLOAD_REDIRECTS + 1):
-            with self._client.stream(
-                "GET",
-                current_url,
-                headers=_request_headers(current_url, resume),
-                follow_redirects=False,
-                timeout=_DOWNLOAD_TIMEOUT,
-            ) as response:
-                if response.is_redirect:
-                    if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
-                        raise GGUFDownloadError("The download exceeded the redirect limit.")
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise GGUFDownloadError("The download redirect did not include a target URL.")
-                    current_url = _validate_download_url(urljoin(current_url, location))
-                    continue
-                _validate_download_url(str(response.url))
-                yield response
-                return
+            # Each hop is checked for Stop, and waiting for a hop's headers is
+            # done so that Stop ends it too: entering the stream blocks until
+            # the headers arrive, which a stalled server or CDN can delay for
+            # the whole read timeout.
+            self._raise_if_cancelled()
+
+            def open_hop(url: str = current_url) -> AbstractContextManager[httpx.Response]:
+                return self._client.stream(
+                    "GET",
+                    url,
+                    headers=_request_headers(url, resume),
+                    follow_redirects=False,
+                    timeout=_DOWNLOAD_TIMEOUT,
+                )
+
+            try:
+                with open_unless_stopped(
+                    open_hop,
+                    self._stop_requested if self._cancellation_event is not None else None,
+                    name="cortex-gguf-open",
+                ) as response:
+                    if response.is_redirect:
+                        if redirect_count >= _MAX_DOWNLOAD_REDIRECTS:
+                            raise GGUFDownloadError("The download exceeded the redirect limit.")
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise GGUFDownloadError("The download redirect did not include a target URL.")
+                        current_url = _validate_download_url(urljoin(current_url, location))
+                        continue
+                    _validate_download_url(str(response.url))
+                    yield response
+                    return
+            except StoppedBeforeResponse:
+                raise GGUFDownloadError("Download cancelled.") from None
         raise GGUFDownloadError("The download exceeded the redirect limit.")  # pragma: no cover
 
     def _request(self, resume: _ResumePoint | None) -> bool:

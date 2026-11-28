@@ -22,6 +22,12 @@ import httpx
 
 from .binary_release import AssetSpec, GpuBackend, PinnedRelease
 from .errors import BinaryVerificationError
+from .stoppable_http import (
+    StoppedBeforeResponse,
+    StoppedWhileReading,
+    iter_body_unless_stopped,
+    open_unless_stopped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +414,16 @@ class BinaryFetcher:
                 if cancellation_event is not None
                 else _DOWNLOAD_TIMEOUT
             )
-            with client.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
+            stop = (
+                (lambda: cancellation_event.is_set())
+                if cancellation_event is not None
+                else None
+            )
+            with open_unless_stopped(
+                lambda: client.stream("GET", url, follow_redirects=True, timeout=timeout),
+                stop,
+                name="cortex-runtime-open",
+            ) as response:
                 response.raise_for_status()
                 # Reject an oversized transfer -- and check free space against
                 # the full advertised size -- before a single byte is written,
@@ -428,8 +443,16 @@ class BinaryFetcher:
                 # cleanup is deferred to there for every failure raised
                 # inside this loop -- same treatment as the pre-existing
                 # cancellation check right below.
+                # Pieces as they arrive, with Stop polled between them: a slow
+                # trickle that never fills a large chunk used to keep the loop
+                # below from ever reaching its cancellation check.
+                body = (
+                    iter_body_unless_stopped(response, stop, name="cortex-runtime-body")
+                    if stop is not None
+                    else response.iter_bytes(_DOWNLOAD_CHUNK_BYTES)
+                )
                 with destination.open("wb") as handle:
-                    for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                    for chunk in body:
                         if cancellation_event is not None and cancellation_event.is_set():
                             raise BinaryVerificationError("Local model runtime startup was cancelled.")
                         # Backstop for a missing or untruthful Content-Length:
@@ -443,6 +466,9 @@ class BinaryFetcher:
                         handle.write(chunk)
                         digest.update(chunk)
                         completed += len(chunk)
+        except (StoppedBeforeResponse, StoppedWhileReading):
+            destination.unlink(missing_ok=True)
+            raise BinaryVerificationError("Local model runtime startup was cancelled.") from None
         except httpx.HTTPError as exc:
             destination.unlink(missing_ok=True)
             # A socket that goes silent after the user asked to stop reaches
