@@ -504,7 +504,9 @@ jobs:
           $process = $null
           $ready = $false
           try {
-            $process = Start-Process -FilePath $executable -ArgumentList @("--headless", "--data-dir", $data) -PassThru
+            . ./scripts/process_arguments.ps1
+            $smokeArguments = @("--headless", "--data-dir", $data) | ForEach-Object { ConvertTo-ProcessArgument $_ }
+            $process = Start-Process -FilePath $executable -ArgumentList $smokeArguments -PassThru
             $deadline = (Get-Date).AddSeconds(30)
             while ((Get-Date) -lt $deadline) {
               $process.Refresh()

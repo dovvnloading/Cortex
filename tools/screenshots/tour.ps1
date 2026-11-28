@@ -39,6 +39,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts/process_arguments.ps1')
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot '.github/images' }
 if (-not $WorkDir) { $WorkDir = Join-Path $repoRoot 'build/tour' }
 if (-not $FrontendDist) { $FrontendDist = Join-Path $repoRoot 'frontend/dist' }
@@ -53,6 +54,8 @@ foreach ($scene in $Scenes) {
     $stderr = New-TemporaryFile
     $serverArgs = @('tools/screenshots/tour_server.py', '--port', $Port, '--frontend-dist', $FrontendDist)
     if ($ProjectParent) { $serverArgs += @('--project-parent', $ProjectParent) }
+    # Paths may contain spaces; Start-Process quotes nothing itself.
+    $serverArgs = $serverArgs | ForEach-Object { ConvertTo-ProcessArgument "$_" }
     $server = Start-Process -FilePath 'python' -ArgumentList $serverArgs `
         -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr -NoNewWindow -PassThru
