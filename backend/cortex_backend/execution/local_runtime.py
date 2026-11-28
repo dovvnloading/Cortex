@@ -433,7 +433,11 @@ class LocalExecutionCoordinator:
         )
         self._supervisor_lease_active = True
         try:
-            recovered = self.repository.recover_expired_leases()
+            # This coordinator has just taken exclusive supervisor ownership
+            # and has launched nothing, so every job lease left in the store
+            # belongs to a process that is gone -- even one that has not
+            # expired yet because Cortex was reopened quickly.
+            recovered = self.repository.recover_expired_leases(include_live=True)
             self.repository.expire_approvals()
             self._recipe.recover_jobs(recovered)
             for job_id in recovered:
@@ -453,12 +457,21 @@ class LocalExecutionCoordinator:
                     self._discard_stale_code_workspace(job.job_id)
             try:
                 owner = self.repository.installation_principal_id
-                for job in self.repository.list_jobs(
-                    owner=owner,
-                    include_terminal=False,
-                    limit=200,
-                ):
-                    if job.profile == CODE_EXECUTION_PROFILE:
+                recovered_ids = set(recovered)
+                # Every unfinished job, not a capped listing: one left out has
+                # no worker to wait for its approval or to run it.
+                for job in self.repository.nonterminal_jobs(owner=owner):
+                    if job.job_id not in recovered_ids and job.profile in {
+                        SCRATCH_COMPUTE_PROFILE,
+                        RECIPE_IMAGE_PROFILE,
+                    }:
+                        # Admitted but never leased: interrupted before its
+                        # worker claimed it, so no lease recovery found it.
+                        if job.profile == SCRATCH_COMPUTE_PROFILE:
+                            self._recover_scratch(job)
+                        else:
+                            self._recipe.recover_jobs([job.job_id])
+                    elif job.profile == CODE_EXECUTION_PROFILE:
                         # Relaunching only re-enters the approval gate. A job
                         # approved before this restart is refused there and
                         # cancelled as approval_expired; one still pending
