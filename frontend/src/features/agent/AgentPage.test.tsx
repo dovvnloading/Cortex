@@ -570,6 +570,32 @@ describe("AgentPage", () => {
     expect(screen.queryByRole("button", { name: "Undo previously accepted changes" })).not.toBeInTheDocument();
   });
 
+  it("re-reads the staged changes after undoing a fully accepted run (#678)", async () => {
+    const user = userEvent.setup();
+    const api = fakeClient();
+    const staged = {
+      path: "app.py", kind: "modify", baseline_sha256: "before", new_sha256: "after",
+      diff: "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 42\n+value = 43\n",
+    };
+    let undone = false;
+    api.agentChangeset.mockImplementation(async () => ({ run_id: "run-1", changes: undone ? [staged] : [] }));
+    api.agentRun.mockResolvedValue({ ...run, undo_available: true, copy_available: true });
+    api.undoAgentChanges.mockImplementation(async () => { undone = true; return { paths: ["app.py"] }; });
+    page(api);
+    await prepare(user);
+    await user.click(screen.getByRole("button", { name: "Start Agent" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("No files to review.")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Undo previously accepted changes" }));
+    await user.click(within(dialog).getByRole("button", { name: "Confirm undo" }));
+
+    // The copy still holds the agent's edit, so it is staged for review again.
+    const review = await screen.findByRole("alertdialog");
+    expect(await within(review).findByRole("checkbox", { name: "Select app.py" })).toBeVisible();
+    expect(within(review).getByRole("button", { name: "Accept selected to project" })).toBeEnabled();
+    expect(api.agentChangeset).toHaveBeenCalledTimes(2);
+  });
+
   it("offers confirmed recovery without asserting prior acceptance for an empty changeset", async () => {
     const user = userEvent.setup();
     const api = fakeClient();

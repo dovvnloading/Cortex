@@ -64,7 +64,6 @@ export function AgentChangesPanel({ api, runId, onRecoveryChanged }: AgentChange
 
   const act = async (action: ReviewAction, paths: string[] = []): Promise<void> => {
     const recoveringWithoutCopy = changes === null && loadError !== null;
-    const recoveringEmptyChangeset = changes?.length === 0;
     if (inFlight.current || recoveredWithoutCopy
       || (action !== "undo" && (discarded || changes === null))
       || (action === "accept" && paths.length === 0)
@@ -94,7 +93,9 @@ export function AgentChangesPanel({ api, runId, onRecoveryChanged }: AgentChange
       } else {
         const result = await api.undo(runId, true);
         setUndoAvailable(false);
-        if (discarded || recoveringWithoutCopy || recoveringEmptyChangeset) {
+        // A fully accepted copy has an empty changeset but still exists, and
+        // after undo it stages the agent's edits again: re-read them (#678).
+        if (discarded || recoveringWithoutCopy) {
           setRecoveredWithoutCopy(true);
         } else {
           setChanges(null);
