@@ -93,6 +93,32 @@ _MAX_SPLIT_PARTS = 256
 # It contains only names, stable file identities and a request digest, never
 # signed download URLs or bearer tokens. The cap prevents unbounded JSON reads.
 _SPLIT_JOURNAL_PATTERN = re.compile(r"^\.split-publish-[0-9a-f]{32}\.json$")
+# A transfer stages into ``.download-<uuid>.part`` and removes it itself, but
+# a hard exit skips that, and every retry staged under a new name: the space
+# was lost for good, out of sight of the model list. Staging left untouched
+# this long belongs to no live transfer -- a live one writes continuously,
+# and a stalled one gives up within _STALL_WINDOW_SECONDS -- and is removed.
+_STAGING_NAME_PATTERN = re.compile(r"^\.download-[0-9a-f]{32}\.part$")
+_ABANDONED_STAGING_SECONDS = 10 * 60
+
+
+def _reclaim_abandoned_staging(directory: Path) -> None:
+    """Remove download staging an earlier transfer left in ``directory``."""
+    cutoff = time.time() - _ABANDONED_STAGING_SECONDS
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if _STAGING_NAME_PATTERN.fullmatch(entry.name) is None:
+            continue
+        try:
+            status = entry.lstat()
+            if not stat.S_ISREG(status.st_mode) or status.st_mtime > cutoff:
+                continue
+            entry.unlink()
+        except OSError:
+            logger.debug("Could not remove abandoned download staging.")
 _SPLIT_STAGING_PATTERN = re.compile(r"^\.download-[0-9a-f]{32}\.part$")
 _MAX_SPLIT_JOURNAL_BYTES = 192 * 1024
 _HF_BLOB_URL_PATTERN = re.compile(r"^(https://huggingface\.co/[^/]+/[^/]+)/blob/(.+)$")
@@ -661,6 +687,7 @@ def download_gguf(
         raise GGUFDownloadError("The download URL contains invalid control characters.")
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
+    _reclaim_abandoned_staging(directory)
     destination = directory / target_filename
     if destination.exists() and not allow_overwrite:
         raise GGUFDownloadError("A model with this filename already exists; refusing to overwrite it.")
@@ -760,6 +787,7 @@ def download_gguf_set(
         raise GGUFDownloadError("The parts of a split model must have different file names.")
     maximum, reserve = _checked_limits(max_download_bytes, min_free_space_bytes)
     directory.mkdir(parents=True, exist_ok=True)
+    _reclaim_abandoned_staging(directory)
     destinations = [directory / name for name in names]
     # A previous Cortex process may have died after publishing shard one.
     # Its fsynced journal predates that publication and proves exactly which
