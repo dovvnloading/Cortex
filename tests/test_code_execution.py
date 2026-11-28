@@ -20,6 +20,7 @@ from cortex_backend.execution.code_execution import (
 )
 from cortex_backend.execution import code_execution
 from cortex_backend.execution.local_process import _stop_process
+from cortex_backend.execution.recipe_coordinator import ExecutionShutdownIncomplete
 from cortex_backend.execution.repository import LeaseConflict
 from cortex_backend.services.llm import SynthesisAgent
 from support import wait_until
@@ -724,7 +725,9 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     monkeypatch.setattr(repository, "claim_supervisor_lease", blocked_claim)
     coordinator.startup_recover()
     assert renewal_entered.wait(timeout=3.0)
-    coordinator.shutdown(timeout=0)
+    # A renewal still inside SQLite is not a clean stop (#618).
+    with pytest.raises(ExecutionShutdownIncomplete):
+        coordinator.shutdown(timeout=0)
 
     with pytest.raises(RuntimeError, match="still stopping"):
         coordinator.startup_recover()
@@ -736,6 +739,8 @@ def test_supervisor_restart_waits_for_timed_out_heartbeat(
     old_thread.join(timeout=3.0)
     assert not old_thread.is_alive()
 
+    # Retrying the stop finishes it; only then can the coordinator restart.
+    coordinator.shutdown(timeout=1.0)
     coordinator.startup_recover()
     assert coordinator._supervisor_thread is not old_thread
 
@@ -1009,6 +1014,7 @@ class _LongRepr:
         ("more items than the element cap", list(range(150))),
         ("more entries than the element cap", {f"k{index}": index for index in range(150)}),
         ("keys that collide once shortened", {"x" * 100 + "A": 1, "x" * 100 + "B": 2}),
+        ("one key longer than the key cap", {"a" * 101: 42}),
         ("nesting past the depth cap", {"a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}),
         ("a rendered value past the length cap", {"k": _LongRepr()}),
     ],
@@ -1032,7 +1038,15 @@ def test_a_result_that_lost_data_reports_itself_as_truncated(label: str, value: 
 
 @pytest.mark.parametrize(
     "value",
-    [list(range(10)), {"a": 1, "b": 2}, "plain text", 42, None, {"a": {"b": {"c": 1}}}],
+    [
+        list(range(10)),
+        {"a": 1, "b": 2},
+        "plain text",
+        42,
+        None,
+        {"a": {"b": {"c": 1}}},
+        {"k" * 100: 1},  # exactly at the key cap is not shortened
+    ],
 )
 def test_a_complete_result_is_not_reported_as_truncated(value: object) -> None:
     """The flag has to stay meaningful, or the badge becomes noise."""
@@ -1210,3 +1224,46 @@ def test_a_cancelling_job_relaunched_after_a_crash_does_not_leak_its_workspace(c
             f"(status={repository.get_job(job.job_id).status}, workspace exists={workspace.exists()})"
         ),
     )
+
+
+def _worker_message(value: object) -> dict[str, object]:
+    return {
+        "ok": True,
+        "result": {
+            "schema_version": code_execution.CODE_EXECUTION_RESULT_SCHEMA,
+            "stdout": "",
+            "stderr": "",
+            "value": value,
+            "truncated": False,
+            "duration_ms": 1,
+        },
+    }
+
+
+def test_a_value_the_worker_accepts_is_accepted_by_the_parent() -> None:
+    """The worker sized values compactly and the parent with default separators (#594).
+
+    100 strings of 652 characters encode to 65,501 bytes compactly, under the
+    64 KiB cap, but to 65,600 with a space after every comma, so a valid
+    result was discarded as worker_output_invalid.
+    """
+    from cortex_backend.execution.local_code_attempt import LocalCodeAttempt
+
+    value = ["x" * 652 for _ in range(100)]
+    safe, truncated = code_execution._bounded_json_value(value)
+    assert truncated is False
+    assert code_execution.code_value_json_bytes(safe) <= code_execution.MAX_CODE_VALUE_BYTES
+
+    result = LocalCodeAttempt._result_from_message(_worker_message(safe))
+
+    assert result.value == value
+
+
+def test_a_value_over_the_cap_is_still_refused_by_the_parent() -> None:
+    from cortex_backend.execution.local_code_attempt import LocalCodeAttempt
+
+    oversized = ["x" * 1000 for _ in range(70)]
+    assert code_execution.code_value_json_bytes(oversized) > code_execution.MAX_CODE_VALUE_BYTES
+
+    with pytest.raises(CodeExecutionError):
+        LocalCodeAttempt._result_from_message(_worker_message(oversized))

@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
+import time
 
 from .models import TerminalExecutionStatus
 from .repository import ExecutionRepository, ExecutionTransitionConflict
@@ -24,6 +25,9 @@ _LOGGER = logging.getLogger("cortex.execution.finish")
 # While a decision is being made a job can move at most running -> cancelling
 # -> terminal, so three reads always settle it.
 _ATTEMPTS = 3
+# A transient store failure (a locked database, a brief I/O error) is retried
+# after these pauses before giving up; about three-quarters of a second in all.
+_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +47,7 @@ def finish_unsuccessful_job(
     failure_code: str,
     cancel_requested: Callable[[], bool],
     wording: UnsuccessfulJobWording,
-) -> None:
+) -> bool:
     """Record ``cancelled`` or ``failed`` for a job, never overriding a committed Stop.
 
     The outcome is ``cancelled`` when ``failure_code`` says so, when the
@@ -54,13 +58,20 @@ def finish_unsuccessful_job(
     Nothing here raises: this runs in a worker's error path, where the original
     outcome is what matters. That covers the read of the job and the
     ``cancel_requested`` probe as well as the write.
+
+    A failure of the store itself is retried a few times with a short
+    backoff: one locked or briefly unavailable database used to leave the job
+    running with no worker behind it. Returns whether the job is now
+    terminal; one that is not is picked up by startup recovery.
     """
 
-    for _ in range(_ATTEMPTS):
+    conflicts = 0
+    failures = 0
+    while conflicts < _ATTEMPTS:
         try:
             current = repository.get_job(job_id)
             if current is None or current.status in TerminalExecutionStatus:
-                return
+                return True
             cancelled = (
                 failure_code == "cancelled"
                 or cancel_requested()
@@ -79,21 +90,27 @@ def finish_unsuccessful_job(
                 error="cancelled" if cancelled else failure_code,
                 expected_status=current.status,
             )
-            return
+            return True
         except ExecutionTransitionConflict:
+            conflicts += 1
             continue
         except Exception as exc:
+            if failures < len(_RETRY_DELAYS):
+                time.sleep(_RETRY_DELAYS[failures])
+                failures += 1
+                continue
             _LOGGER.warning(
                 "Cortex could not record how an execution job ended (%s); "
-                "it may be left non-terminal.",
+                "it may be left non-terminal until the next start.",
                 type(exc).__name__,
             )
-            return
+            return False
     _LOGGER.warning(
         "Cortex could not record how an execution job ended after %d attempts; "
         "it may be left non-terminal.",
         _ATTEMPTS,
     )
+    return False
 
 
 __all__ = ["UnsuccessfulJobWording", "finish_unsuccessful_job"]

@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Literal, Protocol
 
 from cortex_backend.core.generation import ConnectionResult
@@ -114,6 +114,58 @@ class ModelPullProgress:
         return min(100, max(0, round(self.completed / self.total * 100)))
 
 
+class ModelPullNotInstalled(RuntimeError):
+    """A pull finished, but the exact tag is not in Ollama's inventory afterwards.
+
+    Distinct from Stop: the job records a failure with this message rather
+    than a cancellation, or a success.
+    """
+
+    user_message = (
+        "The model download finished, but Ollama does not list the requested tag. "
+        "Check the tag name and try again."
+    )
+    error_details = "model_not_installed"
+
+
+class _ListCancelled(Exception):
+    """Stop was requested while an inventory read was outstanding."""
+
+
+def _list_unless_stopped(call: Callable[[], Any], cancellation_event: Event | None) -> Any:
+    """Run an inventory read that Stop can walk away from.
+
+    The read goes through the shared client, which must not be closed (chat and
+    Settings use it too), so it cannot be interrupted; a stalled read used to
+    hold the model-job slot until the HTTP timeout. It runs on a helper thread
+    instead, and Stop returns at once. The abandoned read ends on its own at
+    the client's timeout and its result is discarded.
+    """
+
+    if cancellation_event is None:
+        return call()
+    if cancellation_event.is_set():
+        raise _ListCancelled()
+    outcome: dict[str, Any] = {}
+    done = Event()
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # handed to the caller below
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    Thread(target=run, name="ollama-inventory-read", daemon=True).start()
+    while not done.wait(0.05):
+        if cancellation_event.is_set():
+            raise _ListCancelled()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 class ModelService:
     """Check required model tags without depending on a UI or transport."""
 
@@ -183,7 +235,9 @@ class ModelService:
         required = tuple(dict.fromkeys(model for model in required_models if model))
         optional = tuple(dict.fromkeys(model for model in optional_models if model))
         try:
-            local_models = self.extract_model_tags(self._gateway.list())
+            local_models = self.extract_model_tags(
+                _list_unless_stopped(self._gateway.list, cancellation_event)
+            )
             missing_models = tuple(
                 model for model in required if model not in local_models
             )
@@ -202,7 +256,9 @@ class ModelService:
                 )
 
             if missing_models:
-                local_models = self.extract_model_tags(self._gateway.list())
+                local_models = self.extract_model_tags(
+                    _list_unless_stopped(self._gateway.list, cancellation_event)
+                )
             still_missing = tuple(
                 model for model in required if model not in local_models
             )
@@ -227,6 +283,8 @@ class ModelService:
                 missing_models=missing_models,
                 optional_missing_models=optional_missing,
             )
+        except _ListCancelled:
+            return ConnectionResult.failed("Model check cancelled.", details="cancelled")
         except Exception as exc:
             logging.error("Ollama model check failed (%s).", type(exc).__name__)
             return ConnectionResult.failed(
@@ -298,11 +356,13 @@ class ModelService:
                                 raise
             if cancellation_event is not None and cancellation_event.is_set():
                 return False
-            return (
-                exact_model in self.extract_model_tags(self._gateway.list())
-                if verify
-                else True
-            )
+            if not verify:
+                return True
+            try:
+                listed = _list_unless_stopped(self._gateway.list, cancellation_event)
+            except _ListCancelled:
+                return False
+            return exact_model in self.extract_model_tags(listed)
         finally:
             if callable(close_client):
                 close_client()

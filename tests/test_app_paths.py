@@ -237,6 +237,75 @@ def test_an_explicit_unc_data_directory_is_still_refused(monkeypatch: pytest.Mon
         AppPaths.from_data_dir(r"\\fileserver\share\cortex")
 
 
+@pytest.mark.parametrize(
+    ("value", "refused"),
+    [
+        (r"C:\CortexData", False),
+        (r"\\?\C:\CortexData", False),  # extended-length, but a local drive (#654)
+        (r"\\?\d:\CortexData", False),
+        (r"//?/C:/CortexData", False),
+        (r"\\server\share\cortex", True),
+        (r"\\?\UNC\server\share\cortex", True),  # the extended form of a share
+        (r"\\.\C:\CortexData", True),  # the device namespace
+        (r"\\.\pipe\cortex", True),
+        (r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\cortex", True),
+        (r"\\?\GLOBALROOT\Device\HarddiskVolume1\cortex", True),
+    ],
+)
+def test_only_paths_off_a_local_drive_count_as_network_paths(value: str, refused: bool) -> None:
+    assert paths_module._is_unc_path(value) is refused
+
+
+@pytest.mark.parametrize(
+    ("extended", "plain"),
+    [
+        (r"\\?\C:\CortexData", r"C:\CortexData"),
+        (r"\\?\C:\Users\someone\AppData\Roaming", r"C:\Users\someone\AppData\Roaming"),
+        # Without the prefix each of these would name something else.
+        (r"\\?\C:\CortexData.", None),
+        (r"\\?\C:\CortexData \inner", None),
+        (r"\\?\C:\nul\cortex", None),
+        (r"\\?\C:\data\COM1.txt", None),
+        ("\\\\?\\C:\\" + "x" * 300, None),
+    ],
+)
+def test_the_prefix_is_dropped_only_where_the_plain_path_names_the_same_folder(
+    extended: str, plain: str | None
+) -> None:
+    result = paths_module._plain_drive_form(Path(extended))
+    assert str(result) == (plain if plain is not None else extended)
+
+
+@pytest.mark.skipif(not paths_module._running_on_windows(), reason="needs a Windows file system")
+def test_an_extended_length_local_data_directory_is_the_same_directory(tmp_path: Path) -> None:
+    """#654: ``\\\\?\\C:\\...`` was refused as a UNC path and Cortex would not start."""
+    root = tmp_path / "CortexData"
+    root.mkdir()
+
+    plain = AppPaths.from_data_dir(root)
+    extended = AppPaths.from_data_dir("\\\\?\\" + str(root))
+
+    assert extended.data_dir == plain.data_dir
+    assert not str(extended.data_dir).startswith("\\\\")
+
+
+@pytest.mark.skipif(not paths_module._running_on_windows(), reason="needs a Windows file system")
+def test_an_extended_length_appdata_keeps_the_data_where_it_is(tmp_path: Path) -> None:
+    environ = {key: "\\\\?\\" + value for key, value in _environ(tmp_path).items()}
+
+    paths = AppPaths.for_windows(environ)
+
+    assert not paths.local_fallback
+    assert paths.data_dir == AppPaths.for_windows(_environ(tmp_path)).data_dir
+
+
+def test_an_extended_length_unc_data_directory_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(paths_module.sys, "platform", "win32")
+
+    with pytest.raises(AppPathError, match="UNC"):
+        AppPaths.from_data_dir(r"\\?\UNC\fileserver\share\cortex")
+
+
 def test_a_local_appdata_behind_a_link_is_not_used_for_caches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

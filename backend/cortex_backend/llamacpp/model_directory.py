@@ -73,6 +73,26 @@ def _shard_sets(names: Iterable[str]) -> dict[_ShardKey, set[int]]:
     return sets
 
 
+def _usable_part_names(entries: Iterable[Path]) -> list[str]:
+    """Names of the entries that can count towards a split set.
+
+    A part counts only if it is a regular file that starts like a GGUF: a
+    zero-byte or HTML-error "part", or a folder with a part's name, does not
+    complete a set that llama-server would then fail to load.
+    """
+    names: list[str] = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            if _parse_shard(entry.name) is not None and not is_valid_gguf_file(entry):
+                continue
+        except OSError:
+            continue
+        names.append(entry.name)
+    return names
+
+
 def _shard_set_is_complete(key: _ShardKey, present: set[int]) -> bool:
     # Counting the present parts that fall inside 1..total keeps this
     # proportional to the files that exist, not to a total the name merely
@@ -186,7 +206,7 @@ def _unusable_as_a_model(path: Path) -> str | None:
     final say.
     """
     try:
-        siblings = [entry.name for entry in path.parent.iterdir()]
+        siblings = _usable_part_names(path.parent.iterdir())
     except OSError:
         siblings = [path.name]
     reason = _companion_reason(path.name, _shard_sets(siblings))
@@ -301,6 +321,12 @@ class GGUFModelDirectory:
             files: list[Path] = []
             for entry in entries:
                 try:
+                    # The resolver loads a model only if its real location is
+                    # inside the folder, so a link out of it -- to a folder or
+                    # to a file -- is not followed here either. Listing it
+                    # offered a model that could then never be loaded.
+                    if not entry.resolve().is_relative_to(root):
+                        continue
                     if entry.is_dir():
                         if depth < MAX_SCAN_DEPTH and not entry.name.startswith("."):
                             pending.append((entry, depth + 1))
@@ -310,7 +336,7 @@ class GGUFModelDirectory:
                 except OSError:
                     continue
                 files.append(entry)
-            shard_sets = _shard_sets(entry.name for entry in files)
+            shard_sets = _shard_sets(_usable_part_names(files))
             for key, present in shard_sets.items():
                 if _shard_set_is_complete(key, present):
                     continue

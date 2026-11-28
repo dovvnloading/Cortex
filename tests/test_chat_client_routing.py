@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from cortex_backend.llamacpp.chat_client import LlamaCppChatClient, _adapt_to_ollama_shape
 from cortex_backend.llamacpp.errors import LlamaCppError
 from cortex_backend.llamacpp.server_manager import ServerHandle
+from cortex_backend.services import chat_client as chat_client_module
 from cortex_backend.services.chat_client import OllamaChatClient, RoutingChatClient
 from cortex_backend.services.llm import SynthesisAgent
 from cortex_backend.testing.fake_llamacpp import FakeLlamaCppState, create_fake_llamacpp_app
@@ -355,6 +356,101 @@ def _client_reporting_to(stub: _ResidencyOllama) -> OllamaChatClient:
     client = OllamaChatClient(stub)
     client.set_status_callback(lambda message: stub.events.append(f"status:{message}"))
     return client
+
+
+class _StalledResidencyOllama(_ResidencyOllama):
+    """``/api/ps`` that does not answer until released, as a stalled Ollama would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = Event()
+        self.asked = Event()
+
+    def ps(self):
+        self.events.append("ps")
+        self.asked.set()
+        self.release.wait(10)
+        return SimpleNamespace(models=[])
+
+
+def test_stop_ends_a_turn_while_ollama_has_not_said_what_is_loaded() -> None:
+    """#602: the probe went through the shared client (ten-minute read timeout)
+    with nothing watching Stop, so the turn stayed cancelling and held the slot."""
+    stub = _StalledResidencyOllama()
+    client = _client_reporting_to(stub)
+    cancel = Event()
+    Thread(target=lambda: (stub.asked.wait(5), cancel.set()), daemon=True).start()
+
+    started = time.monotonic()
+    reply = client.chat(model="qwen3:8b", messages=[], options={}, cancellation_event=cancel)
+    elapsed = time.monotonic() - started
+    stub.release.set()
+
+    assert reply["done_reason"] == "cancelled"
+    assert elapsed < 1.5, f"Stop took {elapsed:.1f}s to reach the turn"
+    assert "chat" not in stub.events, "a stopped turn still sent the chat request"
+
+
+def test_a_stalled_residency_probe_delays_a_turn_only_briefly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_client_module, "_RESIDENCY_PROBE_SECONDS", 0.2)
+    stub = _StalledResidencyOllama()
+
+    started = time.monotonic()
+    reply = _client_reporting_to(stub).chat(model="qwen3:8b", messages=[], options={})
+    elapsed = time.monotonic() - started
+    stub.release.set()
+
+    assert reply["message"]["content"] == "hi"
+    assert elapsed < 1.5
+    # No answer, so no notice: only the probe and the chat itself.
+    assert stub.events == ["ps", "chat"]
+
+
+class _OpenAfterDone:
+    """A stream that stays open after its terminal frame: advancing again fails."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.advanced_after_done = False
+        self._frames = iter(
+            [
+                {"message": {"content": "Hello"}, "done": False},
+                {"message": {"content": " world"}, "done": True, "done_reason": "stop", "eval_count": 2},
+            ]
+        )
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._frames)
+        except StopIteration:
+            self.advanced_after_done = True
+            raise httpx.ReadTimeout("the connection stayed open") from None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_terminal_frame_finishes_the_answer_without_another_read() -> None:
+    """#613: the loop read on after done:true, so a connection left open held a
+    finished answer until the read timed out, and the timeout failed the turn."""
+    stream = _OpenAfterDone()
+
+    class _Shared:
+        def chat(self, **kwargs):
+            del kwargs
+            return stream
+
+    reply = OllamaChatClient(_Shared()).chat(
+        model="qwen3:8b", messages=[], options={}, on_delta=lambda _kind, _text: None
+    )
+
+    assert reply["message"]["content"] == "Hello world"
+    assert reply["done_reason"] == "stop" and reply["eval_count"] == 2
+    assert not stream.advanced_after_done
+    assert stream.closed
 
 
 def test_ollama_reports_a_loading_phase_when_the_model_is_not_resident() -> None:

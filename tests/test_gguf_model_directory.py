@@ -519,3 +519,95 @@ def test_a_failed_gguf_scan_is_logged_and_ollama_still_lists(caplog) -> None:
     assert "GGUF model scan failed (ValueError)" in caplog.text
     # The exception message can carry private paths; it stays out of the log.
     assert "someone" not in caplog.text
+
+
+# --- the list never offers an id the resolver refuses (#631) -------------------
+
+
+def _link_folder(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if os.name != "nt":  # pragma: no cover
+        pytest.skip("this host cannot create directory links")
+    import _winapi  # type: ignore[import-not-found]
+
+    try:
+        _winapi.CreateJunction(str(target), str(link))
+    except OSError:  # pragma: no cover
+        pytest.skip("directory junctions cannot be created here")
+
+
+def test_a_linked_folder_outside_the_models_folder_is_not_listed(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    _write_gguf(root / "inside.gguf")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    _write_gguf(outside / "model.gguf")
+    _link_folder(root / "linked", outside)
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: root).list_installed_details()]
+
+    assert listed == ["gguf:inside.gguf"]
+    for model_id in listed:
+        resolve_gguf_path(root, model_id)  # every listed id loads
+
+
+def test_a_linked_file_outside_the_models_folder_is_not_listed(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    outside = tmp_path / "outside.gguf"
+    _write_gguf(outside)
+    try:
+        (root / "link.gguf").symlink_to(outside)
+    except (OSError, NotImplementedError):  # pragma: no cover - needs privilege on Windows
+        pytest.skip("this host cannot create symlinks")
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: root).list_installed_details()]
+
+    assert "gguf:link.gguf" not in listed
+
+
+def test_a_link_that_stays_inside_the_models_folder_is_still_listed(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    (root / "real").mkdir(parents=True)
+    _write_gguf(root / "real" / "model.gguf")
+    _link_folder(root / "alias", root / "real")
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: root).list_installed_details()]
+
+    assert "gguf:alias/model.gguf" in listed
+    resolve_gguf_path(root, "gguf:alias/model.gguf")
+
+
+# --- a split set is complete only with real GGUF parts (#644) ----------------
+
+
+@pytest.mark.parametrize("bad_part", ["empty", "html", "folder"])
+def test_a_split_set_with_an_unusable_later_part_is_not_listed_or_loaded(tmp_path: Path, bad_part: str) -> None:
+    _write_gguf(tmp_path / "model-00001-of-00002.gguf")
+    second = tmp_path / "model-00002-of-00002.gguf"
+    if bad_part == "empty":
+        second.write_bytes(b"")
+    elif bad_part == "html":
+        second.write_bytes(b"<html>download error</html>")
+    else:
+        second.mkdir()
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()]
+
+    assert listed == []
+    with pytest.raises(InvalidGGUFModelId):
+        resolve_gguf_path(tmp_path, "gguf:model-00001-of-00002.gguf")
+
+
+def test_a_split_set_with_every_part_valid_is_still_listed(tmp_path: Path) -> None:
+    _write_gguf(tmp_path / "model-00001-of-00002.gguf")
+    _write_gguf(tmp_path / "model-00002-of-00002.gguf")
+
+    listed = [model.name for model in GGUFModelDirectory(lambda: tmp_path).list_installed_details()]
+
+    assert listed == ["gguf:model-00001-of-00002.gguf"]

@@ -289,6 +289,101 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.active_backend == "cpu"
 
 
+def test_status_names_a_model_in_a_subfolder_by_its_inventory_id(tmp_path: Path) -> None:
+    """Status used the bare file name, so two models named model.gguf looked the same (#632)."""
+    (tmp_path / "repo-a").mkdir()
+    (tmp_path / "repo-b").mkdir()
+    first = tmp_path / "repo-a" / "model.gguf"
+    second = tmp_path / "repo-b" / "model.gguf"
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    manager.ensure_ready(first, num_ctx=4096)
+    assert manager.status.loaded_model == "gguf:repo-a/model.gguf"
+
+    manager.ensure_ready(second, num_ctx=4096)
+    assert manager.status.loaded_model == "gguf:repo-b/model.gguf"
+
+
+def test_status_stops_claiming_ready_once_the_server_has_exited(tmp_path: Path) -> None:
+    """Status reported a resident model until the next chat request noticed the exit (#641)."""
+    process = _FakePopen()
+    launcher = _QueueLauncher([process])
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient())
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert manager.status.state == "ready"
+
+    process.exit_code = 3  # the server dies between requests
+
+    status = manager.status
+    assert status.state == "failed"
+    assert status.loaded_model is None
+    assert status.loaded_context is None
+    assert status.gpu_layers_offloaded is None
+    assert "exit code 3" in (status.last_error or "")
+    # Only a report: no restart was attempted and nothing new was launched.
+    assert len(launcher.launch_args) == 1
+
+
+def test_a_model_file_replaced_on_disk_is_loaded_again(tmp_path: Path) -> None:
+    """Same path, new weights: the warm server kept serving the old file (#639)."""
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"GGUF old weights")
+    first, second = _FakePopen(), _FakePopen()
+    launcher = _QueueLauncher([first, second])
+
+    class _ServesThisModel:
+        # A real file is attested: the server must report its exact path.
+        def get(self, url: str, timeout=None, headers=None):
+            del url, timeout, headers
+            return _FakeResponse(200, {"status": "ok", "model_path": str(model_path), "build_info": "fake"})
+
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_ServesThisModel())
+
+    manager.ensure_ready(model_path, num_ctx=4096)
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert len(launcher.launch_args) == 1  # an unchanged file reuses the server
+
+    replacement = tmp_path / "model.gguf.new"
+    replacement.write_bytes(b"GGUF new weights")
+    os.replace(replacement, model_path)  # an atomic replacement, as a download does
+    manager.ensure_ready(model_path, num_ctx=4096)
+
+    assert len(launcher.launch_args) == 2
+    assert first.terminated
+    assert manager.status.last_restart_reason == "the model file changed on disk"
+
+
+def test_auto_does_not_start_a_second_server_while_the_first_will_not_exit(tmp_path: Path) -> None:
+    """A failed GPU start whose child would not exit was abandoned for the CPU build (#638)."""
+
+    class _ProbeFailsOnce:
+        # The GPU attempt's readiness probe blows up; later probes are healthy.
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, url: str, timeout=None, headers=None):
+            del url, timeout, headers
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("probe callback failed")
+            return _FakeResponse(200, {"status": "ok", "model_path": "/fake/model.gguf", "build_info": "fake"})
+
+    stubborn = _UnstoppablePopen()
+    launcher = _QueueLauncher([stubborn, _FakePopen()])
+    fetcher = _FakeFetcher()
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=launcher, http_client=_ProbeFailsOnce(), gpu_backend="auto"
+    )
+
+    with pytest.raises(LlamaCppError, match="did not exit cleanly"):
+        manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert len(launcher.launch_args) == 1, "a second server was started beside the first"
+    assert manager._starting_process is stubborn  # still owned, so it can still be stopped
+    assert manager.status.state == "stopping"
+
+
 def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
     """An explicit CPU/Vulkan preference change must not reuse the old process."""
     first, second, third = _FakePopen(), _FakePopen(), _FakePopen()
@@ -1032,6 +1127,63 @@ def test_known_bad_backend_marker_does_not_affect_a_different_model_or_context(t
     )
     manager3.ensure_ready(tmp_path / "big-model.gguf", num_ctx=2048)
     assert fetcher3.ensure_binary_calls == ["vulkan"]
+
+
+def test_known_bad_backend_marker_is_scoped_to_the_launch_options(tmp_path: Path) -> None:
+    """Changing the advanced options that broke the GPU build left Auto on cpu (#640)."""
+    model_path = tmp_path / "model.gguf"
+    failing = ("--cache-type-k", "q8_0")
+    working = ("--cache-type-k", "f16")
+
+    # Options A: the GPU build fails, cpu takes over, and that is remembered.
+    fetcher = _FakeFetcher()
+    launcher = _QueueLauncher([_FakePopen(exit_immediately=True), _FakePopen()])
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=launcher, http_client=_AlwaysHealthyClient(),
+        gpu_backend="auto", extra_args=lambda: failing,
+    )
+    manager.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher.ensure_binary_calls == ["vulkan", "cpu"]
+
+    # Options B: the GPU build is tried again.
+    fetcher_b = _FakeFetcher()
+    manager_b = _manager(
+        tmp_path, fetcher=fetcher_b, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto", extra_args=lambda: working,
+    )
+    manager_b.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher_b.ensure_binary_calls == ["vulkan"]
+
+    # Options A again (marker still in force): straight to cpu.
+    fetcher_a = _FakeFetcher()
+    manager_a = _manager(
+        tmp_path, fetcher=fetcher_a, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto", extra_args=lambda: failing,
+    )
+    manager_a.ensure_ready(model_path, num_ctx=4096)
+    assert fetcher_a.ensure_binary_calls == ["cpu"]
+
+
+def test_a_marker_written_before_options_were_recorded_matches_nothing(tmp_path: Path) -> None:
+    (tmp_path / "preferred_gpu_backend.json").write_text(
+        json.dumps({
+            "known_bad": "vulkan",
+            "model": str(tmp_path / "model.gguf"),
+            "num_ctx": 4096,
+            "release": None,
+            "at": time.time(),
+        }),
+        encoding="utf-8",
+    )
+    fetcher = _FakeFetcher()
+    manager = _manager(
+        tmp_path, fetcher=fetcher, launcher=_QueueLauncher([_FakePopen()]),
+        http_client=_AlwaysHealthyClient(), gpu_backend="auto",
+    )
+
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+
+    assert fetcher.ensure_binary_calls == ["vulkan"]
 
 
 def test_known_bad_backend_marker_expires(tmp_path: Path) -> None:

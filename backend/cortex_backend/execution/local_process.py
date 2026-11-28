@@ -17,9 +17,11 @@ to the same behaviour.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import logging
 import os
+from threading import Event, Thread
+import time
 from typing import Any
 
 from cortex_backend.core.win_jobs import JobLimits, KillOnCloseJob
@@ -147,6 +149,78 @@ def apply_resource_limits(*, memory_bytes: int, cpu_seconds: int | None = None) 
             )
     except (ImportError, OSError, ValueError):
         return
+
+
+class ReceiveInterrupted(Exception):
+    """A blocking receive was ended by its deadline or by Stop.
+
+    ``reason`` is ``"timeout"`` or ``"cancelled"``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _receive_within(
+    connection: Any,
+    process: Any,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool],
+    cancelled_at: float | None,
+    grace_seconds: float,
+) -> Any:
+    """``connection.recv()`` that cannot outlive the attempt's limits.
+
+    ``poll()`` reporting data only means some bytes have arrived, not a whole
+    message. A worker that stalls part-way through sending one would leave a
+    plain ``recv()`` blocked, and the deadline and Stop checks around it never
+    run again. A watchdog thread kills the worker once ``deadline``
+    (``time.monotonic()``) passes, or once Stop has been in force for
+    ``grace_seconds``; the killed worker's end of the pipe closes, which ends
+    the receive. Raises ``ReceiveInterrupted`` in that case, and lets
+    ``EOFError``/``OSError`` from an ordinary worker failure through.
+    """
+
+    finished = Event()
+    fired: list[str] = []
+
+    def watch() -> None:
+        stop_seen_at = cancelled_at
+        while not finished.wait(0.025):
+            now = time.monotonic()
+            if stop_seen_at is None and cancelled():
+                stop_seen_at = now
+            if stop_seen_at is not None and now - stop_seen_at >= grace_seconds:
+                fired.append("cancelled")
+            elif now >= deadline:
+                fired.append("timeout")
+            else:
+                continue
+            _kill_now(process)
+            return
+
+    watchdog = Thread(target=watch, name="cortex-worker-receive-watchdog", daemon=True)
+    watchdog.start()
+    try:
+        message = connection.recv()
+    except (EOFError, OSError):
+        finished.set()
+        watchdog.join()
+        if fired:
+            raise ReceiveInterrupted(fired[0]) from None
+        raise
+    finished.set()
+    watchdog.join()
+    return message
+
+
+def _kill_now(process: Any) -> None:
+    try:
+        process.kill()
+    except Exception:
+        _LOGGER.debug("Worker kill from the receive watchdog failed.", exc_info=True)
 
 
 def _stop_process(process: Any, *, grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS) -> None:
