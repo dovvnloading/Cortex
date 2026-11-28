@@ -91,7 +91,9 @@ $smokeData = Join-Path $env:TEMP ("cortex-package-smoke-" + [guid]::NewGuid().To
 $smokeProcess = $null
 $smokeReady = $false
 try {
-    $smokeProcess = Start-Process -FilePath $executable -ArgumentList @("--headless", "--data-dir", $smokeData) -PassThru
+    . (Join-Path $PSScriptRoot '..\scripts\process_arguments.ps1')
+    $smokeArguments = @("--headless", "--data-dir", $smokeData) | ForEach-Object { ConvertTo-ProcessArgument $_ }
+    $smokeProcess = Start-Process -FilePath $executable -ArgumentList $smokeArguments -PassThru
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
         $smokeProcess.Refresh()

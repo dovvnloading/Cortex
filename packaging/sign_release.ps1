@@ -18,6 +18,14 @@
       4. replaces both assets on the draft (with -Upload).
 
     It never publishes. The draft stays a draft for the maintainer to review.
+    A release that is not a draft is refused before anything is downloaded,
+    and its draft state and identity are checked again right before upload.
+    GitHub has no compare-and-swap for release assets, so a release published
+    by someone else in the seconds between that check and the upload is the
+    one case this script cannot rule out.
+
+    -WorkDirectory must be new or empty. The default is a fresh directory
+    under the temp folder for every run. Existing files are never deleted.
 
     Tool locations are parameters or environment variables, never assumed:
     Azure CLI (az.cmd), Microsoft Artifact Signing Client Tools (the dlib),
@@ -43,7 +51,7 @@ param(
     [string]$SignToolPath = $env:CORTEX_SIGNTOOL_PATH,
     [string]$DotNetRoot = $env:CORTEX_DOTNET_ROOT,
     [string]$TimestampServer = 'http://timestamp.acs.microsoft.com',
-    [string]$WorkDirectory = (Join-Path ([IO.Path]::GetTempPath()) "cortex-sign-$Tag"),
+    [string]$WorkDirectory = (Join-Path ([IO.Path]::GetTempPath()) "cortex-sign-$Tag-$([guid]::NewGuid().ToString('N'))"),
     [switch]$Upload
 )
 
@@ -93,6 +101,44 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function New-SigningWorkDirectory([string]$Path) {
+    # The caller chooses this path, so it may hold data this script does not
+    # own. Never clear it: only a new or empty directory is accepted.
+    if (Test-Path -LiteralPath $Path) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            throw "WorkDirectory '$Path' exists and is not a directory."
+        }
+        if (Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1) {
+            throw "WorkDirectory '$Path' is not empty. Pass a new or empty directory; existing files are never deleted."
+        }
+    }
+    return (New-Item -ItemType Directory -Force -Path $Path)
+}
+
+function Get-DraftRelease([string]$Tag, [string]$Repository) {
+    # Fail closed: a lookup error, a tag mismatch or a published release all stop
+    # the run before any asset is downloaded or replaced.
+    $json = gh release view $Tag --repo $Repository --json databaseId,isDraft,tagName
+    if ($LASTEXITCODE -ne 0 -or -not "$json".Trim()) {
+        throw "Could not look up release $Tag in $Repository."
+    }
+    $release = ($json | Out-String) | ConvertFrom-Json
+    if ($release.tagName -ne $Tag -or -not $release.databaseId) {
+        throw "GitHub returned an unexpected release for $Tag."
+    }
+    if ($release.isDraft -ne $true) {
+        throw "Release $Tag is not a draft. This script signs and replaces assets on draft releases only."
+    }
+    return $release
+}
+
+function Assert-SameDraftRelease($Expected, [string]$Tag, [string]$Repository) {
+    $current = Get-DraftRelease $Tag $Repository
+    if ($current.databaseId -ne $Expected.databaseId) {
+        throw "Tag $Tag now resolves to a different release. Refusing to replace its assets."
+    }
+}
+
 # --- tools and identity --------------------------------------------------------
 
 $az = Resolve-Tool $AzureCliPath 'Azure CLI (az.cmd)' 'Pass -AzureCliPath or set CORTEX_AZURE_CLI_PATH.'
@@ -117,7 +163,8 @@ Write-Host 'Signer verified.' -ForegroundColor Cyan
 
 $version = $Tag.TrimStart('v')
 $archiveName = "Cortex-$version-windows-x64.zip"
-if (Test-Path -LiteralPath $WorkDirectory) { Remove-Item -LiteralPath $WorkDirectory -Recurse -Force }
+$release = Get-DraftRelease $Tag $Repository
+$WorkDirectory = (New-SigningWorkDirectory $WorkDirectory).FullName
 $download = New-Item -ItemType Directory -Force -Path (Join-Path $WorkDirectory 'download')
 gh release download $Tag --repo $Repository --dir $download.FullName --pattern $archiveName --pattern 'SHA256SUMS.txt'
 if ($LASTEXITCODE -ne 0) { throw "Could not download $archiveName and SHA256SUMS.txt from $Tag." }
@@ -173,6 +220,7 @@ Write-Host "Signed archive: $signedArchive"
 Write-Host "SHA-256:        $(Get-Sha256 $signedArchive)"
 
 if ($Upload) {
+    Assert-SameDraftRelease $release $Tag $Repository
     gh release upload $Tag $signedArchive $sums --repo $Repository --clobber
     if ($LASTEXITCODE -ne 0) { throw 'Uploading the signed assets failed.' }
     Write-Host "Replaced the draft's archive and SHA256SUMS.txt with the signed build. It is still a draft." -ForegroundColor Green

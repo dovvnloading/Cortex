@@ -144,6 +144,10 @@ class LocalCodeAttempt:
                         and message.get("event") == "ready"
                     ):
                         if not job_sent:
+                            if cancel_event.is_set() or self._cancel_event.is_set():
+                                # Stop came before the worker was released, so nothing has
+                                # run yet: it must never be told to go.
+                                raise CodeExecutionError("cancelled")
                             job_sent = True
                             try:
                                 worker_job = _contain_worker(
