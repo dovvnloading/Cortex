@@ -289,6 +289,22 @@ def test_ensure_ready_starts_and_reuses_the_same_server(tmp_path: Path) -> None:
     assert manager.status.active_backend == "cpu"
 
 
+def test_status_names_a_model_in_a_subfolder_by_its_inventory_id(tmp_path: Path) -> None:
+    """Status used the bare file name, so two models named model.gguf looked the same (#632)."""
+    (tmp_path / "repo-a").mkdir()
+    (tmp_path / "repo-b").mkdir()
+    first = tmp_path / "repo-a" / "model.gguf"
+    second = tmp_path / "repo-b" / "model.gguf"
+    launcher = _QueueLauncher([_FakePopen(), _FakePopen()])
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient())
+
+    manager.ensure_ready(first, num_ctx=4096)
+    assert manager.status.loaded_model == "gguf:repo-a/model.gguf"
+
+    manager.ensure_ready(second, num_ctx=4096)
+    assert manager.status.loaded_model == "gguf:repo-b/model.gguf"
+
+
 def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
     """An explicit CPU/Vulkan preference change must not reuse the old process."""
     first, second, third = _FakePopen(), _FakePopen(), _FakePopen()
