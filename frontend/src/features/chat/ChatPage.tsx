@@ -2,6 +2,7 @@ import { Paperclip } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatAttachment, ChatMessage, ChatResponse } from "../../../../contracts/cortex-api";
 import { ApiError, CortexApi, describeApiError, isDefinitiveRejection } from "../../api/client";
+import { createRequestId } from "../../lib/requestId";
 import { displayChatTitle } from "../../lib/chatTitle";
 import { clearPendingGenerationAdmission, readPendingGenerationAdmission, storePendingGenerationAdmission, type PendingGenerationAdmission } from "../../lib/pendingGenerationAdmission";
 import { describeUnsupportedFiles, splitSupportedFiles } from "../../lib/attachments";
@@ -1203,10 +1204,6 @@ function clearForkRequestId(threadId: string, messageId: string): void {
   } catch {
     // The in-memory ref was cleared already.
   }
-}
-
-function createRequestId(): string {
-  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
 async function fileToBase64(file: File): Promise<string> {

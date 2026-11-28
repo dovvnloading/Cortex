@@ -1,4 +1,5 @@
 import type { ModelDownloadRequest } from "../../../contracts/cortex-api";
+import { createRequestId } from "./requestId";
 
 /**
  * The HTTP 202 for a multi-GB GGUF job can be lost after the backend has
@@ -98,9 +99,7 @@ export function beginGGUFAdmission(
     return pending;
   }
 
-  const requestId = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random()}`;
+  const requestId = createRequestId();
   const admission: PendingGGUFAdmission = {
     payload: { ...request, request_id: requestId },
     selectedChatModelAtStart,
