@@ -947,6 +947,18 @@ class AttachmentBudgetTests(unittest.TestCase):
         for item in fitted:
             self.assertIn("truncated to fit the model context", item.text_content or "")
 
+    def test_two_large_documents_that_fit_the_window_are_kept_whole(self):
+        """#601: the documents together were capped at one maximal document's
+        size, so two that fitted a 65,536-token window easily were both cut and
+        the user was told the window could not hold them."""
+        first = self._document("first", "a" * 96_000)
+        second = self._document("second", "b" * 96_000)
+
+        fitted = SynthesisAgent.fit_attachments_to_context((first, second), num_ctx=65536, **self.BUDGET)
+
+        self.assertEqual(fitted, (first, second))
+        self.assertTrue(self._prompt_fits(fitted, 65536))
+
     def test_a_small_document_keeps_all_its_text_and_the_large_one_gets_the_rest(self):
         small = self._document("small", "short note. " * 50)
         large = self._document("large", "long text. " * 40_000)
