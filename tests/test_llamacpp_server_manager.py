@@ -305,6 +305,26 @@ def test_status_names_a_model_in_a_subfolder_by_its_inventory_id(tmp_path: Path)
     assert manager.status.loaded_model == "gguf:repo-b/model.gguf"
 
 
+def test_status_stops_claiming_ready_once_the_server_has_exited(tmp_path: Path) -> None:
+    """Status reported a resident model until the next chat request noticed the exit (#641)."""
+    process = _FakePopen()
+    launcher = _QueueLauncher([process])
+    manager = _manager(tmp_path, fetcher=_FakeFetcher(), launcher=launcher, http_client=_AlwaysHealthyClient())
+    manager.ensure_ready(tmp_path / "model.gguf", num_ctx=4096)
+    assert manager.status.state == "ready"
+
+    process.exit_code = 3  # the server dies between requests
+
+    status = manager.status
+    assert status.state == "failed"
+    assert status.loaded_model is None
+    assert status.loaded_context is None
+    assert status.gpu_layers_offloaded is None
+    assert "exit code 3" in (status.last_error or "")
+    # Only a report: no restart was attempted and nothing new was launched.
+    assert len(launcher.launch_args) == 1
+
+
 def test_changing_gpu_backend_restarts_a_warm_server(tmp_path: Path) -> None:
     """An explicit CPU/Vulkan preference change must not reuse the old process."""
     first, second, third = _FakePopen(), _FakePopen(), _FakePopen()

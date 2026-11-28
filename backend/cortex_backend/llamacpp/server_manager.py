@@ -949,6 +949,22 @@ class LlamaServerManager:
             gpu_layers = self._gpu_layers if state == "ready" else None
             backend_note = self._backend_note
             context_note = self._context_note
+            # A server that has exited is not ready, whatever was last
+            # published: without this, status kept advertising a resident
+            # model, its context and GPU layers until the next chat request
+            # happened to notice. A non-blocking poll only; nothing is
+            # restarted, probed or recorded here -- the next request still
+            # does the crash accounting.
+            process = self._process
+            exit_code = process.poll() if state == "ready" and process is not None else None
+            if exit_code is not None:
+                state = "failed"
+                loaded_model = None
+                loaded_context = None
+                gpu_layers = None
+                last_error = (
+                    f"The local model runtime exited unexpectedly (exit code {exit_code})."
+                )
         # The expensive parts -- hashing the cached binary directory and a
         # settings read for the models folder -- run outside every lock, so
         # a status poll never stalls behind (or holds up) a model load.
