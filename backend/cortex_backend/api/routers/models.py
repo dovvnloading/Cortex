@@ -44,7 +44,7 @@ from cortex_backend.llamacpp.download import (
     resolve_download_url,
     split_gguf_parts,
 )
-from cortex_backend.services.models import ModelPullProgress
+from cortex_backend.services.models import ModelPullNotInstalled, ModelPullProgress
 from cortex_backend.services import cloud_providers
 from cortex_backend.services.chat_client import CLOUD_PREFIX
 from dataclasses import asdict
@@ -138,7 +138,12 @@ def register(router: APIRouter, *, require_session, dependencies) -> None:
                 cancellation_event=cancel_event,
             )
             if not pulled:
-                return {"cancelled": True, "model": model}
+                if cancel_event.is_set():
+                    return {"cancelled": True, "model": model}
+                # Not stopped, so the pull ran to the end and verification did
+                # not find the exact tag: that is a failed install, not a
+                # cancellation the registry would record as success.
+                raise ModelPullNotInstalled()
             # Installation is complete; inventory refresh is a separate, fallible operation.
             # Do not turn an already-successful pull into a failed job if Ollama
             # briefly refuses the follow-up listing. The client rescans on completion.
