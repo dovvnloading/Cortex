@@ -3795,14 +3795,19 @@ def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
     assert "stale-token" not in url
 
 
-def _held_instance_class(acquired: list[bool], *, existing: object | None):
+def _held_instance_class(
+    acquired: list[bool], *, existing: object | None, published: list[object | None] | None = None
+):
     """An instance lock another process holds; ``acquired`` scripts each attempt.
 
     ``acquired[i]`` says whether attempt ``i`` gets the lock (the last entry
-    repeats), and ``existing`` is the record left by the holder.
+    repeats), and ``existing`` is the record left by the holder. ``published``,
+    when given, scripts what each read of the record finds instead (the last
+    entry repeats), for a holder still publishing it.
     """
     record = SimpleNamespace(pid=1234, port=0)
     attempts: list[int] = []
+    reads: list[int] = []
 
     class HeldInstance:
         def __init__(self, _profile_dir):
@@ -3822,7 +3827,10 @@ def _held_instance_class(acquired: list[bool], *, existing: object | None):
             return record if granted else None
 
         def read_record(self):
-            return existing
+            if published is None:
+                return existing
+            reads.append(1)
+            return published[min(len(reads), len(published)) - 1]
 
         def read_secret(self, _record):
             return "handoff-secret"
@@ -3842,7 +3850,9 @@ def _second_launch(
     alive: list[bool] | None = None,
     acquired: list[bool] | None = None,
     existing: object | None = _FIRST_INSTANCE,
+    published: list[object | None] | None = None,
     wait: float = 5.0,
+    publication_wait: float = 0.05,
 ):
     """Wire a launch that finds another instance already holding the lock.
 
@@ -3853,7 +3863,8 @@ def _second_launch(
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_WAIT_SECONDS", wait)
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_POLL_SECONDS", 0.01)
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_RETRY_SECONDS", 0.001)
-    held = _held_instance_class(acquired or [False], existing=existing)
+    monkeypatch.setattr(launcher_main, "RECORD_PUBLICATION_WAIT_SECONDS", publication_wait)
+    held = _held_instance_class(acquired or [False], existing=existing, published=published)
     fakes = _LaunchFakes(monkeypatch, tmp_path, instance_class=held)
     attempts: list[tuple[int, str]] = []
     liveness = alive or [True]
@@ -3988,6 +3999,47 @@ def test_second_launch_without_a_valid_record_is_still_an_error(
 
     assert attempts == []
     assert fakes.calls == []
+
+
+def test_a_launch_while_the_first_is_still_publishing_its_record_hands_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#663: the lock was held and the record not written yet, and that was
+    reported as a startup failure while the first launch started normally."""
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.ACTIVATED],
+        published=[None, None, _FIRST_INSTANCE],
+        publication_wait=5.0,
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert attempts == [(4321, "Cortex")]
+    assert len(held.attempts) == 3
+    assert fakes.calls == []
+    assert shown == []
+
+
+def test_a_holder_that_dies_before_publishing_lets_the_launch_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        acquired=[False, False, True],
+        existing=None,
+        publication_wait=5.0,
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert attempts == []
+    assert len(held.attempts) == 3
+    assert fakes.calls == ["runtime", "window", "ready", "load_url"]
 
 
 def test_second_headless_launch_reports_the_running_instance_without_waiting(
