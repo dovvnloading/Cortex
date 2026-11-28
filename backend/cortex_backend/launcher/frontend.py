@@ -291,10 +291,19 @@ def _install_cache_root(frontend_root: Path) -> Path:
     return frontend_root / INSTALL_CACHE_DIRNAME
 
 
-# Marks the cache format; a marker without it predates symlink-preserving copies
-# and its tree may hold dereferenced ``.bin`` entries, so it is never a hit.
+# Marks the cache format. A marker without it predates symlink-preserving
+# copies and complete installs: its tree may hold dereferenced ``.bin``
+# entries or lack the devDependencies, so it is never a hit.
 _INSTALL_CACHE_FORMAT = 2
 _PARTIAL_CACHE_PREFIX = ".node_modules-"
+# A source build needs the whole dependency tree: TypeScript and Vite are
+# devDependencies, and Vite's bundler loads its platform binary from an
+# optional one. NODE_ENV=production or an npm "omit" setting in the
+# environment or an .npmrc made a plain "npm ci" install less, and that tree
+# was cached under the lockfile's digest, so every later build reused it and
+# failed even after the setting was gone. Named here, each type is installed
+# whatever the environment says ("include" wins over "omit").
+_COMPLETE_INSTALL_FLAGS = ("--include=dev", "--include=optional", "--include=peer")
 _PARTIAL_CACHE_SUFFIX = ".partial"
 
 
@@ -317,7 +326,7 @@ def _install_if_needed(build_root: Path, expected_lock_digest: str, cache_root: 
             # A cache that cannot be copied is a miss; install from scratch.
             logger.warning("Could not reuse the frontend dependency cache; reinstalling.")
             shutil.rmtree(node_modules, ignore_errors=True)
-    _run([_tool_name("npm"), "ci"], cwd=build_root)
+    _run([_tool_name("npm"), "ci", *_COMPLETE_INSTALL_FLAGS], cwd=build_root)
     _save_install_cache(node_modules, cache_root, expected_lock_digest)
 
 
