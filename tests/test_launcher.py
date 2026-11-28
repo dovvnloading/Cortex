@@ -2110,6 +2110,73 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert second.read_record() is None
 
 
+def _try_to_take_the_lock_when_unlinking(
+    monkeypatch: pytest.MonkeyPatch, watched: Path, contender: InstanceLock, port: int
+) -> list[InstanceRecord | None]:
+    """When ``watched`` is about to be deleted, let ``contender`` try for the lock once.
+
+    That is the moment a launcher started right as the other closed would
+    get its chance; what it got is returned in the list.
+    """
+    attempts: list[InstanceRecord | None] = []
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *args, **kwargs):
+        if not attempts and self == watched:
+            attempts.append(contender.acquire(port=port))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    return attempts
+
+
+def test_releasing_never_deletes_the_record_of_the_launcher_that_comes_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#662: the files were removed after unlocking, so a successor could take
+    the lock and publish in between, and the old instance deleted its files."""
+    closing = InstanceLock(tmp_path)
+    assert closing.acquire(port=8765) is not None
+    successor = InstanceLock(tmp_path)
+    attempts = _try_to_take_the_lock_when_unlinking(monkeypatch, closing.record_path, successor, 8766)
+
+    closing.release()
+    monkeypatch.undo()
+
+    assert attempts == [None], "the lock was given up before this instance's files were removed"
+    record = successor.acquire(port=8766)
+    assert record is not None
+    assert successor.read_record() == record
+    assert successor.read_secret(record)
+    successor.release()
+
+
+def test_a_failed_publication_removes_its_secret_before_giving_up_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    failing = InstanceLock(tmp_path)
+    successor = InstanceLock(tmp_path)
+    real_replace = os.replace
+    refused: list[object] = []
+
+    def refuse_once(source, destination, *args, **kwargs):
+        if not refused and Path(destination) == failing.record_path:
+            refused.append(source)
+            raise PermissionError(errno.EACCES, "held by another program")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(instance_module.os, "replace", refuse_once)
+    attempts = _try_to_take_the_lock_when_unlinking(monkeypatch, failing.secret_path, successor, 8766)
+    with pytest.raises(InstanceLockError, match="publish its instance record"):
+        failing.acquire(port=8765)
+    monkeypatch.undo()
+
+    assert attempts == [None], "the lock was given up before the secret was removed"
+    record = successor.acquire(port=8766)
+    assert record is not None and successor.read_secret(record)
+    successor.release()
+
+
 def test_instance_lock_file_stays_fixed_size_across_recovery(tmp_path: Path):
     lock_path = tmp_path / "cortex.instance.lock"
 
