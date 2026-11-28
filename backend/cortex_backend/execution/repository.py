@@ -1219,6 +1219,10 @@ class ExecutionRepository:
                 raise ApprovalPolicyError("fake.v1 does not require approval.")
             if job["status"] in TerminalExecutionStatus:
                 raise ApprovalTransitionError("Terminal jobs cannot request approval.")
+            if job["status"] == "cancelling":
+                # Stop was pressed before the prompt existed; asking the user
+                # to approve work they already cancelled is never right.
+                raise ApprovalTransitionError("Cancelled jobs cannot request approval.")
             existing = connection.execute(
                 "SELECT state FROM execution_approvals WHERE job_id = ?",
                 (job_id,),
