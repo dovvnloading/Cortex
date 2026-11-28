@@ -98,6 +98,11 @@ def test_stop_keeps_what_was_shown_and_marks_it_stopped():
         # The terminal event names the kept answer, so the client can show it
         # instead of reporting a failure.
         assert events[-1]["data"]["assistant_message_id"] == kept["id"]
+        # So does the status a client reads when its stream dropped (#604): it
+        # used to report result null, and the stopped answer as a failure.
+        status = client.get(f"/api/v1/generations/{job['job_id']}", headers=headers).json()
+        assert status["status"] == "cancelled"
+        assert status["result"] == {"cancelled": True, "assistant_message_id": kept["id"]}
 
         # The job is over, so the chat takes a new turn straight away.
         _start(client, headers, request_id="stop-2", thread_id=job["thread_id"], user_input="go on")
@@ -116,6 +121,8 @@ def test_stop_before_anything_was_shown_keeps_nothing():
         chat = client.get(f"/api/v1/chats/{job['thread_id']}", headers=headers).json()
         assert [message["role"] for message in chat["messages"]] == ["user"]
         assert "assistant_message_id" not in events[-1]["data"]
+        status = client.get(f"/api/v1/generations/{job['job_id']}", headers=headers).json()
+        assert (status["status"], status["result"]) == ("cancelled", None)
 
 
 def test_text_written_after_stop_is_not_kept():
