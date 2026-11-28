@@ -285,6 +285,45 @@ describe("ErrorBoundary", () => {
     expect(await screen.findByText("Copied.")).toBeVisible();
   });
 
+  it("copies its own crash, even after another boundary failed later (#723)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+    stubClipboard(writeText);
+    const view = render(<>
+      <RouteBoundary name="Chat" scope="chat-route" resetKey="a"><BrokenView /></RouteBoundary>
+      <InlineBoundary scope="task-tray" label="Tasks"><Fragile broken={false} /></InlineBoundary>
+    </>);
+    // A widget fails afterwards and takes the session's last-crash slot.
+    view.rerender(<>
+      <RouteBoundary name="Chat" scope="chat-route" resetKey="a"><BrokenView /></RouteBoundary>
+      <InlineBoundary scope="task-tray" label="Tasks"><Fragile broken /></InlineBoundary>
+    </>);
+    expect(readLastCrash()?.scope).toBe("task-tray");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Copy details" }).click();
+    });
+
+    expect(writeText.mock.calls[0][0]).toContain("View: chat-route");
+  });
+
+  it("copies its own crash when session storage cannot keep it (#723)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Storage denied", "SecurityError");
+    });
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+    stubClipboard(writeText);
+    render(<ErrorBoundary scope="workspace"><BrokenView /></ErrorBoundary>);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Copy details" }).click();
+    });
+
+    expect(writeText.mock.calls[0][0]).toContain("View: workspace");
+    expect(writeText.mock.calls[0][0]).not.toContain("No crash details were recorded");
+  });
+
   it("says so when the clipboard refuses", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     stubClipboard(vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new DOMException("Denied", "NotAllowedError")));

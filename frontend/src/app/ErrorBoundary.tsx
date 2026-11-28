@@ -1,9 +1,11 @@
 import { Component, useState, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, Copy, RotateCcw } from "lucide-react";
-import { describeCrash, readLastCrash, recordCrash } from "../lib/crashLog";
+import { describeCrash, readLastCrash, recordCrash, type CrashRecord } from "../lib/crashLog";
 
 type FallbackContext = {
   error: Error;
+  /** The crash this boundary recorded, once it has (null for the first render). */
+  record: CrashRecord | null;
   /** Try the children again. Runs `onReset` first. */
   reset: () => void;
 };
@@ -23,7 +25,10 @@ type Props = {
   /** Runs when the user asks to try again, before the children render again. */
   onReset?: () => void;
 };
-type State = { error: Error | null };
+// The record is kept here, not only in the session's one last-crash slot:
+// another boundary failing later overwrote that slot, so this screen copied
+// someone else's details, and with storage blocked it copied none (#723).
+type State = { error: Error | null; record: CrashRecord | null };
 
 /**
  * Keeps a render crash inside the part of the app that crashed.
@@ -35,14 +40,15 @@ type State = { error: Error | null };
  * error from the screen and nothing else would remember it.
  */
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, record: null };
 
-  static getDerivedStateFromError(error: Error): State {
-    return { error };
+  static getDerivedStateFromError(error: Error): Partial<State> {
+    return { error, record: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     const record = recordCrash(error, info.componentStack, this.props.scope ?? "app");
+    this.setState({ record });
     if (import.meta.env.PROD) {
       // An error's own text comes from running code and can carry anything it
       // was holding, and a console line is what gets copied into reports. A
@@ -62,16 +68,16 @@ export class ErrorBoundary extends Component<Props, State> {
 
   reset = (): void => {
     this.props.onReset?.();
-    this.setState({ error: null });
+    this.setState({ error: null, record: null });
   };
 
   render(): ReactNode {
-    const { error } = this.state;
+    const { error, record } = this.state;
     if (!error) {
       return this.props.children;
     }
     if (this.props.fallback) {
-      return this.props.fallback({ error, reset: this.reset });
+      return this.props.fallback({ error, record, reset: this.reset });
     }
     return (
       <main className="fatal-state" aria-labelledby="fatal-title">
@@ -88,7 +94,7 @@ export class ErrorBoundary extends Component<Props, State> {
             <RotateCcw aria-hidden="true" size={16} />
             Reload workspace
           </button>
-          <CopyCrashDetails />
+          <CopyCrashDetails record={record} />
         </div>
       </main>
     );
@@ -99,11 +105,12 @@ export class ErrorBoundary extends Component<Props, State> {
  * Copies the recorded crash. The clipboard is the only place it goes, and only
  * when the user presses the button.
  */
-function CopyCrashDetails() {
+function CopyCrashDetails({ record }: { record: CrashRecord | null }) {
   const [outcome, setOutcome] = useState<"idle" | "copied" | "failed">("idle");
   const copy = async () => {
-    const record = readLastCrash();
-    const text = record ? describeCrash(record) : "No crash details were recorded for this session.";
+    // This screen's own crash; the session slot only before it is recorded.
+    const shown = record ?? readLastCrash();
+    const text = shown ? describeCrash(shown) : "No crash details were recorded for this session.";
     try {
       await navigator.clipboard.writeText(text);
       setOutcome("copied");
@@ -125,7 +132,7 @@ function CopyCrashDetails() {
 }
 
 /** What a crashed route shows: the shell around it is still there and still works. */
-function RouteCrash({ name, reset }: { name: string; reset: () => void }) {
+function RouteCrash({ name, record, reset }: { name: string; record: CrashRecord | null; reset: () => void }) {
   return (
     <section className="route-error" role="alert" aria-labelledby="route-error-title">
       <AlertTriangle aria-hidden="true" size={24} />
@@ -142,7 +149,7 @@ function RouteCrash({ name, reset }: { name: string; reset: () => void }) {
         <button className="button button-secondary" type="button" onClick={() => window.location.reload()}>
           Reload workspace
         </button>
-        <CopyCrashDetails />
+        <CopyCrashDetails record={record} />
       </div>
     </section>
   );
@@ -167,7 +174,7 @@ export function RouteBoundary({
       scope={scope}
       resetKey={resetKey}
       onReset={onRetry}
-      fallback={({ reset }) => <RouteCrash name={name} reset={reset} />}
+      fallback={({ record, reset }) => <RouteCrash name={name} record={record} reset={reset} />}
     >
       {children}
     </ErrorBoundary>
