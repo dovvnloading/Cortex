@@ -578,7 +578,9 @@ class RecipeExecutionCoordinator:
                     failure_code = "artifact_cleanup_pending"
             self._finish_failure(job_id, cancel_event, failure_code)
         except LeaseConflict:
-            self._fail_recovery(job_id, "lease_unavailable")
+            # Another live coordinator owns this job; this attempt never held
+            # it and must not write a failure over that owner's result.
+            return
         except ExecutionTransitionConflict:
             # Cancellation committed while this attempt was starting, so the
             # store refused the "running" write (see _run_code in
