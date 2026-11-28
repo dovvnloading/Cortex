@@ -113,6 +113,23 @@ cut, `[Unreleased]` becomes `## [<version>] - <date>`.
   (#653; #738).
 - An extended-length local data folder (`\\?\C:\...`) is accepted instead of
   being refused as a network path (#654; #738).
+- A second launch of Cortex no longer deletes the instance record and handoff
+  secret the next launcher has just published: the files are removed while
+  the lock is still held (#662; #739).
+- A launch that finds Cortex still starting up waits up to 10 seconds for
+  it and hands off, instead of failing with an error dialog (#663; #739).
+- The source build's install cache can no longer vouch for a half-copied
+  `node_modules`, keeps the relative links npm puts in `node_modules/.bin`,
+  and always installs the build tools even under `NODE_ENV=production` or an
+  npm `omit` setting. Existing caches are rebuilt once (#664, #665, #670;
+  #739).
+- A changed image or other non-code file under `frontend/src` now triggers a
+  rebuild of the bundle (#667; #739).
+- Raw exception text no longer reaches the console through uvicorn's own log
+  handlers: every one of them redacts (#668; #739).
+- A build killed between its two renames no longer leaves the source launch
+  without a bundle: the newest complete backup is restored first (#669;
+  #739).
 
 ### Security
 

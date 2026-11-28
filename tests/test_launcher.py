@@ -14,6 +14,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -311,6 +312,32 @@ def test_console_launcher_keeps_the_console_and_reaches_uvicorns_own_logger(
     assert "uvicorn record" in text
     assert "root record" in console.getvalue()
     assert "uvicorn record" in console.getvalue()
+
+
+def test_uvicorns_own_console_output_is_redacted_like_the_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#668: uvicorn's console handler wrote the raw exception before the
+    runtime handler's filter ran, so only the file was redacted."""
+    console = io.StringIO()
+    monkeypatch.setattr(launcher_main.sys, "stderr", console)
+    launcher_main._configure_logging(tmp_path, "info")
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43126, log_level="info")
+
+    try:
+        raise RuntimeError("PRIVATE_TEST_MARKER from a request body")
+    except RuntimeError:
+        logging.getLogger("uvicorn.error").error("Exception in ASGI application", exc_info=True)
+    logging.getLogger("uvicorn").warning("token=%s", "sk-live-PRIVATE_TEST_MARKER-0123456789abcdef")
+
+    for output in (console.getvalue(), _runtime_log_text(tmp_path)):
+        assert "Exception in ASGI application" in output
+        assert "RuntimeError" in output
+        assert "PRIVATE_TEST_MARKER" not in output
+    # One copy each: the filter is added once, not once per server built.
+    launcher_main._server_for_app(SimpleNamespace(state=SimpleNamespace()), port=43127, log_level="info")
+    for handler in logging.getLogger("uvicorn").handlers:
+        assert sum(isinstance(item, launcher_main._RedactingFilter) for item in handler.filters) == 1
 
 
 @pytest.mark.parametrize(
@@ -2110,6 +2137,73 @@ def test_instance_lock_prevents_a_second_runtime_and_allows_recovery(tmp_path: P
     assert second.read_record() is None
 
 
+def _try_to_take_the_lock_when_unlinking(
+    monkeypatch: pytest.MonkeyPatch, watched: Path, contender: InstanceLock, port: int
+) -> list[InstanceRecord | None]:
+    """When ``watched`` is about to be deleted, let ``contender`` try for the lock once.
+
+    That is the moment a launcher started right as the other closed would
+    get its chance; what it got is returned in the list.
+    """
+    attempts: list[InstanceRecord | None] = []
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *args, **kwargs):
+        if not attempts and self == watched:
+            attempts.append(contender.acquire(port=port))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    return attempts
+
+
+def test_releasing_never_deletes_the_record_of_the_launcher_that_comes_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#662: the files were removed after unlocking, so a successor could take
+    the lock and publish in between, and the old instance deleted its files."""
+    closing = InstanceLock(tmp_path)
+    assert closing.acquire(port=8765) is not None
+    successor = InstanceLock(tmp_path)
+    attempts = _try_to_take_the_lock_when_unlinking(monkeypatch, closing.record_path, successor, 8766)
+
+    closing.release()
+    monkeypatch.undo()
+
+    assert attempts == [None], "the lock was given up before this instance's files were removed"
+    record = successor.acquire(port=8766)
+    assert record is not None
+    assert successor.read_record() == record
+    assert successor.read_secret(record)
+    successor.release()
+
+
+def test_a_failed_publication_removes_its_secret_before_giving_up_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    failing = InstanceLock(tmp_path)
+    successor = InstanceLock(tmp_path)
+    real_replace = os.replace
+    refused: list[object] = []
+
+    def refuse_once(source, destination, *args, **kwargs):
+        if not refused and Path(destination) == failing.record_path:
+            refused.append(source)
+            raise PermissionError(errno.EACCES, "held by another program")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(instance_module.os, "replace", refuse_once)
+    attempts = _try_to_take_the_lock_when_unlinking(monkeypatch, failing.secret_path, successor, 8766)
+    with pytest.raises(InstanceLockError, match="publish its instance record"):
+        failing.acquire(port=8765)
+    monkeypatch.undo()
+
+    assert attempts == [None], "the lock was given up before the secret was removed"
+    record = successor.acquire(port=8766)
+    assert record is not None and successor.read_secret(record)
+    successor.release()
+
+
 def test_instance_lock_file_stays_fixed_size_across_recovery(tmp_path: Path):
     lock_path = tmp_path / "cortex.instance.lock"
 
@@ -2227,6 +2321,94 @@ def test_instance_lock_distinguishes_contention_from_setup_failure(
     recovered = InstanceLock(tmp_path)
     assert recovered.acquire(port=8767) is not None, "a failed acquire kept the lock"
     recovered.release()
+
+
+@pytest.mark.parametrize(
+    "asset",
+    ("features/shell/archive-aperture.webp", "assets/logo.svg", "fonts/inter.woff2", "data/strings.json"),
+)
+def test_a_changed_imported_asset_invalidates_the_bundle(tmp_path: Path, asset: str):
+    """#667: only .ts, .tsx and .css were hashed, so a stylesheet's image could
+    change and the launcher kept serving the bundle built with the old one."""
+    root = _frontend_fixture(tmp_path)
+    (root / "src" / "styles.css").write_text(f'a {{ background: url("./{asset}"); }}', encoding="utf-8")
+    imported = root / "src" / asset
+    imported.parent.mkdir(parents=True, exist_ok=True)
+    imported.write_bytes(b"first version")
+    before = frontend_module.source_digest(root)
+
+    imported.write_bytes(b"second version")
+
+    assert frontend_module.source_digest(root) != before
+
+
+def _set_aside_bundle(root: Path, name: str, content: str | None, *, age: float = 0.0) -> Path:
+    """A bundle as a publication leaves it: renamed out of dist, maybe never put back."""
+    backup = root / f".cortex-dist-backup-{name}"
+    backup.mkdir()
+    if content is not None:
+        (backup / "index.html").write_text(content, encoding="utf-8")
+    stamp = time.time() - age
+    os.utime(backup, (stamp, stamp))
+    return backup
+
+
+def test_a_bundle_stranded_by_an_interrupted_publication_is_restored(tmp_path: Path):
+    """#669: killed between moving dist aside and moving the new bundle in,
+    a build left no dist and --skip-build-check could not start."""
+    root = _frontend_fixture(tmp_path)
+    backup = _set_aside_bundle(root, "a" * 32, "last working bundle")
+
+    dist = frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (dist / "index.html").read_text(encoding="utf-8") == "last working bundle"
+    assert not backup.exists()
+
+
+def test_leftover_bundles_are_removed_once_a_working_dist_is_in_place(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    (root / "dist").mkdir()
+    (root / "dist" / "index.html").write_text("current", encoding="utf-8")
+    leftover = _set_aside_bundle(root, "b" * 32, "older")
+
+    frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (root / "dist" / "index.html").read_text(encoding="utf-8") == "current"
+    assert not leftover.exists()
+
+
+def test_the_newest_complete_bundle_is_the_one_restored(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    _set_aside_bundle(root, "c" * 32, "oldest", age=300)
+    _set_aside_bundle(root, "d" * 32, None, age=0)  # newest, but never completed
+    _set_aside_bundle(root, "e" * 32, "newest complete", age=60)
+
+    dist = frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert (dist / "index.html").read_text(encoding="utf-8") == "newest complete"
+    assert not list(root.glob(".cortex-dist-backup-*"))
+
+
+def test_an_incomplete_bundle_is_never_made_the_live_one(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    incomplete = _set_aside_bundle(root, "f" * 32, None)
+
+    with pytest.raises(FrontendBuildError, match="frontend/dist is missing"):
+        frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert incomplete.exists(), "a bundle set aside is kept while there is no working dist"
+    assert not (root / "dist").exists()
+
+
+def test_a_build_in_progress_is_left_to_finish_its_own_publication(tmp_path: Path):
+    root = _frontend_fixture(tmp_path)
+    in_flight = _set_aside_bundle(root, "0" * 32, "being replaced right now")
+
+    with frontend_module._frontend_build_lock(root):
+        with pytest.raises(FrontendBuildError, match="frontend/dist is missing"):
+            frontend_module.ensure_frontend(root, skip_check=True)
+
+    assert in_flight.exists()
 
 
 def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -2505,6 +2687,179 @@ def test_stale_staging_directory_removal_failure_is_logged_not_raised(
     assert "Could not remove stale frontend build directory" in caplog.text
 
 
+def _write_install_marker(cache_root: Path, digest: str) -> None:
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"format": frontend_module._INSTALL_CACHE_FORMAT, "lock_digest": digest}),
+        encoding="utf-8",
+    )
+
+
+def _cache_with(cache_root: Path, digest: str, content: str) -> None:
+    cached_modules = cache_root / "node_modules"
+    cached_modules.mkdir(parents=True)
+    (cached_modules / "package.json").write_text(content, encoding="utf-8")
+    _write_install_marker(cache_root, digest)
+
+
+def _recording_npm_ci(monkeypatch: pytest.MonkeyPatch, content: str) -> list[Path]:
+    calls: list[Path] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        calls.append(cwd)
+        node_modules = cwd / "node_modules"
+        node_modules.mkdir(parents=True)
+        (node_modules / "package.json").write_text(content, encoding="utf-8")
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+    return calls
+
+
+def _fresh_build_root(tmp_path: Path, name: str) -> Path:
+    root = tmp_path / name
+    root.mkdir()
+    return root
+
+
+def test_a_cache_refresh_that_fails_mid_copy_is_never_a_hit_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#664: the old marker survived a failed copy and vouched for a partial tree."""
+    cache_root = tmp_path / "cache"
+    _cache_with(cache_root, "lock-a", '{"a": true}')
+    calls = _recording_npm_ci(monkeypatch, '{"b": true}')
+    real_copytree = shutil.copytree
+
+    def copy_partway(source, destination, *args, **kwargs):
+        if Path(source).parent.name.startswith("build"):
+            Path(destination).mkdir(parents=True)
+            (Path(destination) / "half.txt").write_text("partial", encoding="utf-8")
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(frontend_module.shutil, "copytree", copy_partway)
+    build_b = _fresh_build_root(tmp_path, "build-b")
+    frontend_module._install_if_needed(build_b, "lock-b", cache_root)
+    monkeypatch.setattr(frontend_module.shutil, "copytree", real_copytree)
+
+    # The build itself still has its dependencies; only the cache was not saved.
+    assert (build_b / "node_modules" / "package.json").read_text(encoding="utf-8") == '{"b": true}'
+    assert not (cache_root / frontend_module.INSTALL_MANIFEST_NAME).exists()
+    assert [entry.name for entry in cache_root.iterdir()] == ["node_modules"]
+
+    # Back on the first lockfile: whatever the cache holds is not trusted.
+    calls.clear()
+    build_a = _fresh_build_root(tmp_path, "build-a")
+    frontend_module._install_if_needed(build_a, "lock-a", cache_root)
+    assert calls == [build_a], "a cache without a marker for its tree was reused"
+
+
+def test_a_refresh_interrupted_before_its_marker_is_written_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The new tree in place under the old marker gave lockfile A lockfile B's tree."""
+    cache_root = tmp_path / "cache"
+    _cache_with(cache_root, "lock-a", '{"a": true}')
+    calls = _recording_npm_ci(monkeypatch, '{"b": true}')
+    real_replace = os.replace
+    marker = cache_root / frontend_module.INSTALL_MANIFEST_NAME
+
+    def refuse_marker(source, destination, *args, **kwargs):
+        if Path(destination) == marker:
+            raise PermissionError(errno.EACCES, "held by another program")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(frontend_module.os, "replace", refuse_marker)
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build-b"), "lock-b", cache_root)
+    monkeypatch.setattr(frontend_module.os, "replace", real_replace)
+
+    assert not marker.exists()
+    assert not list(cache_root.glob("*.tmp"))
+    calls.clear()
+    build_a = _fresh_build_root(tmp_path, "build-a")
+    frontend_module._install_if_needed(build_a, "lock-a", cache_root)
+    assert calls == [build_a]
+    assert (build_a / "node_modules" / "package.json").read_text(encoding="utf-8") == '{"b": true}'
+
+
+def test_a_marker_from_before_the_cache_format_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Its tree may hold ``.bin`` links copied as files (#665), so it is rebuilt once."""
+    cache_root = tmp_path / "cache"
+    (cache_root / "node_modules").mkdir(parents=True)
+    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
+        json.dumps({"lock_digest": "lock-a"}), encoding="utf-8"
+    )
+    calls = _recording_npm_ci(monkeypatch, '{"fresh": true}')
+    build = _fresh_build_root(tmp_path, "build")
+
+    frontend_module._install_if_needed(build, "lock-a", cache_root)
+
+    assert calls == [build]
+    stored = json.loads((cache_root / frontend_module.INSTALL_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert stored == {"format": frontend_module._INSTALL_CACHE_FORMAT, "lock_digest": "lock-a"}
+
+
+def test_a_source_build_installs_every_dependency_type_whatever_the_environment_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#670: NODE_ENV=production made npm ci leave out TypeScript and Vite, and
+    that tree was cached under the lockfile's digest, so every later build
+    reused it and failed even after the setting was gone."""
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("NPM_CONFIG_OMIT", "dev optional peer")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        commands.append(command)
+        (cwd / "node_modules").mkdir()
+
+    monkeypatch.setattr(frontend_module, "_run", fake_run)
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build"), "lock", tmp_path / "cache")
+
+    (command,) = commands
+    assert command[1] == "ci"
+    assert {"--include=dev", "--include=optional", "--include=peer"} <= set(command[2:])
+
+
+def test_the_install_cache_keeps_npm_bin_links_as_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#665: .bin/tsc was copied as the file it points to, so its relative
+    imports resolved against .bin and every cached build failed."""
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to("elsewhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+    probe.unlink()
+    link_target = os.path.join("..", "typescript", "bin", "tsc")
+
+    def fake_npm_ci(command: list[str], *, cwd: Path) -> None:
+        tsc = cwd / "node_modules" / "typescript" / "bin" / "tsc"
+        tsc.parent.mkdir(parents=True)
+        tsc.write_text("require('../lib/tsc.js')", encoding="utf-8")
+        bin_dir = cwd / "node_modules" / ".bin"
+        bin_dir.mkdir()
+        (bin_dir / "tsc").symlink_to(link_target)
+
+    monkeypatch.setattr(frontend_module, "_run", fake_npm_ci)
+    cache_root = tmp_path / "cache"
+    frontend_module._install_if_needed(_fresh_build_root(tmp_path, "build-1"), "lock", cache_root)
+
+    def no_npm(*_args, **_kwargs):
+        pytest.fail("npm ci should not run on a cache hit")
+
+    monkeypatch.setattr(frontend_module, "_run", no_npm)
+    second = _fresh_build_root(tmp_path, "build-2")
+    frontend_module._install_if_needed(second, "lock", cache_root)
+
+    for tsc in (cache_root / "node_modules" / ".bin" / "tsc", second / "node_modules" / ".bin" / "tsc"):
+        assert tsc.is_symlink(), f"{tsc} was copied as a file"
+        assert os.readlink(tsc) == link_target
+        assert tsc.read_text(encoding="utf-8") == "require('../lib/tsc.js')"
+
+
 def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2514,9 +2869,7 @@ def test_install_cache_hit_skips_npm_ci_for_unchanged_lockfile(
     cached_modules = cache_root / "node_modules"
     cached_modules.mkdir(parents=True)
     (cached_modules / "package.json").write_text("{}", encoding="utf-8")
-    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
-        json.dumps({"lock_digest": "abc123"}), encoding="utf-8"
-    )
+    _write_install_marker(cache_root, "abc123")
 
     def fail_run(*_args, **_kwargs):
         pytest.fail("npm ci should not run on a cache hit")
@@ -2537,9 +2890,7 @@ def test_install_cache_miss_runs_npm_ci_when_lockfile_changes(
     cached_modules = cache_root / "node_modules"
     cached_modules.mkdir(parents=True)
     (cached_modules / "package.json").write_text('{"old": true}', encoding="utf-8")
-    (cache_root / frontend_module.INSTALL_MANIFEST_NAME).write_text(
-        json.dumps({"lock_digest": "old-digest"}), encoding="utf-8"
-    )
+    _write_install_marker(cache_root, "old-digest")
 
     calls: list[Path] = []
 
@@ -3728,14 +4079,19 @@ def test_desktop_url_uses_a_freshly_issued_bootstrap_token(
     assert "stale-token" not in url
 
 
-def _held_instance_class(acquired: list[bool], *, existing: object | None):
+def _held_instance_class(
+    acquired: list[bool], *, existing: object | None, published: list[object | None] | None = None
+):
     """An instance lock another process holds; ``acquired`` scripts each attempt.
 
     ``acquired[i]`` says whether attempt ``i`` gets the lock (the last entry
-    repeats), and ``existing`` is the record left by the holder.
+    repeats), and ``existing`` is the record left by the holder. ``published``,
+    when given, scripts what each read of the record finds instead (the last
+    entry repeats), for a holder still publishing it.
     """
     record = SimpleNamespace(pid=1234, port=0)
     attempts: list[int] = []
+    reads: list[int] = []
 
     class HeldInstance:
         def __init__(self, _profile_dir):
@@ -3755,7 +4111,10 @@ def _held_instance_class(acquired: list[bool], *, existing: object | None):
             return record if granted else None
 
         def read_record(self):
-            return existing
+            if published is None:
+                return existing
+            reads.append(1)
+            return published[min(len(reads), len(published)) - 1]
 
         def read_secret(self, _record):
             return "handoff-secret"
@@ -3775,7 +4134,9 @@ def _second_launch(
     alive: list[bool] | None = None,
     acquired: list[bool] | None = None,
     existing: object | None = _FIRST_INSTANCE,
+    published: list[object | None] | None = None,
     wait: float = 5.0,
+    publication_wait: float = 0.05,
 ):
     """Wire a launch that finds another instance already holding the lock.
 
@@ -3786,7 +4147,8 @@ def _second_launch(
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_WAIT_SECONDS", wait)
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_POLL_SECONDS", 0.01)
     monkeypatch.setattr(launcher_main, "SECOND_LAUNCH_RETRY_SECONDS", 0.001)
-    held = _held_instance_class(acquired or [False], existing=existing)
+    monkeypatch.setattr(launcher_main, "RECORD_PUBLICATION_WAIT_SECONDS", publication_wait)
+    held = _held_instance_class(acquired or [False], existing=existing, published=published)
     fakes = _LaunchFakes(monkeypatch, tmp_path, instance_class=held)
     attempts: list[tuple[int, str]] = []
     liveness = alive or [True]
@@ -3921,6 +4283,47 @@ def test_second_launch_without_a_valid_record_is_still_an_error(
 
     assert attempts == []
     assert fakes.calls == []
+
+
+def test_a_launch_while_the_first_is_still_publishing_its_record_hands_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#663: the lock was held and the record not written yet, and that was
+    reported as a startup failure while the first launch started normally."""
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.ACTIVATED],
+        published=[None, None, _FIRST_INSTANCE],
+        publication_wait=5.0,
+    )
+    shown = _record_startup_dialogs(monkeypatch, tmp_path)
+
+    assert launcher_main.main(["--data-dir", str(tmp_path)]) == 0
+
+    assert attempts == [(4321, "Cortex")]
+    assert len(held.attempts) == 3
+    assert fakes.calls == []
+    assert shown == []
+
+
+def test_a_holder_that_dies_before_publishing_lets_the_launch_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fakes, attempts, held = _second_launch(
+        monkeypatch,
+        tmp_path,
+        activations=[WindowActivation.NO_WINDOW],
+        acquired=[False, False, True],
+        existing=None,
+        publication_wait=5.0,
+    )
+
+    assert launcher_main._run_web(_launch_args(tmp_path)) == 0
+
+    assert attempts == []
+    assert len(held.attempts) == 3
+    assert fakes.calls == ["runtime", "window", "ready", "load_url"]
 
 
 def test_second_headless_launch_reports_the_running_instance_without_waiting(
