@@ -1351,3 +1351,28 @@ def test_free_pages_are_left_alone_when_the_startup_backup_failed(
     # The next launch, with a backup, does it.
     DatabaseManager(db_path=db_path, legacy_history_dir=legacy_dir)
     assert _space_facts(db_path)["free_pages"] == 0
+
+
+def test_a_primary_truncated_to_zero_bytes_is_recovered_not_trusted(tmp_path: Path) -> None:
+    """SQLite opens an empty file as a healthy empty database (#636).
+
+    The truncated primary was kept, backed up, and pushed the real backups out.
+    """
+    manager, original = _manager_with_data(tmp_path)
+    backup_before = Path(manager.backup_path).read_bytes()
+    for suffix in ("-wal", "-shm"):
+        Path(manager.db_path + suffix).unlink(missing_ok=True)
+    Path(manager.db_path).write_bytes(b"")
+
+    recovered = DatabaseManager(db_path=manager.db_path, legacy_history_dir=manager.legacy_history_dir)
+
+    assert recovered.load_chat("thread-1") == original
+    assert Path(manager.backup_path).read_bytes() == backup_before
+
+
+def test_an_empty_file_is_never_a_valid_database_or_backup(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.sqlite"
+    empty.write_bytes(b"")
+
+    assert DatabaseManager._database_is_valid(str(empty)) is False
+    assert DatabaseManager._database_is_valid(str(empty), quick=True) is False

@@ -25,6 +25,7 @@ from .sqlite_backup import (
     adopt_orphaned_sidecars,
     failure_detail,
     find_interrupted_recovery,
+    has_sqlite_header,
     move_sidecars,
     put_sidecars_back,
     replace_with_retry,
@@ -330,6 +331,9 @@ class SQLiteSettingsRepository:
     @staticmethod
     def _database_is_valid(path: Path) -> bool:
         """Return whether an existing SQLite file can be opened and checked."""
+        if not has_sqlite_header(path):
+            # An empty file passes SQLite's checks as an empty database.
+            return False
         connection: sqlite3.Connection | None = None
         try:
             # Read-only mode is important here: validation must not create or
