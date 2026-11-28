@@ -2297,6 +2297,25 @@ def test_instance_lock_distinguishes_contention_from_setup_failure(
     recovered.release()
 
 
+@pytest.mark.parametrize(
+    "asset",
+    ("features/shell/archive-aperture.webp", "assets/logo.svg", "fonts/inter.woff2", "data/strings.json"),
+)
+def test_a_changed_imported_asset_invalidates_the_bundle(tmp_path: Path, asset: str):
+    """#667: only .ts, .tsx and .css were hashed, so a stylesheet's image could
+    change and the launcher kept serving the bundle built with the old one."""
+    root = _frontend_fixture(tmp_path)
+    (root / "src" / "styles.css").write_text(f'a {{ background: url("./{asset}"); }}', encoding="utf-8")
+    imported = root / "src" / asset
+    imported.parent.mkdir(parents=True, exist_ok=True)
+    imported.write_bytes(b"first version")
+    before = frontend_module.source_digest(root)
+
+    imported.write_bytes(b"second version")
+
+    assert frontend_module.source_digest(root) != before
+
+
 def test_frontend_manifest_detects_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _frontend_fixture(tmp_path)
     monkeypatch.setattr(frontend_module, "_major_version", lambda command: 24 if command == "node" else 11)
